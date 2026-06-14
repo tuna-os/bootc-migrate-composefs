@@ -276,15 +276,35 @@ pub fn run_migration(report: &PreflightReport, target_image: &str) -> Result<()>
             );
             fs::write(entry_path, entry_content)?;
             
-            // Set the new entry as default using GRUB environment block
-            // (skip grub2-mkconfig which fails on composefs= kernel options)
+            // Set the new entry as default via grubenv (skip grub2-mkconfig which
+            // fails on composefs= kernel options). grubenv is a 1024-byte block
+            // with a specific format — must use grub2-editenv, not raw writes.
             let entry_id = format!("bootc_bluefin_dakota-{}", verity_hash);
-            let _ = Command::new("grub2-set-default")
-                .arg(&entry_id)
+            let grubenv = "/boot/grub2/grubenv";
+            let ee = Command::new("grub2-editenv")
+                .args([grubenv, "set", &format!("saved_entry={}", entry_id)])
                 .status();
-            // Also try setting via savedefault
-            let saved_entry = format!("saved_entry={}\n", entry_id);
-            let _ = fs::write("/boot/grub2/grubenv", saved_entry.as_bytes());
+            if !matches!(ee, Ok(s) if s.success()) {
+                let _ = Command::new("grub2-set-default").arg(&entry_id).status();
+            }
+            // Ensure GRUB_DEFAULT=saved so saved_entry is actually consulted
+            if let Ok(cfg) = fs::read_to_string("/etc/default/grub") {
+                let mut new_cfg = String::new();
+                let mut found = false;
+                for line in cfg.lines() {
+                    if line.starts_with("GRUB_DEFAULT=") {
+                        new_cfg.push_str("GRUB_DEFAULT=saved\n");
+                        found = true;
+                    } else {
+                        new_cfg.push_str(line);
+                        new_cfg.push('\n');
+                    }
+                }
+                if !found {
+                    new_cfg.push_str("GRUB_DEFAULT=saved\n");
+                }
+                let _ = fs::write("/etc/default/grub", new_cfg);
+            }
         }
         
         Ok(())

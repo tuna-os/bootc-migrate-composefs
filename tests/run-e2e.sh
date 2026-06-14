@@ -257,7 +257,33 @@ echo "=== Running migration inside VM ==="
 ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs --target-image $TARGET_IMAGE --force"
 
 echo "=== Verifying migration artifacts before reboot ==="
-ssh $SSH_OPTS root@localhost "echo '--- Deployments ---' && ls -la /sysroot/state/deploy/ && echo '--- BLS entries ---' && ls -la /boot/loader/entries/ && echo '--- Boot dirs ---' && ls -la /boot/bootc_composefs-*/ 2>/dev/null || echo 'No bootc_composefs dirs found' && echo '--- ComposeFS images ---' && ls -la /sysroot/composefs/images/ 2>/dev/null || echo 'No composefs images'"
+ssh $SSH_OPTS root@localhost bash <<'DIAG'
+set +e
+echo '--- Deployments ---'
+ls -la /sysroot/state/deploy/
+echo '--- BLS entries (list) ---'
+ls -la /boot/loader/entries/
+echo '--- BLS entry contents ---'
+for f in /boot/loader/entries/*.conf; do
+    echo ">>> $f"
+    cat "$f"
+    echo
+done
+echo '--- Boot dirs ---'
+ls -la /boot/bootc_composefs-*/ 2>/dev/null || echo 'No bootc_composefs dirs found'
+echo '--- ComposeFS images ---'
+ls -la /sysroot/composefs/images/ 2>/dev/null || echo 'No composefs images'
+echo '--- /etc/default/grub ---'
+cat /etc/default/grub 2>/dev/null || echo 'missing'
+echo '--- grubenv (grub2-editenv list) ---'
+grub2-editenv /boot/grub2/grubenv list 2>/dev/null || echo 'grub2-editenv failed'
+echo '--- grub.cfg blscfg references ---'
+grep -nE 'blscfg|blsdir|saved_entry|default=' /boot/grub2/grub.cfg 2>/dev/null | head -40 || echo 'no grub.cfg'
+echo '--- grub.cfg head ---'
+head -60 /boot/grub2/grub.cfg 2>/dev/null || echo 'no grub.cfg'
+echo '--- efibootmgr ---'
+efibootmgr -v 2>/dev/null || echo 'no efibootmgr'
+DIAG
 
 echo "=== Rebooting VM ==="
 ssh $SSH_OPTS root@localhost "reboot" || true
