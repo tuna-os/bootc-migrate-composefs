@@ -186,7 +186,7 @@ pub fn run_migration(
     let _deploy_dir = phase4_stage_deploy(&verity, target_image, &config_digest, dry_run)?;
 
     // ---- Phase 5: Setup bootloader ----
-    phase5_setup_bootloader(report, &verity, dry_run, bootloader)?;
+    phase5_setup_bootloader(report, &verity, target_image, dry_run, bootloader)?;
 
     println!("\n=== MIGRATION COMPLETED ===");
     println!("Staged ComposeFS deployment: {}", verity.as_hex());
@@ -574,6 +574,7 @@ pub fn mount_image(image_id: &str, mount_path: &Path) -> Result<()> {
 fn phase5_setup_bootloader(
     report: &PreflightReport,
     verity: &VerityDigest,
+    target_image: &str,
     dry_run: bool,
     bootloader: &str,
 ) -> Result<()> {
@@ -666,16 +667,34 @@ fn phase5_setup_bootloader(
         let esp = esp.as_ref().unwrap();
         let esp_path = Path::new(esp);
 
-        match install_systemd_boot_from_target(esp_path, &mount_path) {
+        match install_systemd_boot_from_target(esp_path, &mount_path, target_image) {
             Ok(()) => {
-                // Copy composefs kernel+initrd to ESP.
+                // Copy composefs kernel+initrd to ESP via podman (raw EROFS reads
+                // return zero-filled content past the inline threshold).
                 let boot_dir_name = format!("bootc_composefs-{}", verity.as_hex());
                 let esp_boot_dir = esp_path.join("EFI/Linux").join(&boot_dir_name);
                 fs::create_dir_all(&esp_boot_dir)?;
-                fs::copy(&vmlinuz_src, esp_boot_dir.join("vmlinuz"))?;
+
+                // Translate the discovered host-mount paths back to in-container paths.
+                let rel_vmlinuz = vmlinuz_src
+                    .strip_prefix(&mount_path)
+                    .with_context(|| format!("vmlinuz {:?} not under mount", vmlinuz_src))?;
+                let in_container_vmlinuz = Path::new("/").join(rel_vmlinuz);
+                let esp_vmlinuz = esp_boot_dir.join("vmlinuz");
+
+                let mut extract = vec![(in_container_vmlinuz.as_path(), esp_vmlinuz.as_path())];
+                let in_container_initrd;
+                let esp_initrd;
                 if initrd_src.exists() {
-                    fs::copy(&initrd_src, esp_boot_dir.join("initrd"))?;
+                    let rel_initrd = initrd_src
+                        .strip_prefix(&mount_path)
+                        .with_context(|| format!("initrd {:?} not under mount", initrd_src))?;
+                    in_container_initrd = Path::new("/").join(rel_initrd);
+                    esp_initrd = esp_boot_dir.join("initrd");
+                    extract.push((in_container_initrd.as_path(), esp_initrd.as_path()));
                 }
+                extract_files_via_podman(target_image, &extract)
+                    .context("failed to extract kernel/initrd from target image via podman")?;
 
                 // Build composefs BLS entry.
                 let composefs_entry = bootloader::BlsEntry {
@@ -857,24 +876,98 @@ fn phase5_setup_bootloader(
 /// Copy systemd-boot binaries from the mounted target image to the ESP.
 /// This avoids needing systemd-boot installed in the *source* OS (Bluefin) — we lift
 /// it straight out of the Dakota image that's already mounted for kernel extraction.
-fn install_systemd_boot_from_target(esp_path: &Path, mount_path: &Path) -> Result<()> {
-    let src = mount_path.join("usr/lib/systemd/boot/efi/systemd-bootx64.efi");
-    if !src.exists() {
+/// Extract a list of files from the target OCI image via `podman create` + `podman cp`.
+/// This is the reliable path: the composefs EROFS mount returns zero-filled content for
+/// any file past the inline-data threshold, and `bootc internals cfs oci mount` requires
+/// a stream layout that isn't populated by our pull flow. Podman, having pulled the same
+/// image into its own store, can extract real content via OCI layer unpacking.
+///
+/// `files` is a list of (source-path-inside-container, destination-on-host) pairs.
+/// All destination parent directories must already exist.
+fn extract_files_via_podman(image_ref: &str, files: &[(&Path, &Path)]) -> Result<()> {
+    // Ensure podman has the image. The migration tool already pulled it via bootc into
+    // composefs storage, but podman uses a separate store. The local-registry mirror
+    // used in E2E (and any normal pull) makes this fast; for a regular ghcr.io ref it's
+    // a one-time cost amortised across all extracted files.
+    let pull = Command::new("podman")
+        .args(["pull", "--quiet", image_ref])
+        .status()
+        .context("failed to invoke podman pull for boot-artifact extraction")?;
+    if !pull.success() {
+        return Err(anyhow!("podman pull {} failed", image_ref));
+    }
+
+    let create = Command::new("podman")
+        .args(["create", "--quiet", image_ref])
+        .output()
+        .context("failed to invoke podman create")?;
+    if !create.status.success() {
+        return Err(anyhow!(
+            "podman create failed: {}",
+            String::from_utf8_lossy(&create.stderr).trim()
+        ));
+    }
+    let cid = String::from_utf8_lossy(&create.stdout).trim().to_string();
+
+    let result = (|| -> Result<()> {
+        for (src, dst) in files {
+            let src_str = src.to_str().ok_or_else(|| anyhow!("invalid src path"))?;
+            let dst_str = dst.to_str().ok_or_else(|| anyhow!("invalid dst path"))?;
+            let cp = Command::new("podman")
+                .args(["cp", &format!("{}:{}", cid, src_str), dst_str])
+                .output()
+                .context("failed to invoke podman cp")?;
+            if !cp.status.success() {
+                return Err(anyhow!(
+                    "podman cp {} -> {} failed: {}",
+                    src_str,
+                    dst_str,
+                    String::from_utf8_lossy(&cp.stderr).trim()
+                ));
+            }
+        }
+        Ok(())
+    })();
+
+    // Always clean up the container, even on extraction failure.
+    let _ = Command::new("podman").args(["rm", "-f", &cid]).output();
+
+    result
+}
+
+fn install_systemd_boot_from_target(
+    esp_path: &Path,
+    mount_path: &Path,
+    target_image: &str,
+) -> Result<()> {
+    // Probe via the EROFS mount only to confirm the file exists in the target image
+    // (file listing works fine on raw EROFS; it's the content reads that are corrupt).
+    let probe = mount_path.join("usr/lib/systemd/boot/efi/systemd-bootx64.efi");
+    if !probe.exists() {
         return Err(anyhow!(
             "target image does not ship systemd-boot at /usr/lib/systemd/boot/efi/systemd-bootx64.efi"
         ));
     }
 
-    // Primary loader path systemd-boot itself uses.
     let sd_dir = esp_path.join("EFI/systemd");
     fs::create_dir_all(&sd_dir)?;
-    fs::copy(&src, sd_dir.join("systemd-bootx64.efi"))
-        .context("failed to install systemd-bootx64.efi to ESP")?;
-
     // Removable-media fallback path so the firmware will boot it even if NVRAM is wiped.
     let removable_dir = esp_path.join("EFI/BOOT");
     fs::create_dir_all(&removable_dir)?;
-    fs::copy(&src, removable_dir.join("BOOTX64.EFI"))
+
+    let sd_dst = sd_dir.join("systemd-bootx64.efi");
+    extract_files_via_podman(
+        target_image,
+        &[(
+            Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
+            &sd_dst,
+        )],
+    )
+    .context("failed to extract systemd-bootx64.efi from target image via podman")?;
+
+    // Mirror to removable-media path. Local copy of the freshly-extracted (real) bytes
+    // is safe — no EROFS in the read path.
+    fs::copy(&sd_dst, removable_dir.join("BOOTX64.EFI"))
         .context("failed to install BOOTX64.EFI removable-media loader")?;
 
     Ok(())
