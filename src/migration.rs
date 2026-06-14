@@ -287,23 +287,41 @@ pub fn run_migration(report: &PreflightReport, target_image: &str) -> Result<()>
             if !matches!(ee, Ok(s) if s.success()) {
                 let _ = Command::new("grub2-set-default").arg(&entry_id).status();
             }
-            // Ensure GRUB_DEFAULT=saved so saved_entry is actually consulted
-            if let Ok(cfg) = fs::read_to_string("/etc/default/grub") {
-                let mut new_cfg = String::new();
-                let mut found = false;
-                for line in cfg.lines() {
-                    if line.starts_with("GRUB_DEFAULT=") {
-                        new_cfg.push_str("GRUB_DEFAULT=saved\n");
-                        found = true;
-                    } else {
-                        new_cfg.push_str(line);
-                        new_cfg.push('\n');
+            // Ensure GRUB_DEFAULT=saved (create the file if it's absent, as on
+            // coreos/bootc images where bootupd ships a minimal grub.cfg only).
+            let grub_defaults_path = "/etc/default/grub";
+            let existing = fs::read_to_string(grub_defaults_path).unwrap_or_default();
+            let mut new_cfg = String::new();
+            let mut found = false;
+            for line in existing.lines() {
+                if line.starts_with("GRUB_DEFAULT=") {
+                    new_cfg.push_str("GRUB_DEFAULT=saved\n");
+                    found = true;
+                } else {
+                    new_cfg.push_str(line);
+                    new_cfg.push('\n');
+                }
+            }
+            if !found {
+                new_cfg.push_str("GRUB_DEFAULT=saved\n");
+            }
+            let _ = fs::write(grub_defaults_path, new_cfg);
+
+            // The bootupd/coreos-style grub.cfg loads grubenv but never sets
+            // default from saved_entry, so blscfg picks its own default. Inject
+            // `set default="${saved_entry}"` right before the `blscfg` command
+            // (idempotent: skip if already present).
+            let grub_cfg_path = "/boot/grub2/grub.cfg";
+            if let Ok(cfg) = fs::read_to_string(grub_cfg_path) {
+                if !cfg.contains("set default=\"${saved_entry}\"") {
+                    let patched = cfg.replace(
+                        "\nblscfg\n",
+                        "\nset default=\"${saved_entry}\"\nblscfg\n",
+                    );
+                    if patched != cfg {
+                        let _ = fs::write(grub_cfg_path, patched);
                     }
                 }
-                if !found {
-                    new_cfg.push_str("GRUB_DEFAULT=saved\n");
-                }
-                let _ = fs::write("/etc/default/grub", new_cfg);
             }
         }
         
