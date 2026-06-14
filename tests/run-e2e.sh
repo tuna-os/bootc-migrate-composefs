@@ -422,7 +422,13 @@ if [ ! -f "$OVMF_VARS" ] || [ "$SKIP_SETUP" = false ]; then
 fi
 
 # Run QEMU in the background
+# q35 + a writable VARS pflash is required for OVMF NV-variable persistence.
+# On the default `pc` machine OVMF treats variable updates as volatile and
+# never writes them through to the host file — BootOrder changes from inside
+# the VM then vanish on reboot. q35 also matches what modern OVMF builds
+# target (the brew-packaged CODE assumes q35-class chipset).
 qemu-system-x86_64 \
+    -machine q35 \
     -m 4096 \
     -smp 2 \
     -nographic \
