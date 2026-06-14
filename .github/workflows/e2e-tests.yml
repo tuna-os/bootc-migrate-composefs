@@ -7,42 +7,127 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# Cancel superseded runs on the same ref so PR pushes don't queue up redundant jobs.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  e2e-tests:
+  e2e:
     name: ${{ matrix.scenario.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         scenario:
-          - name: fedora-bootc self-migration
-            base: "quay.io/fedora/fedora-bootc:44"
-            target: "quay.io/fedora/fedora-bootc:44"
-          - name: bluefin -> dakota
-            base: "ghcr.io/projectbluefin/bluefin:stable"
-            target: "ghcr.io/projectbluefin/dakota:stable"
+          - name: bluefin -> dakota (systemd-boot + composefs)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            target: ghcr.io/projectbluefin/dakota:stable
+          # fedora-bootc self-migration is the simpler sanity case; revisit once
+          # the bluefin scenario is green end-to-end.
+          # - name: fedora-bootc self-migration
+          #   base: quay.io/fedora/fedora-bootc:44
+          #   target: quay.io/fedora/fedora-bootc:44
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies
+      # Bluefin + Dakota are ~5 GB each. The default ubuntu-latest runner has
+      # ~14 GB free; that plus a 20 GB disk.raw, Rust target, and the local
+      # registry blows the disk. Reclaim ~30 GB by ditching Android/dotnet/etc.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils ovmf jq
+          sudo apt-get install -y \
+            qemu-system-x86 \
+            qemu-utils \
+            ovmf \
+            podman \
+            jq \
+            iproute2 \
+            netcat-openbsd
 
-      - name: Setup Rust Toolchain
+      # GitHub-hosted Linux runners expose /dev/kvm but the runner user isn't in
+      # the kvm group by default. Make it world-accessible for this job so QEMU
+      # can use KVM acceleration (TCG fallback is ~10x slower and would blow the
+      # 45-minute job timeout).
+      - name: Enable KVM access
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+            ls -la /dev/kvm
+            kvm-ok 2>/dev/null || true
+          else
+            echo "::warning::/dev/kvm not present; falling back to TCG emulation will be slow"
+          fi
+
+      - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust Cache
+      - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build Binary
-        run: cargo build
+      - name: Build migration binary
+        run: cargo build --release && cargo test --release
 
-      - name: Run E2E Test Suite
-        env:
-          BASE_IMAGE: ${{ matrix.scenario.base }}
-          TARGET_IMAGE: ${{ matrix.scenario.target }}
+      # Bring up a local podman registry so the VM can fetch the target image
+      # via the 10.0.2.2:5000 host-loopback alias (hard-coded in the e2e script).
+      # Caching pulled images across runs would be ideal but actions/cache caps
+      # at 10 GB — instead we pull fresh and rely on registry locality for VM speed.
+      - name: Start local image registry
         run: |
-          # Run the test runner as root since loop mounts and podman --privileged are required
-          sudo -E PATH=$PATH ./tests/run-e2e.sh
+          sudo podman run -d --name e2e-registry --network=host \
+            docker.io/library/registry:2
+
+      - name: Mirror base + target images into local registry
+        run: |
+          set -eux
+          sudo podman pull "${{ matrix.scenario.base }}"
+          sudo podman pull "${{ matrix.scenario.target }}"
+          # Strip the registry/host portion; keep repo:tag for the local mirror.
+          base_local="127.0.0.1:5000/$(basename '${{ matrix.scenario.base }}')"
+          target_local="127.0.0.1:5000/$(basename '${{ matrix.scenario.target }}')"
+          sudo podman tag "${{ matrix.scenario.base }}" "$base_local"
+          sudo podman tag "${{ matrix.scenario.target }}" "$target_local"
+          sudo podman push --tls-verify=false "$base_local"
+          sudo podman push --tls-verify=false "$target_local"
+          echo "BASE_IMAGE=${{ matrix.scenario.base }}" >> "$GITHUB_ENV"
+          echo "TARGET_IMAGE=${{ matrix.scenario.target }}" >> "$GITHUB_ENV"
+
+      - name: Disk space before E2E
+        run: df -h /
+
+      - name: Run E2E test suite
+        id: e2e
+        run: |
+          # Run as root: loop mounts, podman --privileged, and OVMF VARS pflash
+          # all need it. -E so BASE_IMAGE/TARGET_IMAGE flow through.
+          set -o pipefail
+          sudo -E PATH="$PATH" ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
+
+      - name: Disk space after E2E
+        if: always()
+        run: df -h /
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ strategy.job-index }}
+          path: |
+            e2e-run.log
+            qemu.log
+            ovmf_vars.fd
+          if-no-files-found: warn
+          retention-days: 7

@@ -475,8 +475,12 @@ if ! curl -sf http://127.0.0.1:5000/v2/dakota/tags/list 2>/dev/null | grep -q st
     echo "ERROR: dakota image not in local registry. Run: sudo podman tag ghcr.io/projectbluefin/dakota:stable 127.0.0.1:5000/dakota:stable && sudo podman push --tls-verify=false 127.0.0.1:5000/dakota:stable"
     exit 1
 fi
-# Use local registry (host at 10.0.2.2 from QEMU) for fast VM pulls.
-VM_TARGET_IMAGE="10.0.2.2:5000/dakota:stable"
+# Use local registry (host at 10.0.2.2 from QEMU) for fast VM pulls. Derive the
+# repo:tag from TARGET_IMAGE so CI matrices that test other base/target pairs
+# don't have to patch the script — the local registry already mirrors it by the
+# same path the CI Mirror-images step pushed.
+TARGET_REPO_TAG=$(basename "$TARGET_IMAGE")
+VM_TARGET_IMAGE="10.0.2.2:5000/${TARGET_REPO_TAG}"
 
 step "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/ostree-composefs-rebase root@localhost:/var/tmp/bootc-migrate-composefs
