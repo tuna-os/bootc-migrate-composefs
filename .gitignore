@@ -1,0 +1,10 @@
+# Temp research clones (large)
+/tmp/
+
+# Rust build artifacts  
+target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
