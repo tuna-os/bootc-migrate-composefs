@@ -35,7 +35,8 @@ OVMF_PATH=""
 for path in \
     "/home/linuxbrew/.linuxbrew/share/qemu/edk2-x86_64-code.fd" \
     "/usr/share/OVMF/OVMF_CODE.fd" \
-    "/usr/share/OVMF/OVMF_CODE_4m.fd" \
+    "/usr/share/OVMF/OVMF_CODE_4M.fd" \
+    "/usr/share/ovmf/OVMF.fd" \
     "/usr/share/edk2/ovmf/OVMF_CODE.fd" \
     "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"
 do
