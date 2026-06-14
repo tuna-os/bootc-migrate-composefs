@@ -14,3 +14,4 @@ test_key
 test_key.pub
 disk.raw
 qemu.log
+disk.raw.pre-migration

@@ -23,6 +23,7 @@ pub fn compute_sha512<P: AsRef<Path>>(path: P) -> Result<String> {
 
 pub struct OstreeFileObject {
     pub path: PathBuf,
+    #[allow(dead_code)]
     pub ostree_checksum: String,
 }
 

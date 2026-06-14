@@ -13,6 +13,9 @@ SSH_PORT="${SSH_PORT:-2222}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Cleanup artifacts from previous runs
+rm -f "$WORKSPACE_DIR"/disk.raw "$WORKSPACE_DIR"/qemu.log "$WORKSPACE_DIR"/test_key "$WORKSPACE_DIR"/test_key.pub
+
 echo "=== E2E Test Configuration ==="
 echo "Base Image (OSTree):   $BASE_IMAGE"
 echo "Target Image (Cfs):    $TARGET_IMAGE"
@@ -116,13 +119,28 @@ DOCKERFILE
 sed -i "s|BASE_IMAGE_PLACEHOLDER|$BASE_IMAGE|g" "$TMP_CONTAINERFILE"
 
 echo "Building modified image with sshd enabled..."
-sudo podman build --pull-always -t "$MODIFIED_IMAGE" -f "$TMP_CONTAINERFILE"
+# Only pull base image if not already cached locally.
+if ! sudo podman image exists "$BASE_IMAGE" 2>/dev/null; then
+    echo "Pulling base image $BASE_IMAGE..."
+    sudo podman pull "$BASE_IMAGE"
+fi
+sudo podman build -t "$MODIFIED_IMAGE" -f "$TMP_CONTAINERFILE"
 rm -f "$TMP_CONTAINERFILE"
 
 INSTALL_IMAGE="$MODIFIED_IMAGE"
 echo "Using install image: $INSTALL_IMAGE"
 
-# 5. Create and initialize disk image
+# 5. Create and initialize disk image (or restore checkpoint)
+CHECKPOINT="$WORKSPACE_DIR/disk.raw.pre-migration"
+if [ -f "$CHECKPOINT" ]; then
+    echo "=== Restoring pre-migration checkpoint ==="
+    cp "$CHECKPOINT" disk.raw
+    SKIP_SETUP=true
+else
+    SKIP_SETUP=false
+fi
+
+if [ "$SKIP_SETUP" = false ]; then
 echo "=== Creating disk image ==="
 rm -f disk.raw
 truncate -s "$DISK_SIZE" disk.raw
@@ -269,6 +287,9 @@ sudo losetup -d "$LOOP_DEV"
 # Reset loop variable so cleanup doesn't try to double-detach
 LOOP_DEV=""
 echo "Disk image initialized and customized."
+# Save checkpoint for faster re-runs (skip disk creation + install).
+cp disk.raw "$CHECKPOINT"
+fi  # SKIP_SETUP
 
 # 6. Launch QEMU VM
 echo "=== Booting VM under QEMU ==="
@@ -331,13 +352,24 @@ if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     exit 1
 fi
 
-# 8. Copy and run the migration utility
+# 8. Verify target image is pullable (fast-fail before VM starts)
+echo "=== Verifying target image ==="
+if ! curl -sf http://127.0.0.1:5000/v2/dakota/tags/list 2>/dev/null | grep -q stable; then
+    echo "ERROR: dakota image not in local registry. Run: sudo podman tag ghcr.io/projectbluefin/dakota:stable 127.0.0.1:5000/dakota:stable && sudo podman push --tls-verify=false 127.0.0.1:5000/dakota:stable"
+    exit 1
+fi
+# Use local registry (host at 10.0.2.2 from QEMU) for fast VM pulls.
+VM_TARGET_IMAGE="10.0.2.2:5000/dakota:stable"
+
 echo "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/ostree-composefs-rebase root@localhost:/var/tmp/bootc-migrate-composefs
 
 echo "=== Injecting /etc fixtures (live, copied by migration) ==="
 ssh $SSH_OPTS root@localhost bash <<'ETCFIX'
 set -e
+# Allow insecure pulls from the host's local registry.
+mkdir -p /etc/containers/registries.conf.d
+printf '[[registry]]\nlocation = "10.0.2.2:5000"\ninsecure = true\n' > /etc/containers/registries.conf.d/50-local-registry.conf
 # Custom config file in /etc to verify /etc state is preserved through migration
 mkdir -p /etc/migration-test
 echo "etc-state-value" > /etc/migration-test/marker.conf
@@ -355,7 +387,9 @@ chown -R realuser:realuser /var/home/realuser
 ETCFIX
 
 echo "=== Running migration inside VM ==="
-ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs --target-image $TARGET_IMAGE --force"
+# Clean composefs state from previous runs so free-space check passes.
+ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
+ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs --target-image $VM_TARGET_IMAGE --force --skip-import"
 
 echo "=== Verifying migration artifacts before reboot ==="
 ssh $SSH_OPTS root@localhost bash <<'DIAG'

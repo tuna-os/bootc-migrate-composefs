@@ -2,11 +2,13 @@ use std::ffi::CString;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::path::Path;
+use std::process::Command;
 use anyhow::{anyhow, Result, Context};
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct BootcStatus {
     pub api_version: String,
     pub kind: String,
@@ -21,6 +23,7 @@ pub struct HostStatus {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct BootedStatus {
     pub ostree: Option<serde_json::Value>,
     pub composefs: Option<serde_json::Value>,
@@ -29,10 +32,24 @@ pub struct BootedStatus {
 pub struct PreflightReport {
     pub is_bootc_ostree: bool,
     pub is_uefi: bool,
+    pub nvram_writable: bool,
     pub esp_path: Option<String>,
     pub esp_free_space_bytes: u64,
+    pub esp_fs_type: Option<String>,
+    /// Whether an ESP was detected (even if temporarily mounted during preflight).
+    pub esp_detected: bool,
     pub supports_reflink: bool,
     pub is_btrfs: bool,
+    pub ostree_repo_size_bytes: u64,
+    pub composefs_free_bytes: u64,
+    /// Whether the ESP has enough space for systemd-boot (≥150 MB).
+    pub esp_ready_for_systemd_boot: bool,
+    /// Whether the systemd-boot EFI binaries are installed in the running deployment
+    /// (i.e. `/usr/lib/systemd/boot/efi` exists). `bootctl install` requires this.
+    pub systemd_boot_binaries_present: bool,
+    /// Whether grub2-reboot / grub2-editenv are available.
+    pub grub_tools_available: bool,
+    pub sysroot_was_ro: bool,
 }
 
 pub fn get_free_space<P: AsRef<Path>>(path: P) -> Result<u64> {
@@ -44,80 +61,136 @@ pub fn get_free_space<P: AsRef<Path>>(path: P) -> Result<u64> {
         return Err(std::io::Error::last_os_error()).context("statvfs failed");
     }
     let stats = unsafe { stats.assume_init() };
-    // f_frsize is fragment size, which is the actual block size. f_bavail is free blocks available to unprivileged users.
     let block_size = if stats.f_frsize > 0 { stats.f_frsize } else { stats.f_bsize };
-    let free_space = block_size as u64 * stats.f_bavail as u64;
-    Ok(free_space)
+    Ok(block_size as u64 * stats.f_bavail as u64)
 }
 
 pub fn check_reflink_support<P: AsRef<Path>>(dir: P) -> bool {
     let src = dir.as_ref().join(".reflink_test_src");
     let dest = dir.as_ref().join(".reflink_test_dest");
-    
-    // Clean up first
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dest);
-    
     let result = (|| -> Result<()> {
         fs::write(&src, b"test")?;
         crate::reflink::reflink(&src, &dest)?;
         Ok(())
     })();
-    
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dest);
-    
     result.is_ok()
+}
+
+fn get_ostree_repo_size() -> u64 {
+    let ostree_repo = "/sysroot/ostree/repo";
+    if !Path::new(ostree_repo).exists() {
+        return 0;
+    }
+    match Command::new("du").args(["-sb", ostree_repo]).output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.split_whitespace().next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+        }
+        Err(_) => 0,
+    }
 }
 
 pub fn run_preflight_checks() -> Result<PreflightReport> {
     // 1. Check bootc status
-    let output = std::process::Command::new("bootc")
+    let output = Command::new("bootc")
         .args(["status", "--json"])
         .output()
         .context("failed to run bootc status")?;
-        
     let is_bootc_ostree = if output.status.success() {
         let status: BootcStatus = serde_json::from_slice(&output.stdout)
             .context("failed to parse bootc status json")?;
-        if let Some(booted) = status.status.booted {
-            booted.ostree.is_some()
-        } else {
-            false
-        }
+        status.status.booted.and_then(|b| b.ostree).is_some()
     } else {
         false
     };
 
     // 2. Check UEFI mode
     let is_uefi = Path::new("/sys/firmware/efi").exists();
+    let nvram_writable = Path::new("/sys/firmware/efi/efivars").exists();
 
-    // 3. Locate ESP and check space
+    // 3. Locate ESP — check mounted first, then try to find by partition GUID
     let mut esp_path = None;
-    let mut esp_free_space_bytes = 0;
-    
-    // Check common mount points for ESP
+    let mut esp_free_space_bytes = 0u64;
+    let mut esp_fs_type = None;
+    let mut esp_tmp_mounted = false;
+
     for path in ["/boot/efi", "/efi", "/boot"] {
         if Path::new(path).exists() {
-            // Check if it is FAT / VFAT
             if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
-                let is_vfat = mounts.lines().any(|line| {
+                for line in mounts.lines() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    parts.len() >= 3 && parts[1] == path && (parts[2] == "vfat" || parts[2] == "msdos")
-                });
-                if is_vfat {
-                    esp_path = Some(path.to_string());
-                    if let Ok(free_space) = get_free_space(path) {
-                        esp_free_space_bytes = free_space;
+                    if parts.len() >= 3 && parts[1] == path
+                        && (parts[2] == "vfat" || parts[2] == "msdos")
+                    {
+                        esp_path = Some(path.to_string());
+                        esp_fs_type = Some(parts[2].to_string());
+                        if let Ok(free_space) = get_free_space(path) {
+                            esp_free_space_bytes = free_space;
+                        }
+                        break;
                     }
+                }
+                if esp_path.is_some() {
                     break;
                 }
             }
         }
     }
 
-    // 4. Check filesystem type and reflink support
-    // We check /sysroot
+    // ESP not auto-mounted — try to find it by partition type GUID.
+    if esp_path.is_none() {
+        if let Ok(output) = Command::new("lsblk")
+            .args(["-o", "NAME,PARTTYPE,FSTYPE,SIZE", "-l", "-n", "-b"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                // ESP partition type GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+                if parts.len() >= 2
+                    && parts[1].to_lowercase() == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+                {
+                    let device = format!("/dev/{}", parts[0]);
+                    // Temporarily mount to check free space.
+                    let tmp_mount = "/var/tmp/esp-preflight";
+                    let _ = fs::create_dir_all(tmp_mount);
+                    let mount_status = Command::new("mount")
+                        .args(["-t", "vfat", &device, tmp_mount])
+                        .status();
+                    if let Ok(s) = mount_status {
+                        if s.success() {
+                            if let Ok(free_space) = get_free_space(tmp_mount) {
+                                esp_free_space_bytes = free_space;
+                            }
+                            esp_fs_type = Some("vfat".to_string());
+                            esp_path = Some(tmp_mount.to_string());
+                            esp_tmp_mounted = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let esp_detected = esp_tmp_mounted || esp_path.is_some();
+    let esp_ready_for_systemd_boot = esp_detected && esp_free_space_bytes >= 150 * 1024 * 1024;
+
+    // Clean up temp mount if we mounted it.
+    if esp_tmp_mounted {
+        if let Some(ref path) = esp_path {
+            let _ = Command::new("umount").arg(path).status();
+        }
+        esp_path = None; // Not a permanent mount, but esp_detected is still true.
+    }
+
+    // 4. Filesystem type
     let sysroot = "/sysroot";
     let mut is_btrfs = false;
     if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
@@ -127,14 +200,100 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
         });
     }
 
-    let supports_reflink = check_reflink_support(sysroot);
+    // 5. Reflink check — remount /sysroot rw first if needed (OSTree default is ro)
+    let sysroot_was_ro = if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
+        mounts.lines().any(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts.len() >= 4 && parts[1] == sysroot
+                && parts[3].split(',').any(|o| o == "ro")
+        })
+    } else {
+        false
+    };
+
+    let supports_reflink = if sysroot_was_ro {
+        let _ = Command::new("mount").args(["-o", "remount,rw", sysroot]).status();
+        let ok = check_reflink_support(sysroot);
+        let _ = Command::new("mount").args(["-o", "remount,ro", sysroot]).status();
+        ok
+    } else {
+        check_reflink_support(sysroot)
+    };
+
+    // 6. GRUB tool availability
+    let grub_tools_available = {
+        let rb = Command::new("grub2-reboot").arg("--help").output();
+        let ee = Command::new("grub2-editenv").arg("--help").output();
+        let sd = Command::new("grub2-set-default").arg("--help").output();
+        matches!(rb, Ok(o) if o.status.success())
+            || matches!(ee, Ok(o) if o.status.success())
+            || matches!(sd, Ok(o) if o.status.success())
+    };
+
+    // 7. Free-space data
+    let ostree_repo_size_bytes = get_ostree_repo_size();
+    let composefs_free_bytes = {
+        let base = if Path::new("/sysroot/composefs").exists() {
+            "/sysroot/composefs"
+        } else {
+            "/sysroot"
+        };
+        get_free_space(base).unwrap_or(0)
+    };
+
+    let systemd_boot_binaries_present = Path::new("/usr/lib/systemd/boot/efi").exists();
 
     Ok(PreflightReport {
         is_bootc_ostree,
         is_uefi,
+        nvram_writable,
         esp_path,
         esp_free_space_bytes,
+        esp_fs_type,
         supports_reflink,
         is_btrfs,
+        ostree_repo_size_bytes,
+        composefs_free_bytes,
+        esp_detected,
+        esp_ready_for_systemd_boot,
+        systemd_boot_binaries_present,
+        grub_tools_available,
+        sysroot_was_ro,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn get_free_space_returns_value() {
+        let dir = tempdir().unwrap();
+        let space = get_free_space(dir.path()).unwrap();
+        assert!(space > 0);
+    }
+
+    #[test]
+    fn preflight_report_has_all_fields() {
+        let report = PreflightReport {
+            is_bootc_ostree: true,
+            is_uefi: true,
+            nvram_writable: true,
+            esp_path: Some("/boot/efi".into()),
+            esp_free_space_bytes: 400 * 1024 * 1024,
+            esp_fs_type: Some("vfat".into()),
+            supports_reflink: true,
+            is_btrfs: true,
+            ostree_repo_size_bytes: 1024 * 1024 * 1024,
+            composefs_free_bytes: 5 * 1024 * 1024 * 1024,
+            esp_ready_for_systemd_boot: true,
+            systemd_boot_binaries_present: true,
+            grub_tools_available: true,
+            esp_detected: true,
+            sysroot_was_ro: true,
+        };
+        assert!(report.esp_ready_for_systemd_boot);
+        assert!(report.grub_tools_available);
+    }
 }

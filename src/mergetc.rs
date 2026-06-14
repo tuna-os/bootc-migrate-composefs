@@ -1,0 +1,565 @@
+use std::collections::HashMap;
+use std::fs;
+use std::os::unix::fs as unix_fs;
+use std::path::Path;
+use anyhow::{Result, Context};
+
+/// Result of reading a file for 3-way merge. None means the file does not exist
+/// in that version.
+pub struct MergeContext {
+    pub old_default: Option<Vec<u8>>,
+    pub current: Option<Vec<u8>>,
+    pub new_default: Option<Vec<u8>>,
+}
+
+/// Recorded entry from scanning a directory tree: either a regular file
+/// (with its content hash-ish) or a symlink target.
+#[derive(Debug)]
+enum DirEntry {
+    File,
+    Symlink(String),
+}
+
+/// Perform a 3-way /etc merge following the algorithm used by
+/// bootc's composefs finalize logic:
+///
+/// For each file/symlink in the union of (old_default, current, new_default):
+///   - If current == old_default: take new_default (upstream update wins)
+///   - Otherwise: keep current (user customization wins)
+///
+/// Symlinks: if the user hasn't changed the target, take upstream's target.
+/// Permissions and xattrs are preserved from the chosen source.
+pub fn merge_etc_files(
+    old_default_dir: &Path,
+    current_dir: &Path,
+    new_default_dir: &Path,
+    output_dir: &Path,
+) -> Result<()> {
+    fs::create_dir_all(output_dir)?;
+
+    // Collect all paths relative to their roots (files + symlinks).
+    let old_entries = collect_relative_entries(old_default_dir)?;
+    let cur_entries = collect_relative_entries(current_dir)?;
+    let new_entries = collect_relative_entries(new_default_dir)?;
+
+    let mut all_paths: Vec<String> = old_entries.keys()
+        .chain(cur_entries.keys())
+        .chain(new_entries.keys())
+        .cloned()
+        .collect();
+    all_paths.sort();
+    all_paths.dedup();
+
+    for rel_path in &all_paths {
+        let old_entry = old_entries.get(rel_path);
+        let cur_entry = cur_entries.get(rel_path);
+        let new_entry = new_entries.get(rel_path);
+
+        match (old_entry, cur_entry, new_entry) {
+            // --- Symlink merge path ---
+            (Some(DirEntry::Symlink(old_target)), Some(DirEntry::Symlink(cur_target)), Some(DirEntry::Symlink(new_target))) => {
+                let chosen_target = if old_target == cur_target {
+                    new_target.clone()
+                } else {
+                    cur_target.clone()
+                };
+                let dest = output_dir.join(rel_path);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if dest.exists() || dest.is_symlink() {
+                    let _ = fs::remove_file(&dest);
+                }
+                std::os::unix::fs::symlink(&chosen_target, &dest)
+                    .with_context(|| format!("failed to create symlink: {}", dest.display()))?;
+            }
+            (_, Some(DirEntry::Symlink(cur_target)), _) => {
+                // Symlink only in current (user-created) — keep it.
+                let dest = output_dir.join(rel_path);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if dest.exists() || dest.is_symlink() {
+                    let _ = fs::remove_file(&dest);
+                }
+                std::os::unix::fs::symlink(cur_target, &dest)
+                    .with_context(|| format!("failed to create symlink: {}", dest.display()))?;
+            }
+            (_, _, Some(DirEntry::Symlink(new_target))) => {
+                // Symlink only in new (upstream-added) — take it.
+                let dest = output_dir.join(rel_path);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if dest.exists() || dest.is_symlink() {
+                    let _ = fs::remove_file(&dest);
+                }
+                std::os::unix::fs::symlink(new_target, &dest)
+                    .with_context(|| format!("failed to create symlink: {}", dest.display()))?;
+            }
+            (Some(DirEntry::Symlink(_old_target)), None, None) => {
+                // Symlink was in old only — upstream removed it, user also removed. Drop.
+            }
+
+            // --- File merge path ---
+            _ => {
+                let old = read_file_at(old_default_dir, rel_path);
+                let cur = read_file_at(current_dir, rel_path);
+                let new = read_file_at(new_default_dir, rel_path);
+
+                let chosen = choose_merged_content(&MergeContext {
+                    old_default: old,
+                    current: cur,
+                    new_default: new,
+                });
+
+                if let Some(content) = chosen {
+                    let dest = output_dir.join(rel_path);
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(&dest, &content)
+                        .with_context(|| format!("failed to write merged file: {}", dest.display()))?;
+
+                    // Preserve xattrs and permissions from the best available source.
+                    // Prefer current, then new_default, then old_default.
+                    let xattr_src = if current_dir.join(rel_path).exists() {
+                        current_dir.join(rel_path)
+                    } else if new_default_dir.join(rel_path).exists() {
+                        new_default_dir.join(rel_path)
+                    } else {
+                        old_default_dir.join(rel_path)
+                    };
+                    copy_file_metadata(&xattr_src, &dest)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy extended attributes and permissions from src file to dst file (no data copy).
+fn copy_file_metadata(src: &Path, dst: &Path) -> Result<()> {
+    // Copy permissions
+    if let Ok(meta) = fs::metadata(src) {
+        let mode = unix_fs::PermissionsExt::mode(&meta.permissions());
+        let mut perms = fs::metadata(dst)?.permissions();
+        unix_fs::PermissionsExt::set_mode(&mut perms, mode);
+        let _ = fs::set_permissions(dst, perms);
+    }
+    // Copy xattrs
+    let src_str = src.to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid src path"))?;
+    copy_xattrs_to_file(src_str, dst)?;
+    Ok(())
+}
+
+/// Copy all extended attributes from one file path to another.
+fn copy_xattrs_to_file(src_path: &str, dst: &Path) -> Result<()> {
+    let src_c = std::ffi::CString::new(src_path)?;
+    let dst_c = std::ffi::CString::new(dst.to_str().unwrap_or(""))?;
+
+    // First pass: get list size.
+    let list_size = unsafe { libc::listxattr(src_c.as_ptr(), std::ptr::null_mut(), 0) };
+    if list_size <= 0 {
+        return Ok(());
+    }
+
+    let mut list_buf = vec![0u8; list_size as usize];
+    let actual = unsafe {
+        libc::listxattr(src_c.as_ptr(), list_buf.as_mut_ptr() as *mut libc::c_char, list_buf.len())
+    };
+    if actual <= 0 {
+        return Ok(());
+    }
+    list_buf.truncate(actual as usize);
+
+    for name_bytes in list_buf.split(|b| *b == 0) {
+        if name_bytes.is_empty() {
+            continue;
+        }
+        let name = std::ffi::CString::new(name_bytes)?;
+
+        // Get value size.
+        let val_size = unsafe { libc::getxattr(src_c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+        if val_size < 0 {
+            continue;
+        }
+
+        let mut val_buf = vec![0u8; val_size as usize];
+        let val_size = unsafe {
+            libc::getxattr(
+                src_c.as_ptr(),
+                name.as_ptr(),
+                val_buf.as_mut_ptr() as *mut libc::c_void,
+                val_buf.len(),
+            )
+        };
+        if val_size < 0 {
+            continue;
+        }
+        val_buf.truncate(val_size as usize);
+
+        // Don't fail if xattr already exists; just overwrite silently.
+        let rc = unsafe {
+            libc::setxattr(
+                dst_c.as_ptr(),
+                name.as_ptr(),
+                val_buf.as_ptr() as *const libc::c_void,
+                val_buf.len(),
+                0,
+            )
+        };
+        if rc < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::ENOTSUP) {
+                if let Ok(name_str) = std::str::from_utf8(name_bytes) {
+                    eprintln!("Warning: failed to set xattr '{}' on {}: {}", name_str, dst.display(), e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn read_file_at(base: &Path, rel_path: &str) -> Option<Vec<u8>> {
+    let full = base.join(rel_path);
+    // Use symlink_metadata to avoid following symlinks (Fix 9).
+    match fs::symlink_metadata(&full) {
+        Ok(meta) if meta.is_file() => fs::read(&full).ok(),
+        _ => None,
+    }
+}
+
+/// Core 3-way merge decision. Public so unit tests can exercise it directly.
+pub fn choose_merged_content(ctx: &MergeContext) -> Option<Vec<u8>> {
+    match (&ctx.old_default, &ctx.current, &ctx.new_default) {
+        // File exists in all three
+        (Some(old), Some(cur), Some(new)) => {
+            if old == cur {
+                Some(new.clone())
+            } else if old == new {
+                Some(cur.clone())
+            } else if cur == new {
+                Some(cur.clone())
+            } else {
+                Some(cur.clone())
+            }
+        }
+        // File in old and current, removed upstream
+        (Some(old), Some(cur), None) => {
+            if old == cur {
+                None
+            } else {
+                Some(cur.clone())
+            }
+        }
+        // File only in current (user-added file)
+        (None, Some(cur), None) => Some(cur.clone()),
+        // File in new only (upstream-added file)
+        (None, None, Some(new)) => Some(new.clone()),
+        // File in old and new, not in current (user deleted it)
+        (Some(_old), None, Some(_new)) => None,
+        // File only in old (deleted upstream, also deleted by user) — drop
+        (Some(_old), None, None) => None,
+        // File in current and new (never in old... unusual)
+        (None, Some(cur), Some(new)) => {
+            if cur == new {
+                Some(cur.clone())
+            } else {
+                Some(cur.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Collect relative paths for files AND symlinks under a directory tree.
+fn collect_relative_entries(root: &Path) -> Result<HashMap<String, DirEntry>> {
+    let mut entries = HashMap::new();
+    if !root.exists() {
+        return Ok(entries);
+    }
+    collect_entries_recursive(root, root, &mut entries)?;
+    Ok(entries)
+}
+
+fn collect_entries_recursive(
+    dir: &Path,
+    root: &Path,
+    entries: &mut HashMap<String, DirEntry>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+        let ft = entry.file_type()?;
+
+        if ft.is_dir() {
+            collect_entries_recursive(&path, root, entries)?;
+        } else if ft.is_symlink() {
+            let target = fs::read_link(&path)?
+                .to_string_lossy()
+                .to_string();
+            entries.insert(rel, DirEntry::Symlink(target));
+        } else if ft.is_file() {
+            entries.insert(rel, DirEntry::File);
+        }
+        // Skip special files.
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // --- #4: TDD tests for 3-way /etc merge ---
+
+    #[test]
+    fn merge_unchanged_file_takes_new_default() {
+        let ctx = MergeContext {
+            old_default: Some(b"old-content".to_vec()),
+            current: Some(b"old-content".to_vec()),
+            new_default: Some(b"new-content".to_vec()),
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"new-content".to_vec()));
+    }
+
+    #[test]
+    fn merge_user_modified_file_keeps_current() {
+        let ctx = MergeContext {
+            old_default: Some(b"old".to_vec()),
+            current: Some(b"customized".to_vec()),
+            new_default: Some(b"new".to_vec()),
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"customized".to_vec()));
+    }
+
+    #[test]
+    fn merge_upstream_unchanged_user_changed_keeps_current() {
+        let ctx = MergeContext {
+            old_default: Some(b"same".to_vec()),
+            current: Some(b"user-changed".to_vec()),
+            new_default: Some(b"same".to_vec()),
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"user-changed".to_vec()));
+    }
+
+    #[test]
+    fn merge_drops_file_removed_upstream_when_unchanged() {
+        let ctx = MergeContext {
+            old_default: Some(b"removed".to_vec()),
+            current: Some(b"removed".to_vec()),
+            new_default: None,
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn merge_keeps_file_removed_upstream_when_modified() {
+        let ctx = MergeContext {
+            old_default: Some(b"removed".to_vec()),
+            current: Some(b"removed-but-modified".to_vec()),
+            new_default: None,
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"removed-but-modified".to_vec()));
+    }
+
+    #[test]
+    fn merge_takes_new_file_from_upstream() {
+        let ctx = MergeContext {
+            old_default: None,
+            current: None,
+            new_default: Some(b"new-upstream-file".to_vec()),
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"new-upstream-file".to_vec()));
+    }
+
+    #[test]
+    fn merge_keeps_user_added_file() {
+        let ctx = MergeContext {
+            old_default: None,
+            current: Some(b"user-added".to_vec()),
+            new_default: None,
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"user-added".to_vec()));
+    }
+
+    #[test]
+    fn merge_honors_user_deletion_when_upstream_added() {
+        let ctx = MergeContext {
+            old_default: Some(b"old-file".to_vec()),
+            current: None,
+            new_default: Some(b"new-version".to_vec()),
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn merge_all_three_different_keeps_current() {
+        let ctx = MergeContext {
+            old_default: Some(b"v1".to_vec()),
+            current: Some(b"v2-user".to_vec()),
+            new_default: Some(b"v3-upstream".to_vec()),
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"v2-user".to_vec()));
+    }
+
+    #[test]
+    fn merge_user_and_upstream_made_same_change() {
+        let ctx = MergeContext {
+            old_default: Some(b"orig".to_vec()),
+            current: Some(b"both".to_vec()),
+            new_default: Some(b"both".to_vec()),
+        };
+        let result = choose_merged_content(&ctx);
+        assert_eq!(result, Some(b"both".to_vec()));
+    }
+
+    #[test]
+    fn merge_preserves_symlinks() {
+        // Symlinks in /etc must be preserved (#4 review gap 1).
+        let dir = tempdir().unwrap();
+        let old = dir.path().join("old");
+        let cur = dir.path().join("cur");
+        let new = dir.path().join("new");
+        let out = dir.path().join("out");
+
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&cur).unwrap();
+        fs::create_dir_all(&new).unwrap();
+
+        // Setup a symlink that exists unchanged in all three
+        fs::write(old.join("target.txt"), b"target").unwrap();
+        fs::write(cur.join("target.txt"), b"target").unwrap();
+        fs::write(new.join("target.txt"), b"updated-target").unwrap();
+        std::os::unix::fs::symlink("target.txt", old.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("target.txt", cur.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("target.txt", new.join("link.txt")).unwrap();
+
+        merge_etc_files(&old, &cur, &new, &out).unwrap();
+
+        // The symlink should be preserved
+        let link_meta = fs::symlink_metadata(out.join("link.txt")).unwrap();
+        assert!(link_meta.file_type().is_symlink(), "symlink should be preserved");
+        assert_eq!(
+            fs::read_link(out.join("link.txt")).unwrap().to_string_lossy(),
+            "target.txt",
+            "unchanged symlink target should carry forward"
+        );
+    }
+
+    #[test]
+    fn merge_preserves_user_changed_symlink() {
+        let dir = tempdir().unwrap();
+        let old = dir.path().join("old");
+        let cur = dir.path().join("cur");
+        let new = dir.path().join("new");
+        let out = dir.path().join("out");
+
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&cur).unwrap();
+        fs::create_dir_all(&new).unwrap();
+
+        // User changed the symlink target locally
+        std::os::unix::fs::symlink("old-target", old.join("my.link")).unwrap();
+        std::os::unix::fs::symlink("my-custom-target", cur.join("my.link")).unwrap();
+        std::os::unix::fs::symlink("new-upstream-target", new.join("my.link")).unwrap();
+
+        merge_etc_files(&old, &cur, &new, &out).unwrap();
+
+        let link_target = fs::read_link(out.join("my.link")).unwrap();
+        assert_eq!(link_target.to_string_lossy(), "my-custom-target",
+            "user-changed symlink target should be kept");
+    }
+
+    #[test]
+    fn collect_relative_entries_includes_symlinks() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("etc");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("real.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink("real.txt", root.join("link.txt")).unwrap();
+
+        let entries = collect_relative_entries(&root).unwrap();
+        assert!(entries.contains_key("real.txt"), "should have real.txt");
+        assert!(entries.contains_key("link.txt"), "should have link.txt");
+        match entries.get("link.txt") {
+            Some(DirEntry::Symlink(target)) => assert_eq!(target, "real.txt"),
+            other => panic!("expected Symlink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_preserves_user_added_symlink() {
+        let dir = tempdir().unwrap();
+        let cur = dir.path().join("cur");
+        let new = dir.path().join("new");
+        let out = dir.path().join("out");
+
+        fs::create_dir_all(&cur).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        std::os::unix::fs::symlink("target-file", cur.join("custom.link")).unwrap();
+        fs::write(cur.join("target-file"), b"data").unwrap();
+
+        let old_empty = tempdir().unwrap();
+        let result = merge_etc_files(old_empty.path(), &cur, &new, &out);
+        assert!(result.is_ok(), "merge should succeed: {:?}", result.err());
+
+        let link_target = fs::read_link(out.join("custom.link")).unwrap();
+        assert_eq!(link_target.to_string_lossy(), "target-file",
+            "user-added symlink should be preserved");
+    }
+
+    #[test]
+    fn merge_etc_files_integration() {
+        let dir = tempdir().unwrap();
+        let old = dir.path().join("old");
+        let cur = dir.path().join("cur");
+        let new = dir.path().join("new");
+        let out = dir.path().join("out");
+
+        // Setup: file1 unchanged, file2 user-modified
+        fs::create_dir_all(old.join("sub")).unwrap();
+        fs::create_dir_all(cur.join("sub")).unwrap();
+        fs::create_dir_all(new.join("sub")).unwrap();
+
+        fs::write(old.join("unchanged.cfg"), b"orig").unwrap();
+        fs::write(cur.join("unchanged.cfg"), b"orig").unwrap();
+        fs::write(new.join("unchanged.cfg"), b"new-upstream").unwrap();
+
+        fs::write(old.join("modified.cfg"), b"orig").unwrap();
+        fs::write(cur.join("modified.cfg"), b"my-changes").unwrap();
+        fs::write(new.join("modified.cfg"), b"new-upstream").unwrap();
+
+        // sub/file3 is new upstream
+        fs::write(new.join("sub/new-upstream.cfg"), b"brand-new").unwrap();
+
+        // sub/file4 was removed upstream but user didn't change
+        fs::write(old.join("sub/removed.cfg"), b"stale").unwrap();
+        fs::write(cur.join("sub/removed.cfg"), b"stale").unwrap();
+
+        merge_etc_files(&old, &cur, &new, &out).unwrap();
+
+        assert_eq!(fs::read_to_string(out.join("unchanged.cfg")).unwrap(), "new-upstream");
+        assert_eq!(fs::read_to_string(out.join("modified.cfg")).unwrap(), "my-changes");
+        assert_eq!(fs::read_to_string(out.join("sub/new-upstream.cfg")).unwrap(), "brand-new");
+        assert!(!out.join("sub/removed.cfg").exists());
+    }
+}
