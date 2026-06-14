@@ -136,6 +136,21 @@ if [ -f "$CHECKPOINT" ]; then
     echo "=== Restoring pre-migration checkpoint ==="
     cp "$CHECKPOINT" disk.raw
     SKIP_SETUP=true
+
+    # test_key is regenerated each run, so the checkpoint's stale authorized_keys
+    # would lock us out. Reseed it with the fresh pubkey before booting.
+    echo "=== Reseeding authorized_keys in checkpoint ==="
+    CKPT_LOOP=$(sudo losetup --show -f -P disk.raw)
+    CKPT_MNT="/tmp/mnt-e2e-ckpt"
+    sudo mkdir -p "$CKPT_MNT"
+    sudo mount "${CKPT_LOOP}p2" "$CKPT_MNT"
+    CKPT_SSH="$CKPT_MNT/ostree/deploy/default/var/roothome/.ssh"
+    sudo mkdir -p "$CKPT_SSH"
+    sudo chmod 700 "$CKPT_SSH"
+    sudo cp ./test_key.pub "$CKPT_SSH/authorized_keys"
+    sudo chmod 600 "$CKPT_SSH/authorized_keys"
+    sudo umount "$CKPT_MNT"
+    sudo losetup -d "$CKPT_LOOP"
 else
     SKIP_SETUP=false
 fi
