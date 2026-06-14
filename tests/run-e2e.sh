@@ -82,27 +82,43 @@ if ! command -v podman &>/dev/null; then
     exit 1
 fi
 
-# Locate UEFI firmware
+# Locate a matched OVMF CODE + VARS pair. Mixing CODE from one build with VARS
+# from another (e.g. brew-packaged edk2-x86_64-code.fd + Fedora OVMF_VARS_4M.fd)
+# yields a flash image OVMF treats as uninitialised — NVRAM writes succeed via
+# efivarfs but never make it to the VARS file, so BootOrder changes don't
+# survive reboot. Prefer host-installed paired sets; otherwise pull the
+# OVMF_CODE_4M.fd / OVMF_VARS_4M.fd pair out of a container storage layer.
 OVMF_PATH=""
-for path in \
-    "/home/linuxbrew/.linuxbrew/share/qemu/edk2-x86_64-code.fd" \
-    "/usr/share/OVMF/OVMF_CODE.fd" \
-    "/usr/share/OVMF/OVMF_CODE_4M.fd" \
-    "/usr/share/ovmf/OVMF.fd" \
-    "/usr/share/edk2/ovmf/OVMF_CODE.fd" \
-    "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"
-do
-    if [ -f "$path" ]; then
-        OVMF_PATH="$path"
-        break
+OVMF_VARS_TEMPLATE=""
+declare -a OVMF_PAIRS=(
+    "/usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd"
+    "/usr/share/OVMF/OVMF_CODE.fd:/usr/share/OVMF/OVMF_VARS.fd"
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd:/usr/share/edk2/ovmf/OVMF_VARS.fd"
+    "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd:/usr/share/edk2-ovmf/x64/OVMF_VARS.fd"
+)
+for pair in "${OVMF_PAIRS[@]}"; do
+    code="${pair%%:*}"; vars="${pair##*:}"
+    if [ -f "$code" ] && [ -f "$vars" ]; then
+        OVMF_PATH="$code"; OVMF_VARS_TEMPLATE="$vars"; break
     fi
 done
-
 if [ -z "$OVMF_PATH" ]; then
-    echo "ERROR: OVMF UEFI firmware (OVMF_CODE.fd) not found."
+    # Last-resort: find a matched pair under container storage layers.
+    found=$(sudo find /sysroot /var/lib/containers -type d -path '*share/OVMF' 2>/dev/null | head -1)
+    if [ -n "$found" ] && [ -f "$found/OVMF_CODE_4M.fd" ] && [ -f "$found/OVMF_VARS_4M.fd" ]; then
+        OVMF_PATH="$found/OVMF_CODE_4M.fd"
+        OVMF_VARS_TEMPLATE="$found/OVMF_VARS_4M.fd"
+    fi
+fi
+if [ -z "$OVMF_PATH" ] || [ -z "$OVMF_VARS_TEMPLATE" ]; then
+    echo "ERROR: no matched OVMF CODE+VARS pair found." >&2
+    echo "       NVRAM persistence is required for the systemd-boot post-reboot" >&2
+    echo "       check; install OVMF or extract OVMF_CODE_4M.fd + OVMF_VARS_4M.fd" >&2
+    echo "       from a Fedora container image." >&2
     exit 1
 fi
 echo "Using UEFI firmware:   $OVMF_PATH"
+echo "Using UEFI VARS:       $OVMF_VARS_TEMPLATE"
 
 # 2. Build the migration binary
 step "=== Building migration utility ==="
@@ -396,30 +412,13 @@ fi
 # pflash size. Cache the prepared file under workspace/ovmf_vars.fd.
 OVMF_VARS="$WORKSPACE_DIR/ovmf_vars.fd"
 if [ ! -f "$OVMF_VARS" ] || [ "$SKIP_SETUP" = false ]; then
-    VARS_TEMPLATE=""
-    for cand in \
-        /usr/share/OVMF/OVMF_VARS_4M.fd \
-        /usr/share/edk2/ovmf/OVMF_VARS.fd \
-        /usr/share/edk2-ovmf/x64/OVMF_VARS.fd
-    do
-        if [ -f "$cand" ]; then VARS_TEMPLATE="$cand"; break; fi
-    done
-    if [ -z "$VARS_TEMPLATE" ]; then
-        # Fall back to any OVMF_VARS_4M.fd under container storage layers.
-        VARS_TEMPLATE=$(sudo find /sysroot /var/lib/containers -name 'OVMF_VARS_4M.fd' 2>/dev/null \
-                        | grep -v secboot | grep -v snakeoil | grep -v '\.ms\.' | head -1)
-    fi
-    if [ -z "$VARS_TEMPLATE" ]; then
-        echo "ERROR: cannot find an OVMF VARS template. NVRAM won't persist," >&2
-        echo "       so systemd-boot migration tests will silently fall back to" >&2
-        echo "       Fedora\\shim and the post-reboot validation will fail." >&2
-        exit 1
-    fi
-    echo "Using OVMF VARS template: $VARS_TEMPLATE"
-    sudo cp "$VARS_TEMPLATE" "$OVMF_VARS"
+    sudo cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS"
     sudo chown "$(id -u):$(id -g)" "$OVMF_VARS"
     chmod u+w "$OVMF_VARS"
-    truncate -s 4M "$OVMF_VARS"
+    # OVMF expects VARS to match the pflash region size; the template may be
+    # smaller than the runtime size (e.g. 528 KB header vs 4 MB pflash). Pad.
+    CODE_SIZE=$(stat -c %s "$OVMF_PATH")
+    truncate -s "$CODE_SIZE" "$OVMF_VARS"
 fi
 
 # Run QEMU in the background
