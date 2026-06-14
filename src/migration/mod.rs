@@ -423,9 +423,9 @@ fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()> {
     if var_is_subvol {
         println!("Preserving Btrfs 'var' subvolume mount.");
         // bootc-root-setup in the initramfs bind-mounts state/os/default/var onto the
-        // pivoted root's /var; if the source path doesn't exist as a directory it bails
-        // out into emergency mode. The actual var subvol stays mounted at /var on the
-        // running system; we just need the empty target to exist.
+        // pivoted root's /var; if the source path doesn't exist it bails into emergency
+        // mode. We create the dir as a fallback bind target, then write a fstab entry
+        // that mounts the actual btrfs subvol over /var post-pivot so user data appears.
         if let Err(e) = fs::create_dir_all(target_var) {
             eprintln!(
                 "Warning: failed to create {} for initramfs var bind-mount target: {}",
@@ -433,28 +433,40 @@ fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()> {
                 e
             );
         }
+
+        let synthesized = synthesize_var_fstab_entry(&mounts);
+        let mut new_fstab_lines = String::new();
         if let Ok(fstab_content) = fs::read_to_string("/etc/fstab") {
-            let mut new_fstab = String::new();
             for line in fstab_content.lines() {
                 if line.contains("/var") && !line.trim_start().starts_with('#') {
-                    new_fstab.push_str(line);
-                    new_fstab.push('\n');
+                    new_fstab_lines.push_str(line);
+                    new_fstab_lines.push('\n');
                 }
             }
-            if !new_fstab.is_empty() {
-                let new_fstab_path = etc_dir.join("fstab");
-                let existing = fs::read_to_string(&new_fstab_path).unwrap_or_default();
-                let combined = if existing.is_empty() {
-                    new_fstab
-                } else {
-                    format!("{}\n{}", existing.trim_end(), new_fstab)
-                };
-                if let Err(e) = fs::write(&new_fstab_path, &combined) {
-                    eprintln!(
-                        "Warning: failed to write etc/fstab with var subvol entry ({}): {}",
-                        new_fstab_path.display(), e
-                    );
-                }
+        }
+        if new_fstab_lines.is_empty() {
+            if let Some(line) = synthesized {
+                println!("Synthesized /var fstab entry: {}", line.trim_end());
+                new_fstab_lines.push_str(&line);
+            } else {
+                eprintln!(
+                    "Warning: could not synthesize fstab entry for /var subvol — /var may appear empty after pivot."
+                );
+            }
+        }
+        if !new_fstab_lines.is_empty() {
+            let new_fstab_path = etc_dir.join("fstab");
+            let existing = fs::read_to_string(&new_fstab_path).unwrap_or_default();
+            let combined = if existing.is_empty() {
+                new_fstab_lines
+            } else {
+                format!("{}\n{}", existing.trim_end(), new_fstab_lines)
+            };
+            if let Err(e) = fs::write(&new_fstab_path, &combined) {
+                eprintln!(
+                    "Warning: failed to write etc/fstab with var subvol entry ({}): {}",
+                    new_fstab_path.display(), e
+                );
             }
         }
         println!("/var is on a separate Btrfs subvolume — data stays in place.");
@@ -478,6 +490,43 @@ fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()> {
     println!("/var data migrated successfully.");
 
     Ok(())
+}
+
+/// Build a fstab entry for the /var btrfs subvolume by parsing /proc/mounts and
+/// resolving the source device to a UUID. Returns None if the data can't be derived.
+fn synthesize_var_fstab_entry(mounts: &str) -> Option<String> {
+    let var_line = mounts.lines().find(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        parts.len() >= 4 && parts[1] == "/var" && parts[2] == "btrfs"
+    })?;
+    let parts: Vec<&str> = var_line.split_whitespace().collect();
+    let device = parts[0];
+    let raw_opts = parts[3];
+
+    let subvol_opt = raw_opts
+        .split(',')
+        .find(|o| o.starts_with("subvol=") && *o != "subvol=/")?;
+
+    let uuid = resolve_device_uuid(device);
+    let source = uuid
+        .map(|u| format!("UUID={}", u))
+        .unwrap_or_else(|| device.to_string());
+
+    let opts = format!("rw,relatime,{}", subvol_opt);
+    Some(format!("{}\t/var\tbtrfs\t{}\t0 0\n", source, opts))
+}
+
+fn resolve_device_uuid(device: &str) -> Option<String> {
+    let by_uuid = Path::new("/dev/disk/by-uuid");
+    let entries = fs::read_dir(by_uuid).ok()?;
+    for entry in entries.flatten() {
+        let link = fs::read_link(entry.path()).ok()?;
+        let resolved = by_uuid.join(&link).canonicalize().ok()?;
+        if resolved == Path::new(device) {
+            return entry.file_name().to_str().map(|s| s.to_string());
+        }
+    }
+    None
 }
 
 /// Perform 3-way /etc merge: old OSTree default, current live /etc, new ComposeFS default.
