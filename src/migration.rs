@@ -274,6 +274,16 @@ pub fn run_migration(report: &PreflightReport, target_image: &str) -> Result<()>
                 kver, boot_dir_name, boot_dir_name, options_str
             );
             fs::write(entry_path, entry_content)?;
+            
+            // Regenerate GRUB config to pick up the new BLS entry
+            println!("Regenerating GRUB configuration...");
+            let _ = Command::new("grub2-mkconfig")
+                .args(["-o", "/boot/grub2/grub.cfg"])
+                .status();
+            // Set the new entry as default for next boot
+            let _ = Command::new("grub2-set-default")
+                .arg("0")
+                .status();
         }
         
         Ok(())
