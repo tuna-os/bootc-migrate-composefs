@@ -9,8 +9,18 @@ on:
 
 jobs:
   e2e-tests:
-    name: Run QEMU E2E Migration Tests
+    name: ${{ matrix.scenario.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - name: fedora-bootc self-migration
+            base: "quay.io/fedora/fedora-bootc:44"
+            target: "quay.io/fedora/fedora-bootc:44"
+          - name: bluefin -> dakota
+            base: "ghcr.io/projectbluefin/bluefin:stable"
+            target: "ghcr.io/projectbluefin/dakota:stable"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -31,8 +41,8 @@ jobs:
 
       - name: Run E2E Test Suite
         env:
-          BASE_IMAGE: "quay.io/fedora/fedora-bootc:44"
-          TARGET_IMAGE: "quay.io/fedora/fedora-bootc:44" # For self-test in CI, pull same image to verify ComposeFS conversion works
+          BASE_IMAGE: ${{ matrix.scenario.base }}
+          TARGET_IMAGE: ${{ matrix.scenario.target }}
         run: |
           # Run the test runner as root since loop mounts and podman --privileged are required
           sudo -E PATH=$PATH ./tests/run-e2e.sh
