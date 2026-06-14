@@ -100,7 +100,7 @@ the composefs kernel cmdline we could not see what happened next.
 | No coverage that `/etc` state survives migration; `/home` symlink untested | Live-inject `/etc/migration-test/*`, in-place edit `/etc/hostname`, /etc symlink, and a real `useradd realuser` + `/home/realuser` content check | `6938d37` |
 | No kernel-level visibility — qemu.log empty past GRUB | Patch BLS entries on disk to add `console=ttyS0,115200n8 console=tty0`; force `systemctl enable sshd` + direct multi-user symlink in derived image; stream qemu.log via tail -F with ANSI strip into CI log | `1a4c986` |
 | Bluefin had no TCP sshd listener (uses systemd-ssh-generator → Unix-local + vsock only); local test reached login prompt but `ssh root@localhost:2222` never connected | Drop a `e2e-sshd.socket` (`ListenStream=22`, `Accept=yes`) + `e2e-sshd@.service` (`/usr/sbin/sshd -i`) into the derived Containerfile and pre-link it into `sockets.target.wants` | `60aad00` (verified locally) |
-| Migration binary aborted on VM with `CPU ISA level is lower than required` — host-built Rust binary assumes x86-64-v3 (AVX2 etc.) but QEMU defaults to the bare `qemu64` CPU | Pass `-cpu host` to QEMU when KVM is available; fall back to `-cpu max` under TCG | `be00545` |
+| Migration binary aborted on VM with `CPU ISA level is lower than required` — host-built Rust binary assumes x86-64-v3 (AVX2 etc.) but QEMU defaults to the bare `qemu64` CPU | Pass `-cpu host` to QEMU when KVM is available; fall back to `-cpu max` under TCG | `d5b89e4` |
 | CI only ran fedora-bootc self-migration | Matrix the workflow over `fedora-bootc -> fedora-bootc` and `bluefin -> dakota` with `fail-fast: false` | `fafd0b9` |
 
 ## Previously Solved (earlier sessions)
