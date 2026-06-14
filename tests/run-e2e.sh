@@ -141,9 +141,20 @@ if [ -f "$CHECKPOINT" ]; then
     # would lock us out. Reseed it with the fresh pubkey before booting.
     echo "=== Reseeding authorized_keys in checkpoint ==="
     CKPT_LOOP=$(sudo losetup --show -f -P disk.raw)
+    # Find the btrfs root partition (p2 is the ESP on bootc-installed disks).
+    CKPT_ROOT=""
+    for p in "${CKPT_LOOP}"p*; do
+        if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx btrfs; then
+            CKPT_ROOT="$p"; break
+        fi
+    done
+    if [ -z "$CKPT_ROOT" ]; then
+        echo "ERROR: could not find btrfs root partition on $CKPT_LOOP" >&2
+        sudo losetup -d "$CKPT_LOOP"; exit 1
+    fi
     CKPT_MNT="/tmp/mnt-e2e-ckpt"
     sudo mkdir -p "$CKPT_MNT"
-    sudo mount "${CKPT_LOOP}p2" "$CKPT_MNT"
+    sudo mount "$CKPT_ROOT" "$CKPT_MNT"
     CKPT_SSH="$CKPT_MNT/ostree/deploy/default/var/roothome/.ssh"
     sudo mkdir -p "$CKPT_SSH"
     sudo chmod 700 "$CKPT_SSH"
