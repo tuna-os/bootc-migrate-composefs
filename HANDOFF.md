@@ -99,6 +99,7 @@ the composefs kernel cmdline we could not see what happened next.
 | bootupd grub.cfg never consults `saved_entry` (no `set default=` line) so blscfg picked its own default | Inject `set default="${saved_entry}"` before the `blscfg` command, idempotently | `a82a043` |
 | No coverage that `/etc` state survives migration; `/home` symlink untested | Live-inject `/etc/migration-test/*`, in-place edit `/etc/hostname`, /etc symlink, and a real `useradd realuser` + `/home/realuser` content check | `6938d37` |
 | No kernel-level visibility — qemu.log empty past GRUB | Patch BLS entries on disk to add `console=ttyS0,115200n8 console=tty0`; force `systemctl enable sshd` + direct multi-user symlink in derived image; stream qemu.log via tail -F with ANSI strip into CI log | `1a4c986` |
+| Bluefin had no TCP sshd listener (uses systemd-ssh-generator → Unix-local + vsock only); local test reached login prompt but `ssh root@localhost:2222` never connected | Drop a `e2e-sshd.socket` (`ListenStream=22`, `Accept=yes`) + `e2e-sshd@.service` (`/usr/sbin/sshd -i`) into the derived Containerfile and pre-link it into `sockets.target.wants` | TBD next run |
 | CI only ran fedora-bootc self-migration | Matrix the workflow over `fedora-bootc -> fedora-bootc` and `bluefin -> dakota` with `fail-fast: false` | `fafd0b9` |
 
 ## Previously Solved (earlier sessions)

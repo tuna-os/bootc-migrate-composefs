@@ -82,6 +82,31 @@ RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
 RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
     ln -sf /usr/lib/systemd/system/sshd.service \
            /usr/lib/systemd/system/multi-user.target.wants/sshd.service
+# Bluefin uses systemd-ssh-generator which only binds Unix-local + vsock —
+# no TCP listener on :22. Drop in our own socket-activated TCP listener so
+# port 22 actually answers. Uses /usr/sbin/sshd -i (inetd-style, one conn
+# per accept) which is the simplest path that works on every image with
+# openssh-server installed.
+RUN mkdir -p /etc/systemd/system && \
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=E2E SSH TCP Socket (port 22)' \
+        '[Socket]' \
+        'ListenStream=22' \
+        'Accept=yes' \
+        '[Install]' \
+        'WantedBy=sockets.target' \
+        > /etc/systemd/system/e2e-sshd.socket && \
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=E2E SSH per-connection service' \
+        '[Service]' \
+        'ExecStart=-/usr/sbin/sshd -i' \
+        'StandardInput=socket' \
+        > /etc/systemd/system/e2e-sshd@.service && \
+    mkdir -p /etc/systemd/system/sockets.target.wants && \
+    ln -sf /etc/systemd/system/e2e-sshd.socket \
+           /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
 # Allow root login
 RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
     echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
