@@ -86,12 +86,30 @@ pub fn run_migration(report: &PreflightReport, target_image: &str) -> Result<()>
 
     println!("=== Phase 2: Pulling OCI image ===");
     println!("Pulling target image: {}...", target_image);
-    let image_id = crate::composefs::pull_image(target_image)
+    let pull_output = crate::composefs::pull_image(target_image)
         .context("failed to pull OCI image")?;
-    println!("Target image pulled. Manifest digest: {}", image_id);
+    
+    let mut manifest_digest = String::new();
+    let mut config_digest = String::new();
+    for line in pull_output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("manifest ") {
+            manifest_digest = trimmed["manifest ".len()..].trim().to_string();
+        } else if trimmed.starts_with("config ") {
+            config_digest = trimmed["config ".len()..].trim().to_string();
+        }
+    }
+    
+    if manifest_digest.is_empty() {
+        manifest_digest = pull_output.trim().to_string();
+    }
+    if config_digest.is_empty() {
+        config_digest = manifest_digest.clone();
+    }
+    println!("Target image pulled. Manifest digest: {}, Config digest: {}", manifest_digest, config_digest);
 
     println!("=== Phase 3: Creating ComposeFS EROFS Image ===");
-    let sha512_verity = crate::composefs::create_image(&image_id)
+    let sha512_verity = crate::composefs::create_image(&config_digest)
         .context("failed to create composefs image")?;
     println!("ComposeFS EROFS image created. Verity digest: {}", sha512_verity);
 
@@ -125,7 +143,7 @@ pub fn run_migration(report: &PreflightReport, target_image: &str) -> Result<()>
 
     // Write .imginfo file
     println!("Writing .imginfo file...");
-    if let Ok(config_json) = inspect_image(&image_id) {
+    if let Ok(config_json) = inspect_image(&manifest_digest) {
         let imginfo_path = deploy_dir.join(format!("{}.imginfo", sha512_verity));
         let _ = fs::write(&imginfo_path, config_json);
     }
@@ -140,7 +158,7 @@ pub fn run_migration(report: &PreflightReport, target_image: &str) -> Result<()>
     fs::create_dir_all(&temp_mount)?;
     
     println!("Mounting ComposeFS image to extract boot artifacts...");
-    mount_image(&image_id, &temp_mount).context("failed to mount composefs image")?;
+    mount_image(&manifest_digest, &temp_mount).context("failed to mount composefs image")?;
     
     let result = (|| -> Result<()> {
         // Find kernel version from mounted image /usr/lib/modules
