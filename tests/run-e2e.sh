@@ -388,11 +388,37 @@ fi
 # with an empty NVRAM, OVMF re-scans the ESP, and Fedora\shim wins over our
 # freshly-installed \EFI\systemd\systemd-bootx64.efi. That defeats the purpose
 # of `efibootmgr --create` because the new BootOrder never survives a reboot.
-# Initialise a 4 MB zeroed VARS file once per run — OVMF will populate it with
-# defaults on first boot and the migration's NVRAM changes will then persist.
+#
+# A zeroed file is NOT a valid VARS image — OVMF treats it as uninitialised and
+# keeps NVRAM in volatile memory. We need a real template with the variable-store
+# header. Locate one (Fedora ships /usr/share/OVMF/OVMF_VARS_4M.fd in containers;
+# upstream brew builds don't include it) and pad it to 4 MB to match the CODE
+# pflash size. Cache the prepared file under workspace/ovmf_vars.fd.
 OVMF_VARS="$WORKSPACE_DIR/ovmf_vars.fd"
 if [ ! -f "$OVMF_VARS" ] || [ "$SKIP_SETUP" = false ]; then
-    rm -f "$OVMF_VARS"
+    VARS_TEMPLATE=""
+    for cand in \
+        /usr/share/OVMF/OVMF_VARS_4M.fd \
+        /usr/share/edk2/ovmf/OVMF_VARS.fd \
+        /usr/share/edk2-ovmf/x64/OVMF_VARS.fd
+    do
+        if [ -f "$cand" ]; then VARS_TEMPLATE="$cand"; break; fi
+    done
+    if [ -z "$VARS_TEMPLATE" ]; then
+        # Fall back to any OVMF_VARS_4M.fd under container storage layers.
+        VARS_TEMPLATE=$(sudo find /sysroot /var/lib/containers -name 'OVMF_VARS_4M.fd' 2>/dev/null \
+                        | grep -v secboot | grep -v snakeoil | grep -v '\.ms\.' | head -1)
+    fi
+    if [ -z "$VARS_TEMPLATE" ]; then
+        echo "ERROR: cannot find an OVMF VARS template. NVRAM won't persist," >&2
+        echo "       so systemd-boot migration tests will silently fall back to" >&2
+        echo "       Fedora\\shim and the post-reboot validation will fail." >&2
+        exit 1
+    fi
+    echo "Using OVMF VARS template: $VARS_TEMPLATE"
+    sudo cp "$VARS_TEMPLATE" "$OVMF_VARS"
+    sudo chown "$(id -u):$(id -g)" "$OVMF_VARS"
+    chmod u+w "$OVMF_VARS"
     truncate -s 4M "$OVMF_VARS"
 fi
 
