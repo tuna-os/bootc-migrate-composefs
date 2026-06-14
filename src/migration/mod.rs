@@ -693,7 +693,7 @@ fn phase5_setup_bootloader(
                     esp_initrd = esp_boot_dir.join("initrd");
                     extract.push((in_container_initrd.as_path(), esp_initrd.as_path()));
                 }
-                extract_files_via_podman(target_image, &extract)
+                extract_files_via_skopeo(target_image, &extract)
                     .context("failed to extract kernel/initrd from target image via podman")?;
 
                 // Build composefs BLS entry.
@@ -876,63 +876,136 @@ fn phase5_setup_bootloader(
 /// Copy systemd-boot binaries from the mounted target image to the ESP.
 /// This avoids needing systemd-boot installed in the *source* OS (Bluefin) — we lift
 /// it straight out of the Dakota image that's already mounted for kernel extraction.
-/// Extract a list of files from the target OCI image via `podman create` + `podman cp`.
-/// This is the reliable path: the composefs EROFS mount returns zero-filled content for
-/// any file past the inline-data threshold, and `bootc internals cfs oci mount` requires
-/// a stream layout that isn't populated by our pull flow. Podman, having pulled the same
-/// image into its own store, can extract real content via OCI layer unpacking.
+/// Extract a list of files from the target OCI image using `skopeo` + `tar -O`.
 ///
-/// `files` is a list of (source-path-inside-container, destination-on-host) pairs.
-/// All destination parent directories must already exist.
-fn extract_files_via_podman(image_ref: &str, files: &[(&Path, &Path)]) -> Result<()> {
-    // Ensure podman has the image. The migration tool already pulled it via bootc into
-    // composefs storage, but podman uses a separate store. The local-registry mirror
-    // used in E2E (and any normal pull) makes this fast; for a regular ghcr.io ref it's
-    // a one-time cost amortised across all extracted files.
-    let pull = Command::new("podman")
-        .args(["pull", "--quiet", image_ref])
+/// We can't read these files from the local EROFS mount (zero-fills past the inline
+/// threshold) and we can't use `podman cp` either: it would have to unpack the whole
+/// image into the local overlay store just so it can extract three files, which
+/// reliably ENOSPCs on tight bootc systems. Skopeo's `dir:` format keeps the raw
+/// compressed layer blobs on disk without expanding them, so the footprint is roughly
+/// "compressed image size" instead of "compressed + expanded".
+///
+/// `files` is a list of (in-container source path, on-host destination path) pairs.
+/// Destination parent directories must already exist. The OCI layers are scanned
+/// newest-first; the first hit wins (matches how the OCI image overlay would resolve).
+fn extract_files_via_skopeo(image_ref: &str, files: &[(&Path, &Path)]) -> Result<()> {
+    // /var/tmp lives on the real filesystem (unlike /tmp which is tmpfs on most
+    // bootc systems). The image blobs can be a few GB; we don't want them sitting in RAM.
+    let tmp = tempfile::Builder::new()
+        .prefix("bootc-migrate-extract-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for skopeo extraction")?;
+    let oci_dir = tmp.path().join("oci");
+
+    // dir: writes raw blobs (manifest.json + every blob keyed by digest, no overlay).
+    let skopeo = Command::new("skopeo")
+        .args([
+            "copy",
+            "--src-tls-verify=false",
+            &format!("docker://{}", image_ref),
+            &format!("dir:{}", oci_dir.display()),
+        ])
         .status()
-        .context("failed to invoke podman pull for boot-artifact extraction")?;
-    if !pull.success() {
-        return Err(anyhow!("podman pull {} failed", image_ref));
+        .context("failed to invoke skopeo for boot-artifact extraction")?;
+    if !skopeo.success() {
+        return Err(anyhow!("skopeo copy {} failed", image_ref));
     }
 
-    let create = Command::new("podman")
-        .args(["create", "--quiet", image_ref])
-        .output()
-        .context("failed to invoke podman create")?;
-    if !create.status.success() {
-        return Err(anyhow!(
-            "podman create failed: {}",
-            String::from_utf8_lossy(&create.stderr).trim()
-        ));
-    }
-    let cid = String::from_utf8_lossy(&create.stdout).trim().to_string();
+    let manifest_str = fs::read_to_string(oci_dir.join("manifest.json"))
+        .context("failed to read skopeo manifest.json")?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_str).context("failed to parse skopeo manifest.json")?;
+    let layers = manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("skopeo manifest has no layers array"))?;
 
-    let result = (|| -> Result<()> {
-        for (src, dst) in files {
-            let src_str = src.to_str().ok_or_else(|| anyhow!("invalid src path"))?;
-            let dst_str = dst.to_str().ok_or_else(|| anyhow!("invalid dst path"))?;
-            let cp = Command::new("podman")
-                .args(["cp", &format!("{}:{}", cid, src_str), dst_str])
-                .output()
-                .context("failed to invoke podman cp")?;
-            if !cp.status.success() {
-                return Err(anyhow!(
-                    "podman cp {} -> {} failed: {}",
-                    src_str,
-                    dst_str,
-                    String::from_utf8_lossy(&cp.stderr).trim()
-                ));
+    // Track remaining (src, dst) pairs. We mutate this as we satisfy entries.
+    let mut remaining: Vec<(&Path, &Path)> = files.iter().copied().collect();
+
+    // Walk layers newest (last in manifest) to oldest, since overlay semantics put
+    // upper layers first. systemd-boot binaries are typically near the top.
+    for layer in layers.iter().rev() {
+        if remaining.is_empty() {
+            break;
+        }
+        let digest = layer
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("layer entry has no digest"))?;
+        let digest_hex = digest.trim_start_matches("sha256:");
+        let blob = oci_dir.join(digest_hex);
+        if !blob.exists() {
+            continue;
+        }
+
+        let mut still_needed: Vec<(&Path, &Path)> = Vec::new();
+        for (src, dst) in remaining.into_iter() {
+            if extract_one_from_layer(&blob, src, dst)? {
+                // Got it. Don't keep looking in older layers.
+            } else {
+                still_needed.push((src, dst));
             }
         }
-        Ok(())
-    })();
+        remaining = still_needed;
+    }
 
-    // Always clean up the container, even on extraction failure.
-    let _ = Command::new("podman").args(["rm", "-f", &cid]).output();
+    if !remaining.is_empty() {
+        let missing: Vec<String> = remaining
+            .iter()
+            .map(|(s, _)| s.display().to_string())
+            .collect();
+        return Err(anyhow!(
+            "target image is missing files: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
 
-    result
+/// Try to extract a single file from one OCI layer blob to `dst`. Returns Ok(true)
+/// if found, Ok(false) if the path wasn't in this layer (caller continues to the
+/// next layer), Err on unexpected tar/IO failure.
+///
+/// OCI layer tarballs are gzip- or zstd-compressed and may store paths with or
+/// without a leading `./`, so we try both forms. `tar -xaf` autodetects compression.
+fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
+    let src_no_leading = src
+        .strip_prefix("/")
+        .unwrap_or(src)
+        .to_string_lossy()
+        .into_owned();
+    let candidates = [format!("./{}", src_no_leading), src_no_leading.clone()];
+
+    for candidate in &candidates {
+        // Stream directly to disk — initrds can be ~200 MB, no reason to buffer.
+        let dst_file = fs::File::create(dst).with_context(|| {
+            format!("failed to open destination {} for tar extract", dst.display())
+        })?;
+        let status = Command::new("tar")
+            .args([
+                "-xaf",
+                blob.to_str().ok_or_else(|| anyhow!("invalid blob path"))?,
+                "-O",
+                candidate,
+            ])
+            .stdout(dst_file)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("failed to invoke tar for layer extraction")?;
+        if status.success() {
+            // tar emitted to stdout — verify we got actual bytes (some tar versions
+            // exit 0 even when the path isn't in the archive, just producing empty).
+            if let Ok(meta) = fs::metadata(dst) {
+                if meta.len() > 0 {
+                    return Ok(true);
+                }
+            }
+        }
+        // Clean the empty destination so the next attempt starts fresh.
+        let _ = fs::remove_file(dst);
+    }
+    Ok(false)
 }
 
 fn install_systemd_boot_from_target(
@@ -956,7 +1029,7 @@ fn install_systemd_boot_from_target(
     fs::create_dir_all(&removable_dir)?;
 
     let sd_dst = sd_dir.join("systemd-bootx64.efi");
-    extract_files_via_podman(
+    extract_files_via_skopeo(
         target_image,
         &[(
             Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi"),

@@ -2,36 +2,60 @@
 
 **Repository:** `hanthor/ostree-composefs-rebase`  
 **Goal:** In-place migration from OSTree-booted Bluefin:stable to ComposeFS-booted Dakota:stable via systemd-boot  
-**Last updated:** 2026-06-14 (sd-boot now sourced from target image)  
+**Last updated:** 2026-06-14 (EROFS+podman content corruption still open)  
 
 ---
 
+## End Goal
+
+A Bluefin:stable user runs the migration binary once and ends up booted on Dakota:stable via systemd-boot + composefs, with `/home`, `/etc` customizations, `/var` (flatpaks, container storage, logs), and user accounts preserved. "Migration completed" output is not success — composefs must actually boot AND user data must remain intact.
+
 ## What Works
 
-The migration binary successfully completes all 5 phases end-to-end in E2E testing. The last run produced:
-
-```
-=== MIGRATION COMPLETED ===
-Primary bootloader: systemd-boot
-```
-
-All phases complete without errors:
-- **Phase 0**: Free-space check passes
-- **Phase 1**: OSTree object import (skipped via --skip-import)
-- **Phase 2**: OCI pull from local registry (fast)
-- **Phase 3**: ComposeFS EROFS image creation + seal (idempotent on re-runs)
-- **Phase 4**: /etc 3-way merge, .origin, .imginfo, /var migration
-- **Phase 5**: Bootloader setup (systemd-boot on ESP + GRUB2 fallback on /boot)
+- Phase 0 free-space check, Phase 1 OSTree import (skippable), Phase 2 OCI pull, Phase 3 EROFS seal (idempotent), Phase 4 /etc 3-way merge / .origin / .imginfo / /var handling, Phase 5 bootloader staging (BLS entries + loader.conf + efibootmgr NVRAM registration).
+- systemd-boot BLS entry shows up in the loader menu and is selected as default; OSTree fallback is also presented.
 
 ## Previously Solved
 
 | Blocker | Resolution | SHA |
 |---------|------------|-----|
 | Phase 5 silently writes ESP BLS entries with no systemd-boot binary on ESP → VM falls back to OSTree | Preflight `systemd_boot_binaries_present` field added; Phase 5 originally routed to GRUB2 when source binary absent | a4b231a |
-| GRUB2 fallback path set `next_entry` via `grub2-reboot` but bootupd's grub.cfg has no `if [ "${next_entry}" ]` block, so the one-shot was silently ignored | Phase 5 now writes `saved_entry` directly via `grub2-editenv` (with `grub2-set-default` as backup) instead of relying on grub2-reboot | e0b543f |
-| Required systemd-boot package on source (Bluefin) OS | Phase 5 now lifts `systemd-bootx64.efi` out of the mounted Dakota composefs image and copies it to `<ESP>/EFI/systemd/` + `<ESP>/EFI/BOOT/BOOTX64.EFI`; `efibootmgr --create` registers `Linux Boot Manager`; the source OS no longer needs systemd-boot | e0b543f |
+| GRUB2 fallback path set `next_entry` via `grub2-reboot` but bootupd's grub.cfg has no `if [ "${next_entry}" ]` block, so the one-shot was silently ignored | Phase 5 now writes `saved_entry` directly via `grub2-editenv` | e0b543f |
+| Required systemd-boot package on source (Bluefin) OS | Phase 5 sources `systemd-bootx64.efi` from the target image; efibootmgr registers `Linux Boot Manager` | e0b543f |
+| Raw EROFS mount returned zero-filled content past inline threshold | Tried `bootc internals cfs oci mount` first (commit `7abda35`) — but it fails because the pull flow doesn't populate `streams/oci-config-<verity>` ref; fell back to broken EROFS path silently | 7abda35 |
+| EROFS-corrupted vmlinuz+initrd+sd-boot still ending up on ESP/boot | Switched to `podman create` + `podman cp` to extract real bytes from target image (commit `76628a4`) — but podman pull blew the VM's disk (ENOSPC in `/var/lib/containers/storage`) so extraction failed and migration fell back to GRUB2 with corrupt boot artifacts | 76628a4 |
 
-## Current Blocker: verify end-to-end systemd-boot migration on Bluefin → Dakota
+## Current Blocker: extract boot binaries from target image without filling the disk
+
+The target image is already on disk twice (sealed EROFS at `/sysroot/composefs/images/<verity>` and pull artifacts at `/sysroot/composefs/streams/…`), but no straightforward tool reads it back:
+- Raw `mount -t erofs -o ro,loop` returns metadata-only views (zero-filled file content past inline threshold).
+- `bootc internals cfs --system oci mount <verity>` fails: `Opening ref 'streams/oci-config-<verity>': No such file or directory` — bootc looks for an OCI-config stream keyed by the EROFS verity, which our pull doesn't create.
+- `podman pull <target>` works but needs ~5 GB of overlay storage just to extract three files; busted the 11.5 GB free space in the VM during the last run.
+- `mount.composefs` / `composefs-info` are not installed on Bluefin.
+
+### Next candidate fixes (ranked)
+
+1. **Skopeo to `dir:` then stream-extract specific files from layer tarballs.** `skopeo copy --src-tls-verify=false docker://… dir:/tmp/oci` writes raw layer tarballs (compressed) without overlay-storage expansion. Walk layers newest-first; for each, `tar -xzf - <path>` looking for `usr/lib/systemd/boot/efi/systemd-bootx64.efi`, `usr/lib/modules/<kver>/vmlinuz`, `usr/lib/modules/<kver>/initramfs.img`. Stop at first hit per file. Compressed layer footprint is ~1–2 GB total, no overlay unpack.
+2. **`bootc image copy-to-storage` equivalent.** Investigate whether bootc has a CLI for "give me a file out of an already-pulled OCI image" — would avoid the second download entirely.
+3. **In-tree EROFS parser.** Open `/sysroot/composefs/images/<verity>`, walk inodes, resolve content sha256, read from `/sysroot/composefs/objects/<sha[:2]>/<sha[2:]>`. Adds a real dependency (`erofs` crate or hand-rolled parser).
+
+### Diagnostics to run on next E2E
+
+- Inside VM pre-extraction: `ls /sysroot/composefs/`, `ls /sysroot/composefs/streams/ 2>/dev/null`, `df -h /var/lib/containers /sysroot`. Confirms what bootc actually persisted vs what podman/skopeo would need to re-download.
+- After extraction: `md5sum <esp>/EFI/systemd/systemd-bootx64.efi <esp>/EFI/Linux/bootc_composefs-*/vmlinuz` and compare to the same files extracted by `podman cp` directly on the host — sanity-check we got real content.
+
+## Recently Tried (and why it failed)
+
+- `bootc internals cfs --system oci mount` (7abda35) — preferred over raw EROFS, but errors out with missing `streams/oci-config-<verity>` ref.
+- `podman create` + `podman cp` (76628a4) — pulls correct bytes but ENOSPC when the second image copy doesn't fit on the VM's overlay store. Will work on a bigger disk; not viable for tight VMs.
+
+## Pending (after extraction is solved)
+
+- Realistic user setup in E2E (primary user via useradd, gnome-initial-setup-done, dconf, ~/.config) seeded pre-migration and asserted post-reboot.
+- `--post-hook-dir` flag (default `/etc/bootc-migrate-composefs/post-migrate.d`) for migration-specific cleanup like ublue-motd. Hooks get env: `COMPOSEFS_VERITY`, `TARGET_IMAGE`, `ESP_PATH`, `BOOTLOADER`.
+- Exercise the `commit` subcommand end-to-end.
+
+## Original Blocker Doc (kept for reference)
 
 The primary migration path now installs systemd-boot from the target image:
 - Writes `bootc_*.conf` (composefs default) and `ostree-fallback-0.conf` (Bluefin OSTree) to `<ESP>/loader/entries/`.
