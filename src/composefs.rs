@@ -2,8 +2,14 @@ use std::process::Command;
 use anyhow::{anyhow, Result, Context};
 
 pub fn pull_image(image_ref: &str) -> Result<String> {
+    let final_ref = if image_ref.contains("://") {
+        image_ref.to_string()
+    } else {
+        format!("docker://{}", image_ref)
+    };
+
     let output = Command::new("bootc")
-        .args(["internals", "cfs", "--system", "oci", "pull", image_ref])
+        .args(["internals", "cfs", "--system", "oci", "pull", &final_ref])
         .output()
         .context("failed to execute bootc internals cfs oci pull")?;
         
