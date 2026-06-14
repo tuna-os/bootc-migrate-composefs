@@ -35,4 +35,4 @@ jobs:
           TARGET_IMAGE: "quay.io/fedora/fedora-bootc:44" # For self-test in CI, pull same image to verify ComposeFS conversion works
         run: |
           # Run the test runner as root since loop mounts and podman --privileged are required
-          sudo -E ./tests/run-e2e.sh
+          sudo -E PATH=$PATH ./tests/run-e2e.sh
