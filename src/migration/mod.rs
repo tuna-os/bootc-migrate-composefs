@@ -664,6 +664,15 @@ fn ensure_e2e_ssh_socket(etc_dir: &Path) -> Result<()> {
         println!("[phase4] removed sshd.service enablement (e2e-sshd.socket provides TCP 22)");
     }
 
+    // Remove ostree-remount.service enablement — on composefs, OSTree bind
+    // mounts are irrelevant and the service would fail or create stale mounts
+    // under /sysroot/ostree (which we delete on commit).
+    let remount_enable = systemd_dir.join("local-fs.target.wants/ostree-remount.service");
+    if remount_enable.exists() || remount_enable.is_symlink() {
+        fs::remove_file(&remount_enable)?;
+        println!("[phase4] removed ostree-remount.service enablement (composefs doesn't need OSTree bind mounts)");
+    }
+
     println!("[phase4] ensured e2e-sshd.socket in deploy /etc");
     Ok(())
 }
