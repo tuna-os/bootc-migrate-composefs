@@ -660,6 +660,16 @@ fn ensure_e2e_ssh_socket(etc_dir: &Path) -> Result<()> {
     }
     std::os::unix::fs::symlink("../e2e-sshd.socket", &symlink)?;
 
+    // Remove the sshd.service enablement symlink if it survived the merge.
+    // e2e-sshd.socket provides TCP 22 via socket activation; having both
+    // sshd.service (sshd -D) and e2e-sshd.socket on port 22 causes a port
+    // conflict that kills the daemon process with 255/EXCEPTION.
+    let sshd_enable = systemd_dir.join("multi-user.target.wants/sshd.service");
+    if sshd_enable.exists() || sshd_enable.is_symlink() {
+        fs::remove_file(&sshd_enable)?;
+        println!("[phase4] removed sshd.service enablement (e2e-sshd.socket provides TCP 22)");
+    }
+
     println!("[phase4] ensured e2e-sshd.socket in deploy /etc");
     Ok(())
 }
