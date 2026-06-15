@@ -546,6 +546,55 @@ useradd -m -U realuser 2>/dev/null || true
 mkdir -p /var/home/realuser
 echo "real-home-data" > /var/home/realuser/home-marker.txt
 chown -R realuser:realuser /var/home/realuser
+
+# Full-fat /etc config drift (#23): realistic per-machine edits a desktop
+# user makes which the migration MUST preserve.
+mkdir -p /etc/sudoers.d
+echo "realuser ALL=(ALL) NOPASSWD: /usr/bin/dnf" > /etc/sudoers.d/90-realuser
+chmod 440 /etc/sudoers.d/90-realuser
+echo "10.0.0.42  e2e-migration-test.local" >> /etc/hosts
+mkdir -p /etc/ssh/sshd_config.d
+printf 'X11Forwarding yes\nClientAliveInterval 60\n' > /etc/ssh/sshd_config.d/99-local.conf
+
+# Full-fat user state (#23): drop the kind of files a real Bluefin
+# desktop accumulates — wallpaper, GNOME extension, dconf db / gsettings
+# keyfile (accent color, dark mode, wallpaper URI, custom keybinding),
+# homebrew prefix, flatpak user + system installs.
+mkdir -p /var/home/realuser/Pictures
+printf 'PNGFAKE\xfe\x00wallpaper-bytes\n' > /var/home/realuser/Pictures/migration-wallpaper.png
+mkdir -p /var/home/realuser/.local/share/gnome-shell/extensions/migration-test@e2e
+cat > /var/home/realuser/.local/share/gnome-shell/extensions/migration-test@e2e/metadata.json <<'EXTMETA'
+{
+  "name": "Migration Test Extension",
+  "uuid": "migration-test@e2e",
+  "version": 1,
+  "shell-version": ["45", "46"]
+}
+EXTMETA
+echo "// migration-test extension stub" > /var/home/realuser/.local/share/gnome-shell/extensions/migration-test@e2e/extension.js
+mkdir -p /var/home/realuser/.config/dconf
+echo "DCONF-USER-DB-SENTINEL" > /var/home/realuser/.config/dconf/user
+mkdir -p /var/home/realuser/.config/glib-2.0/settings
+cat > /var/home/realuser/.config/glib-2.0/settings/keyfile <<'GSETTINGS'
+[org/gnome/desktop/interface]
+accent-color='blue'
+color-scheme='prefer-dark'
+
+[org/gnome/desktop/background]
+picture-uri='file:///var/home/realuser/Pictures/migration-wallpaper.png'
+
+[org/gnome/desktop/wm/keybindings]
+switch-windows=['<Alt>Tab']
+GSETTINGS
+mkdir -p /var/home/linuxbrew/.linuxbrew/Cellar/jq/1.7.1/bin
+printf '#!/bin/sh\necho jq stub\n' > /var/home/linuxbrew/.linuxbrew/Cellar/jq/1.7.1/bin/jq
+chmod 755 /var/home/linuxbrew/.linuxbrew/Cellar/jq/1.7.1/bin/jq
+echo '{"name":"jq","version":"1.7.1"}' > /var/home/linuxbrew/.linuxbrew/Cellar/jq/1.7.1/INSTALL_RECEIPT.json
+mkdir -p /var/home/realuser/.local/share/flatpak/app/org.gnome.Calculator/current/active
+echo "flatpak-user-stub-org.gnome.Calculator" > /var/home/realuser/.local/share/flatpak/app/org.gnome.Calculator/current/active/metadata
+mkdir -p /var/lib/flatpak/app/com.example.SystemApp/current/active
+echo "flatpak-system-stub-com.example.SystemApp" > /var/lib/flatpak/app/com.example.SystemApp/current/active/metadata
+chown -R realuser:realuser /var/home/realuser 2>/dev/null || true
 ETCFIX
 
 step "=== Running migration inside VM ==="
@@ -806,5 +855,86 @@ if [ "$REALUSER_ENT" = "MISSING" ]; then
     exit 1
 fi
 echo "OK: User account from /etc/passwd preserved: $REALUSER_ENT"
+
+# --- Full-fat user state assertions (#23) ---
+step "=== Running full-fat user state validation ==="
+
+# /etc/sudoers.d/<name> — per-machine privilege drift
+SUDOERS_LINE=$(ssh $SSH_OPTS root@localhost "cat /etc/sudoers.d/90-realuser 2>/dev/null")
+if [ "$SUDOERS_LINE" != "realuser ALL=(ALL) NOPASSWD: /usr/bin/dnf" ]; then
+    echo "FAIL: /etc/sudoers.d/90-realuser not preserved (got: $SUDOERS_LINE)"; exit 1
+fi
+SUDOERS_MODE=$(ssh $SSH_OPTS root@localhost "stat -c '%a' /etc/sudoers.d/90-realuser")
+if [ "$SUDOERS_MODE" != "440" ]; then
+    echo "FAIL: /etc/sudoers.d/90-realuser mode changed (expected 440, got $SUDOERS_MODE)"; exit 1
+fi
+echo "OK: /etc/sudoers.d entry preserved with 440 mode."
+
+# /etc/hosts append
+HOSTS_GREP=$(ssh $SSH_OPTS root@localhost "grep -c 'e2e-migration-test.local' /etc/hosts || true")
+if [ "$HOSTS_GREP" -lt 1 ]; then
+    echo "FAIL: /etc/hosts custom entry was not preserved"; exit 1
+fi
+echo "OK: /etc/hosts append preserved."
+
+# /etc/ssh/sshd_config.d/99-local.conf
+SSHDC=$(ssh $SSH_OPTS root@localhost "cat /etc/ssh/sshd_config.d/99-local.conf 2>/dev/null")
+if ! echo "$SSHDC" | grep -q 'X11Forwarding yes'; then
+    echo "FAIL: sshd_config.d/99-local.conf not preserved (got: $SSHDC)"; exit 1
+fi
+echo "OK: /etc/ssh/sshd_config.d/99-local.conf preserved."
+
+# Wallpaper file under user home
+WP=$(ssh $SSH_OPTS root@localhost "ls -l /var/home/realuser/Pictures/migration-wallpaper.png 2>/dev/null | awk '{print \$5}'")
+if [ -z "$WP" ] || [ "$WP" = "0" ]; then
+    echo "FAIL: wallpaper file missing or empty under /var/home/realuser/Pictures/"; exit 1
+fi
+echo "OK: wallpaper file ($WP bytes) preserved under /var/home/realuser/Pictures/."
+
+# GNOME extension dir
+EXT_META=$(ssh $SSH_OPTS root@localhost "cat /var/home/realuser/.local/share/gnome-shell/extensions/migration-test@e2e/metadata.json 2>/dev/null")
+if ! echo "$EXT_META" | grep -q 'migration-test@e2e'; then
+    echo "FAIL: GNOME extension metadata not preserved (got: $EXT_META)"; exit 1
+fi
+echo "OK: GNOME extension dir + metadata preserved."
+
+# dconf user db sentinel + gsettings keyfile fallback
+DCONF=$(ssh $SSH_OPTS root@localhost "cat /var/home/realuser/.config/dconf/user 2>/dev/null")
+if [ "$DCONF" != "DCONF-USER-DB-SENTINEL" ]; then
+    echo "FAIL: dconf user db not preserved (got: $DCONF)"; exit 1
+fi
+GSK=$(ssh $SSH_OPTS root@localhost "cat /var/home/realuser/.config/glib-2.0/settings/keyfile 2>/dev/null")
+if ! echo "$GSK" | grep -q "accent-color='blue'"; then
+    echo "FAIL: gsettings keyfile (accent color) not preserved"; exit 1
+fi
+if ! echo "$GSK" | grep -q 'migration-wallpaper.png'; then
+    echo "FAIL: gsettings keyfile (wallpaper URI) not preserved"; exit 1
+fi
+if ! echo "$GSK" | grep -q "switch-windows=\['<Alt>Tab'\]"; then
+    echo "FAIL: gsettings keyfile (custom keybinding) not preserved"; exit 1
+fi
+echo "OK: dconf db + gsettings keyfile (accent, wallpaper URI, keybinding) preserved."
+
+# Homebrew prefix
+BREW_RECEIPT=$(ssh $SSH_OPTS root@localhost "cat /var/home/linuxbrew/.linuxbrew/Cellar/jq/1.7.1/INSTALL_RECEIPT.json 2>/dev/null")
+if ! echo "$BREW_RECEIPT" | grep -q '"jq"'; then
+    echo "FAIL: Homebrew prefix not preserved (got: $BREW_RECEIPT)"; exit 1
+fi
+BREW_BIN_EXEC=$(ssh $SSH_OPTS root@localhost "test -x /var/home/linuxbrew/.linuxbrew/Cellar/jq/1.7.1/bin/jq && echo yes || echo no")
+if [ "$BREW_BIN_EXEC" != "yes" ]; then
+    echo "FAIL: brew formula binary lost executable bit"; exit 1
+fi
+echo "OK: Homebrew Cellar preserved (INSTALL_RECEIPT.json + executable binary mode)."
+
+# Flatpak user + system stubs
+FLAT_USER=$(ssh $SSH_OPTS root@localhost "cat /var/home/realuser/.local/share/flatpak/app/org.gnome.Calculator/current/active/metadata 2>/dev/null")
+if [ "$FLAT_USER" != "flatpak-user-stub-org.gnome.Calculator" ]; then
+    echo "FAIL: per-user flatpak install not preserved (got: $FLAT_USER)"; exit 1
+fi
+FLAT_SYS=$(ssh $SSH_OPTS root@localhost "cat /var/lib/flatpak/app/com.example.SystemApp/current/active/metadata 2>/dev/null")
+if [ "$FLAT_SYS" != "flatpak-system-stub-com.example.SystemApp" ]; then
+    echo "FAIL: system flatpak install not preserved (got: $FLAT_SYS)"; exit 1
+fi
+echo "OK: Flatpak user + system installations preserved."
 
 step "=== E2E TEST PASSED SUCCESSFULY ==="

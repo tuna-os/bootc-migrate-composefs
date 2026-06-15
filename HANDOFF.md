@@ -110,14 +110,13 @@ The E2E harness fails purely because **post-reboot SSH validation can't connect*
 - `/etc`, `/home`, `/var` persistence assertions
 - `commit` subcommand smoke test
 
-## Pending
+## Pending (in priority order)
 
-- **Slice 2**: `bootc status` verification (blocked by SSH)
-- **Slice 4**: Debug per-connection sshd -i 255 → read `/etc/ssh-debug.log`
-- **Slice 5**: /var, /etc, /home persistence assertions (blocked by SSH)
-- Realistic user setup in E2E
-- `--post-hook-dir` flag
-- Exercise `commit` subcommand
+- **#23 — Full-fat E2E** (in progress): exercise homebrew, flatpak, dconf settings (accent color, dark mode, keybindings), wallpaper, GNOME extensions.
+- **#22**: E2E rollback test + README Recovery section (verify OSTree fallback boot path).
+- **#18**: Derive Dakota with SSH baked in for E2E; drop `ensure_e2e_ssh_socket` from production code.
+- **#17**: `commit` subcommand drops OSTree-era /var paths (rpm-ostree, sysimage).
+- **#16**: Non-btrfs (xfs) support.
 
 ## Future UX
 
