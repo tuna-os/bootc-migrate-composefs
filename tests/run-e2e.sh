@@ -263,10 +263,20 @@ echo "Re-attached loop device: $LOOP_DEV"
 
 # 5. Inject SSH keys and configuration
 step "=== Injecting SSH credentials to disk image ==="
-# Create a temporary mount point
+# Find the btrfs root partition (not the ESP/vfat).
+ROOT_PART=""
+for p in "${LOOP_DEV}"p*; do
+    if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx btrfs; then
+        ROOT_PART="$p"; break
+    fi
+done
+if [ -z "$ROOT_PART" ]; then
+    echo "ERROR: could not find btrfs root partition on $LOOP_DEV" >&2
+    sudo losetup -d "$LOOP_DEV"; exit 1
+fi
 MNT_DIR="/tmp/mnt-e2e-disk"
 sudo mkdir -p "$MNT_DIR"
-sudo mount "${LOOP_DEV}p2" "$MNT_DIR"
+sudo mount "$ROOT_PART" "$MNT_DIR"
 
 # Wait a second for mount to settle
 sleep 1
@@ -306,7 +316,7 @@ Description=E2E SSH per-connection service
 ExecStart=-/usr/sbin/sshd -i
 StandardInput=socket
 SERVICEEOF
-sudo ln -sf /etc/systemd/system/e2e-sshd.socket \
+sudo ln -sf ../e2e-sshd.socket \
     "$ETC_SYSTEMD/sockets.target.wants/e2e-sshd.socket"
 
 # Create test fixtures in /var to verify state preservation
