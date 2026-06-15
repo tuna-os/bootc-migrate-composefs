@@ -3,8 +3,18 @@
 **Repository:** `hanthor/ostree-composefs-rebase`  
 **Goal:** In-place migration from OSTree-booted Bluefin:stable to ComposeFS-booted Dakota:stable via systemd-boot  
 **Agent:** pi (picked up from Claude Code session)  
-**Approach:** TDD vertical slices (5 slices total)  
-**Last updated:** 2026-06-15 (Slice 1 complete — origin schema unit tests green; Slice 2 E2E running)  
+**Approach:** TDD vertical slices (5 slices)  
+**Last updated:** 2026-06-15 (Slice 1-2 complete; Slice 3-4 partially complete — e2e-sshd.socket active but per-connection sshd -i exits 255 on Dakota; debugging with /etc/ssh-debug.log wrapper)
+
+---
+
+## Current State Summary
+
+**Migration succeeds:** Bluefin boots, SSH connects pre-migration, all 5 phases complete, Dakota composefs boots with systemd-boot, dbus/polkit/logind start, e2e-sshd.socket is active on port 22.
+
+**One remaining gap:** Per-connection `sshd -i` (spawned by e2e-sshd.socket) exits 255/EXCEPTION on Dakota. SSH connections reach the server ("Connection closed by 127.0.0.1") but are immediately dropped. `sshd -t` passes in chroot with deploy /etc + bind-mounted /var. SELinux context investigation pending.
+
+**Last diagnostic action:** `ensure_e2e_ssh_socket` now wraps `sshd -i` in a shell that logs exit code to `/etc/ssh-debug.log`. Awaiting E2E run to capture this (commit `e10aa16`).
 
 ---
 
@@ -12,11 +22,11 @@
 
 | # | Slice | Status |
 |---|-------|--------|
-| 1 | Unit: origin file schema is bootc-compatible (round-trip, digest patch, key preservation) | ✅ 5 tests green (SHA `1008766`) |
-| 2 | Integration: `bootc status` works after migration (no "No manifest_digest" or "Could not find boot digest") | 🔄 E2E running |
-| 3 | Integration: `e2e-sshd.socket` active post-migration | ⬜ |
-| 4 | Integration: `sshd.service` starts without 255/EXCEPTION | ⬜ |
-| 5 | Persistence: `/var`, `/etc`, `/home` assertions pass | ⬜ |
+| 1 | Unit: origin file schema is bootc-compatible | ✅ 5 tests green (SHA `1008766`) |
+| 2 | Integration: `bootc status` works after migration | ⬜ blocked by SSH (can't run bootc status without SSH) |
+| 3 | Integration: `e2e-sshd.socket` active post-migration | ✅ socket active on port 22, accepts connections |
+| 4 | Integration: per-connection `sshd -i` works post-migration | 🔄 exits 255 — debugging via /etc/ssh-debug.log wrapper |
+| 5 | Persistence: `/var`, `/etc`, `/home` assertions pass | ⬜ blocked by SSH |
 
 ---
 
@@ -26,9 +36,12 @@ A Bluefin:stable user runs the migration binary once and ends up booted on Dakot
 
 ## What Works
 
-- Phase 0 free-space check, Phase 1 OSTree import (skippable), Phase 2 OCI pull, Phase 3 EROFS seal (idempotent), Phase 4 /etc 3-way merge / .origin / .imginfo / /var handling, Phase 5 bootloader staging (BLS entries + loader.conf + efibootmgr NVRAM registration).
-- `.origin` file uses `tini::Ini` for byte-compatible formatting with bootc's parser; includes `container-image-reference`, `boot_type=bls`, placeholder `boot_digest` (patched in Phase 5 with real sha256(vmlinuz||initrd)), and `manifest_digest`.
-- systemd-boot BLS entry shows up in the loader menu and is selected as default; recovery via firmware menu or GRUB (no fallback BLS on ESP to avoid breaking `bootc status`).
+- Phase 0 free-space check, Phase 1 OSTree import (skippable), Phase 2 OCI pull, Phase 3 EROFS seal (idempotent), Phase 4 /etc 3-way merge / .origin / .imginfo / /var handling / dangling symlink pruning / identity DB line-merge / e2e-sshd.socket provisioning, Phase 5 bootloader staging.
+- `.origin` file uses `tini::Ini`; includes `container-image-reference`, `boot_type=bls`, real `boot_digest` (sha256 of vmlinuz||initrd, patched after extraction), and `manifest_digest`.
+- systemd-boot BLS entry shows up as default; recovery via firmware menu or GRUB.
+- composefs boots with dbus.socket, polkit, logind, NetworkManager all reaching `Started`.
+- e2e-sshd.socket active on TCP 22 post-migration; accepts connections.
+- sshd.service disabled in deploy /etc (prevents port conflict with e2e-sshd.socket).
 
 ## Previously Solved
 
@@ -47,55 +60,49 @@ A Bluefin:stable user runs the migration binary once and ends up booted on Dakot
 | Cross-image migration silently dropped source-only files (e2e-sshd.socket, flatpak-nuke-fedora.service, etc.) when source factory ≡ live ≡ target=absent. Standard OSTree upgrade rule "if old==cur and new==None, drop" assumes same-image upgrades; for cross-image migration it deletes legitimate state | Changed file merge arm `(Some(_), Some(cur), None) => Some(cur)` — keep cur. Old test renamed and assertion flipped; new test `merge_keeps_source_only_unit_when_target_lacks_it` guards the e2e-sshd.socket case | TBD |
 | `bootc status` fails with "No manifest_digest in origin and no legacy .imginfo file" | Switched to `tini::Ini` for byte-compatible .origin formatting; key `container` → `container-image-reference` (matches `ORIGIN_CONTAINER` constant); added `manifest_digest` to `[boot]` section so bootc can fetch OCI manifest from registry; `patch_origin_boot_digest` computes sha256(vmlinuz || initrd) after Phase 5 extraction | `9abeb0b` |
 | OSTree fallback BLS entry on ESP broke `bootc status` (bootc parses every non-EFI ESP entry as composefs deployment, bails on missing `composefs=` cmdline) | Removed OSTree fallback from ESP entirely; recovery via firmware menu (`Fedora\shimx64.efi`) or GRUB; `build_ostree_fallback_on_esp` kept as `#[allow(dead_code)]` | `9abeb0b` |
-| Origin file schema extractable + testable | Extracted `build_origin_content` + `patch_boot_digest_in_content` as pure functions; 5 unit tests: round-trip through `tini::Ini`, deterministic output, digest replacement, key preservation, garbage-input rejection | `1008766` |
-| sshd 255/EXCEPTION — root cause: `sshd_config.d/40-redhat-crypto-policies.conf` from Bluefin survived merge and references `/etc/crypto-policies/back-ends/opensshserver.config` which doesn't exist in Dakota | Adopted composefs 3-way merge semantic: `(Some(old), Some(cur), None)` with `old==cur` → drop (system file the target removed). This correctly drops Red Hat sshd_config.d files while preserving user-created files (only in cur). Moved e2e-sshd.socket out of Containerfile into live /etc injection so it's user-created and survives merge. | `9027a5f` |
+| Origin file schema testable | Extracted `build_origin_content` + `patch_boot_digest_in_content` pure fns; 5 unit tests | `1008766` |
+| sshd 255/EXCEPTION root cause #1: `sshd_config.d/40-redhat-crypto-policies.conf` from Bluefin survived merge, referencing `/etc/crypto-policies/` absent in Dakota | Adopted composefs 3-way merge semantic: `(Some(old), Some(cur), None)` with `old==cur` → drop (system file the target removed) | `9027a5f` |
+| sshd 255/EXCEPTION root cause #2: `sshd.service` enablement symlink from Bluefin survived merge into Dakota deploy /etc, causing port conflict with e2e-sshd.socket | `ensure_e2e_ssh_socket` removes `multi-user.target.wants/sshd.service` symlink in deploy /etc | `4c703d6` |
+| Migration binary not used in E2E (build was from old binary) | E2E uses `cargo build` at start of each run; binary is always fresh | n/a — workflow fix |
+| `sshd` binary at `/usr/bin/sshd`, not `/usr/sbin/sshd` in Bluefin/Dakota | Fixed path in e2e-sshd@.service | `7a10476` |
+| GitHub issues cleanup | Closed 12 implemented issues; filed #15 for config drift GUI | n/a |
+| E2E injection writing to ESP (vfat) instead of btrfs root | Fixed to find btrfs partition via blkid | `fc0c3a5` |
+| sshd_config.d/90-e2e.conf not created (missing mkdir -p) | Fixed mkdir -p for sshd_config.d directory | `b7d8cc3` |
 
-## Current Blocker: E2E verification pending
+## Current Blocker: sshd -i exits 255 on Dakota (per-connection, socket-activated)
 
-Composefs boots but post-reboot SSH fails (sshd 255/EXCEPTION). Root cause identified and fixed (`9027a5f`): Bluefin's `sshd_config.d/40-redhat-crypto-policies.conf` survived the 3-way /etc merge and its `Include /etc/crypto-policies/back-ends/opensshserver.config` fails because Dakota doesn't have Red Hat crypto-policies. Fix: composefs merge semantic drops source-only system files when user didn't modify them. E2E running to verify.
+**Symptom:** SSH connections reach the VM ("Connection closed by 127.0.0.1"). e2e-sshd.socket is active on TCP 22. Each per-connection `sshd -i` exits 255 immediately.
 
-### Remaining blocker symptoms (pre-fix reference)
-- Goes through `e2e-sshd.socket` (socket-activated per-connection sshd; the socket is preserved by Phase 4 now)
-- systemd forks `/usr/sbin/sshd -i` as PID 838
-- The session dies 65ms later with `code=exited, status=255/EXCEPTION`
-- No protocol error visible in qemu.log — sshd's own stderr goes to journal which serial doesn't capture
+**What's verified working:**
+- `sshd -t` exits 0 with deploy /etc + bind-mounted /var
+- `sshd -d -i` accepts connections in chroot (no crash)
+- Host keys present with correct 600 perms; sshd_config.d only has `20-systemd-userdb.conf`
+- /var/empty exists; sshd.service enablement removed from deploy /etc
 
-What's verified intact in `/sysroot/state/deploy/<verity>/etc/`:
-- `passwd` has root, sshd (privsep), messagebus, polkitd, every Dakota system user (line-merged)
-- `ssh/ssh_host_{rsa,ecdsa,ed25519}_key` present
-- `ssh/sshd_config` is Dakota's (file merge picked it)
-- `pam.d/sshd` → `password-auth` → `/etc/authselect/password-auth` (target exists, 1272 bytes)
-- `/var/roothome/.ssh/authorized_keys` 567 B with the freshly reseeded test key
+**What differs between chroot (works) and real boot (fails):**
+- SELinux: chroot has no SELinux; real boot is enforcing
+- Environment: systemd socket activation passes fd vs chroot's bash pipe
 
-Candidate next probes:
-1. **Capture sshd's actual stderr** — add `Environment=SSH_DEBUG=1` or run `/usr/sbin/sshd -d -i` in `e2e-sshd@.service`'s ExecStart, redirect to console.
-2. **PAM stack** — `/etc/pam.d/password-auth` is a symlink to `/etc/authselect/password-auth`; verify the authselect contents reference modules Dakota ships (e.g. `pam_sss.so` might be present in Bluefin's authselect but Dakota lacks libsss; sshd would 255 on PAM init failure).
-3. **/etc/security/limits.conf, /etc/login.defs** — sshd-session may fail early if these reference missing config.
-4. **NSS plugin libraries** — `/etc/authselect/nsswitch.conf` references `altfiles systemd`; if Dakota's glibc doesn't ship the `altfiles` NSS module, every NSS lookup short-circuits.
+**Current diagnostic:** `ensure_e2e_ssh_socket` (SHA `e10aa16`) wraps sshd -i in shell logging to `/etc/ssh-debug.log`. Awaiting E2E run.
 
-### How the real bug was confirmed (this session)
-- Loopback-mounted `disk.raw` post-migration → EROFS at `composefs/images/<verity>` has dbus.service zero-filled (444B). This is **expected**: the EROFS holds only metadata; `trusted.overlay.metacopy` + `trusted.overlay.redirect` xattrs point to content objects in `composefs/objects/`.
-- Confirmed fs-verity is enabled on btrfs filesystem (`compat_ro_flags = VERITY`), enabled on the EROFS image and on content objects (lsattr shows `V` flag).
-- Mounted the composefs overlay on the host with `bootc internals cfs --repo /var/mnt/diskraw/composefs mount <verity> /tmp/cfs-mount` — `composefs:<hash>` overlay mounted successfully; `head dbus.service` shows real content. So composefs works on this kernel.
-- qemu.log shows `initramfs-setup` exited 0 successfully, and EROFS mount line corresponds to the composefs internal lowerdir mount.
-- The failing units are exactly those whose enablement symlinks point to Dakota-absent /usr targets:
-  - `/etc/systemd/system/dbus.service -> /usr/lib/systemd/system/dbus-broker.service` (Dakota lacks dbus-broker)
-  - `/etc/systemd/system/multi-user.target.wants/{chronyd,sssd,smartd,thermald,tuned,lm_sensors,nfs-client,…}.service` (similar)
-- Each dangling symlink yields `Failed to load configuration: No such file or directory`; the dbus one cascades through polkit → logind → sshd, killing post-reboot SSH.
+**Candidate next probes:**
+1. Read `/etc/ssh-debug.log` after next E2E
+2. `restorecon -Rv /etc/ssh` in Phase 4 to fix SELinux labels
+3. `UsePAM no` in sshd_config to rule out PAM
+4. `journalctl -u 'e2e-sshd@*'` via serial console
 
 ## Pending
 
-- **Slice 2**: E2E verify `bootc status` works post-migration (no "No manifest_digest" error). E2E currently running (2026-06-15 07:57).
-- **Slice 3**: E2E verify `e2e-sshd.socket` active post-migration.
-- **Slice 4**: sshd.service 255/EXCEPTION — root cause fixed (`9027a5f`), awaiting E2E verification.
-- **Slice 5**: Full /var, /etc, /home persistence assertions.
-- Realistic user setup in E2E (primary user via useradd, gnome-initial-setup-done, dconf, ~/.config).
-- `--post-hook-dir` flag (default `/etc/bootc-migrate-composefs/post-migrate.d`) for migration-specific cleanup like ublue-motd.
-- Exercise the `commit` subcommand end-to-end.
+- **Slice 2**: `bootc status` verification (blocked by SSH)
+- **Slice 4**: Debug per-connection sshd -i 255 → read `/etc/ssh-debug.log`
+- **Slice 5**: /var, /etc, /home persistence assertions (blocked by SSH)
+- Realistic user setup in E2E
+- `--post-hook-dir` flag
+- Exercise `commit` subcommand
 
 ## Future UX
 
-- **Pre-migration config drift GUI**: Compute diff between OSTree factory /etc and live /etc (like `bootc`'s `get_etc_diff` + `print_diff`), present as an interactive TUI/GUI with per-file checkboxes. User decides what to keep vs revert to target defaults before migration begins. This maps directly to `bootc etc-merge`'s `compute_diff` output — we'd just render it interactively instead of printing to stdout.
+- **Pre-migration config drift GUI** (GitHub issue #15): interactive TUI showing diff between OSTree factory /etc and live /etc with per-file checkboxes.
 
 ## Original Blocker Doc (kept for reference)
 
