@@ -150,34 +150,14 @@ RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
 RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
     ln -sf /usr/lib/systemd/system/sshd.service \
            /usr/lib/systemd/system/multi-user.target.wants/sshd.service
-# Bluefin uses systemd-ssh-generator which only binds Unix-local + vsock —
-# no TCP listener on :22. Drop in our own socket-activated TCP listener so
-# port 22 actually answers. Uses /usr/sbin/sshd -i (inetd-style, one conn
-# per accept) which is the simplest path that works on every image with
-# openssh-server installed.
-RUN mkdir -p /etc/systemd/system && \
-    printf '%s\n' \
-        '[Unit]' \
-        'Description=E2E SSH TCP Socket (port 22)' \
-        '[Socket]' \
-        'ListenStream=22' \
-        'Accept=yes' \
-        '[Install]' \
-        'WantedBy=sockets.target' \
-        > /etc/systemd/system/e2e-sshd.socket && \
-    printf '%s\n' \
-        '[Unit]' \
-        'Description=E2E SSH per-connection service' \
-        '[Service]' \
-        'ExecStart=-/usr/sbin/sshd -i' \
-        'StandardInput=socket' \
-        > /etc/systemd/system/e2e-sshd@.service && \
-    mkdir -p /etc/systemd/system/sockets.target.wants && \
-    ln -sf /etc/systemd/system/e2e-sshd.socket \
-           /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
-# Allow root login
-RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
-    echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
+# NOTE: e2e-sshd.socket, PermitRootLogin, and other user-specific /etc
+# customizations are NOT baked into the base image here. They are injected
+# into the live /etc after the OSTree install so they appear only in `cur`
+# (not in `old`/OSTree factory). This ensures the ComposeFS 3-way merge
+# treats them as user-created files ("cur only, no old") and preserves them
+# across the Bluefin→Dakota migration, while correctly dropping source-
+# specific system files (like sshd_config.d/40-redhat-*) that don't exist
+# in the target image.
 DOCKERFILE
 
 # Substitute the base image
@@ -303,6 +283,31 @@ sudo chown -R 0:0 "$ROOT_SSH_DIR"
 SSHD_CONFIG_DIR="$MNT_DIR/ostree/deploy/default/var/etc/ssh"
 sudo mkdir -p "$SSHD_CONFIG_DIR"
 echo "PermitRootLogin yes" | sudo tee "$SSHD_CONFIG_DIR/sshd_config.d/90-e2e.conf" >/dev/null 2>&1 || true
+
+# Add e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
+# Written to the live /etc so it's in `cur` but NOT in the OSTree factory `old`.
+# This ensures the ComposeFS 3-way merge treats it as a user-created file and
+# preserves it across migration.
+ETC_SYSTEMD="$MNT_DIR/ostree/deploy/default/var/etc/systemd/system"
+sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants"
+sudo tee "$ETC_SYSTEMD/e2e-sshd.socket" >/dev/null <<'SOCKETEOF'
+[Unit]
+Description=E2E SSH TCP Socket (port 22)
+[Socket]
+ListenStream=22
+Accept=yes
+[Install]
+WantedBy=sockets.target
+SOCKETEOF
+sudo tee "$ETC_SYSTEMD/e2e-sshd@.service" >/dev/null <<'SERVICEEOF'
+[Unit]
+Description=E2E SSH per-connection service
+[Service]
+ExecStart=-/usr/sbin/sshd -i
+StandardInput=socket
+SERVICEEOF
+sudo ln -sf /etc/systemd/system/e2e-sshd.socket \
+    "$ETC_SYSTEMD/sockets.target.wants/e2e-sshd.socket"
 
 # Create test fixtures in /var to verify state preservation
 step "=== Writing migration test fixtures ==="

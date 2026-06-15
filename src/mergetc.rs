@@ -377,16 +377,22 @@ pub fn choose_merged_content(ctx: &MergeContext) -> Option<Vec<u8>> {
             }
         }
         // File in old and current, absent in new.
-        // Standard OSTree 3-way upgrade logic would drop the file when
-        // old==cur on the assumption that "upstream removed it, user didn't
-        // touch it, so respect the upstream removal." That's wrong for a
-        // cross-image migration (Bluefin → Dakota): files that ship in the
-        // source factory but not the target factory aren't being deliberately
-        // removed by the user; they're just things the new image happens not
-        // to bundle. Keep them so source-specific units (e2e-sshd.socket,
-        // Bluefin's flatpak-nuke-fedora, etc.) and their enablement symlinks
-        // stay in sync after switch-root.
-        (Some(_old), Some(cur), None) => Some(cur.clone()),
+        // ComposeFS 3-way merge (bootc etc-merge crate) semantic:
+        // - If old==cur (user didn't touch it), the diff is empty for this
+        //   file and merge uses the new target's version — which doesn't
+        //   have it, so the file is dropped. This correctly removes
+        //   source-specific system files like sshd_config.d/40-redhat-*
+        //   that would break the target.
+        // - If old!=cur (user modified the file), the diff captures the
+        //   user's change and merge applies it to new. Since new doesn't
+        //   have the file, the user's version is kept.
+        (Some(old), Some(cur), None) => {
+            if old == cur {
+                None
+            } else {
+                Some(cur.clone())
+            }
+        }
         // File only in current (user-added file)
         (None, Some(cur), None) => Some(cur.clone()),
         // File in new only (upstream-added file)
@@ -567,16 +573,17 @@ mod tests {
     }
 
     #[test]
-    fn merge_keeps_file_absent_in_target_for_cross_image_migration() {
-        // Cross-image migration: source-factory + live, target image doesn't ship it.
-        // Keep cur — the new image just happens not to bundle it; not a user removal.
+    fn merge_drops_source_system_file_when_target_lacks_it() {
+        // ComposeFS 3-way merge: old==cur (user didn't touch it), new==None
+        // (target doesn't ship it). Drop it — this is a source-specific system
+        // file, not a user customization. E.g. sshd_config.d/40-redhat-*.
         let ctx = MergeContext {
-            old_default: Some(b"keep-me".to_vec()),
-            current: Some(b"keep-me".to_vec()),
+            old_default: Some(b"source-system-file".to_vec()),
+            current: Some(b"source-system-file".to_vec()),
             new_default: None,
         };
         let result = choose_merged_content(&ctx);
-        assert_eq!(result, Some(b"keep-me".to_vec()));
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -764,8 +771,10 @@ mod tests {
         // sub/file3 is new upstream
         fs::write(new.join("sub/new-upstream.cfg"), b"brand-new").unwrap();
 
-        // sub/file4 exists in source factory + live but not in target image —
-        // cross-image migration must preserve it (not a deliberate user removal).
+        // sub/file4 exists in source factory + live but not in target image.
+        // old==cur (user didn't touch it) → composefs merge drops it.
+        // This correctly removes source-specific system files like
+        // sshd_config.d/40-redhat-crypto-policies.conf.
         fs::write(old.join("sub/removed.cfg"), b"stale").unwrap();
         fs::write(cur.join("sub/removed.cfg"), b"stale").unwrap();
 
@@ -774,14 +783,16 @@ mod tests {
         assert_eq!(fs::read_to_string(out.join("unchanged.cfg")).unwrap(), "new-upstream");
         assert_eq!(fs::read_to_string(out.join("modified.cfg")).unwrap(), "my-changes");
         assert_eq!(fs::read_to_string(out.join("sub/new-upstream.cfg")).unwrap(), "brand-new");
-        assert_eq!(fs::read_to_string(out.join("sub/removed.cfg")).unwrap(), "stale");
+        assert!(!out.join("sub/removed.cfg").exists(),
+            "source-only system file with no user changes should be dropped");
     }
 
     #[test]
-    fn merge_keeps_source_only_unit_when_target_lacks_it() {
-        // e2e-sshd.socket is baked into Bluefin's bootable image (old + cur),
-        // not in Dakota (new). It must survive the merge so that the
-        // sockets.target.wants symlink doesn't dangle post-pivot.
+    fn merge_keeps_user_created_unit_when_target_lacks_it() {
+        // User-created file (only in cur, not in old or new). Must survive the
+        // merge so that the sockets.target.wants symlink doesn't dangle post-pivot.
+        // This matches the e2e-sshd.socket use case: injected into the live /etc
+        // after OSTree install, not part of the OSTree factory default.
         let dir = tempdir().unwrap();
         let old = dir.path().join("old");
         let cur = dir.path().join("cur");
@@ -791,7 +802,7 @@ mod tests {
             fs::create_dir_all(d.join("systemd/system")).unwrap();
         }
         let unit = "[Socket]\nListenStream=22\n";
-        fs::write(old.join("systemd/system/e2e-sshd.socket"), unit).unwrap();
+        // Only in cur — user injected it into the live system.
         fs::write(cur.join("systemd/system/e2e-sshd.socket"), unit).unwrap();
         merge_etc_files(&old, &cur, &new, &out).unwrap();
         assert_eq!(
