@@ -55,54 +55,45 @@ pub fn merge_etc_files(
         let cur_entry = cur_entries.get(rel_path);
         let new_entry = new_entries.get(rel_path);
 
-        match (old_entry, cur_entry, new_entry) {
-            // --- Symlink merge path ---
-            (Some(DirEntry::Symlink(old_target)), Some(DirEntry::Symlink(cur_target)), Some(DirEntry::Symlink(new_target))) => {
-                let chosen_target = if old_target == cur_target {
-                    new_target.clone()
-                } else {
-                    cur_target.clone()
-                };
-                let dest = output_dir.join(rel_path);
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                if dest.exists() || dest.is_symlink() {
-                    let _ = fs::remove_file(&dest);
-                }
-                std::os::unix::fs::symlink(&chosen_target, &dest)
-                    .with_context(|| format!("failed to create symlink: {}", dest.display()))?;
+        // Decide whether the user has modified this path relative to the
+        // source's factory. If old==cur in *both type and content*, the user
+        // didn't touch it — the 3-way result is whatever `new` provides
+        // (including type changes like symlink→file across image lineages).
+        // Otherwise the user's version wins.
+        let user_modified = match (old_entry, cur_entry) {
+            (Some(DirEntry::File), Some(DirEntry::File)) => {
+                read_file_at(old_default_dir, rel_path) != read_file_at(current_dir, rel_path)
             }
-            (_, Some(DirEntry::Symlink(cur_target)), _) => {
-                // Symlink only in current (user-created) — keep it.
-                let dest = output_dir.join(rel_path);
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                if dest.exists() || dest.is_symlink() {
-                    let _ = fs::remove_file(&dest);
-                }
-                std::os::unix::fs::symlink(cur_target, &dest)
-                    .with_context(|| format!("failed to create symlink: {}", dest.display()))?;
-            }
-            (_, _, Some(DirEntry::Symlink(new_target))) => {
-                // Symlink only in new (upstream-added) — take it.
-                let dest = output_dir.join(rel_path);
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                if dest.exists() || dest.is_symlink() {
-                    let _ = fs::remove_file(&dest);
-                }
-                std::os::unix::fs::symlink(new_target, &dest)
-                    .with_context(|| format!("failed to create symlink: {}", dest.display()))?;
-            }
-            (Some(DirEntry::Symlink(_old_target)), None, None) => {
-                // Symlink was in old only — upstream removed it, user also removed. Drop.
-            }
+            (Some(DirEntry::Symlink(o)), Some(DirEntry::Symlink(c))) => o != c,
+            (None, Some(_)) => true,       // user added
+            (Some(_), None) => true,       // user deleted
+            (Some(_), Some(_)) => true,    // type change (file↔symlink) by user
+            (None, None) => false,
+        };
 
-            // --- File merge path ---
-            _ => {
+        // Pick the entry we're materializing: cur if user modified, else new.
+        let chosen_entry: Option<&DirEntry> = if user_modified {
+            cur_entry
+        } else {
+            new_entry
+        };
+
+        match (chosen_entry, cur_entry, new_entry) {
+            (Some(DirEntry::Symlink(target)), _, _) => {
+                let dest = output_dir.join(rel_path);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if dest.exists() || dest.is_symlink() {
+                    let _ = fs::remove_file(&dest);
+                }
+                std::os::unix::fs::symlink(target, &dest)
+                    .with_context(|| format!("failed to create symlink: {}", dest.display()))?;
+            }
+            (Some(DirEntry::File), _, _) => {
+                // File merge path — also covers cross-image preservation
+                // for files that existed in source factory but the target
+                // image doesn't ship.
                 let old = read_file_at(old_default_dir, rel_path);
                 let cur = read_file_at(current_dir, rel_path);
                 let new = read_file_at(new_default_dir, rel_path);
@@ -148,6 +139,11 @@ pub fn merge_etc_files(
                     };
                     copy_file_metadata(&xattr_src, &dest)?;
                 }
+            }
+            (None, _, _) => {
+                // Dropped on purpose: 3-way result is "absent" (e.g. user
+                // didn't modify and new image doesn't ship it; or user
+                // deleted and image agreed).
             }
         }
     }
@@ -216,21 +212,35 @@ fn is_identity_db(rel_path: &str) -> bool {
     )
 }
 
-/// Walk `etc_dir` and remove any symlink whose target points under `/usr/*` but
-/// does not exist relative to `target_root`. Returns the number of links removed.
+/// Walk `etc_dir` and remove any symlink whose target doesn't exist. The
+/// target is resolved against:
+///   - `target_root` for absolute targets pointing under `/usr/*` (the new
+///     image's read-only root)
+///   - the symlink's own parent directory for relative targets
+///   - the merged `etc_dir` itself for absolute targets pointing under
+///     `/etc/*` (the symlink references something within /etc that another
+///     merge step may or may not have produced)
 ///
-/// Why: the 3-way merge brings forward enablement symlinks from the source OS's
-/// /etc (e.g. /etc/systemd/system/dbus.service → /usr/lib/systemd/system/dbus-broker.service).
-/// If the target image doesn't ship the underlying unit, the symlink dangles
-/// after pivot and systemd reports "Failed to load configuration: No such file
-/// or directory" — which cascades through dbus → polkit → logind → sshd.
-pub fn prune_dangling_usr_symlinks(etc_dir: &Path, target_root: &Path) -> Result<usize> {
+/// Why: the 3-way merge brings forward enablement symlinks from the source
+/// OS's /etc — `/etc/systemd/system/dbus.service → /usr/lib/systemd/system/dbus-broker.service`
+/// (target lacks dbus-broker) or `/etc/pam.d/password-auth → /etc/authselect/password-auth`
+/// (target doesn't use authselect). Either kind leaves systemd or PAM
+/// reporting "No such file or directory" after pivot.
+pub fn prune_dangling_symlinks(etc_dir: &Path, target_root: &Path) -> Result<usize> {
     let mut removed = 0usize;
-    prune_recursive(etc_dir, target_root, &mut removed)?;
+    prune_recursive(etc_dir, etc_dir, target_root, &mut removed)?;
     Ok(removed)
 }
 
-fn prune_recursive(dir: &Path, target_root: &Path, removed: &mut usize) -> Result<()> {
+/// Legacy name retained so existing call sites keep working. Same behavior
+/// as `prune_dangling_symlinks` now — the implementation no longer restricts
+/// to `/usr/*` targets.
+#[allow(dead_code)]
+pub fn prune_dangling_usr_symlinks(etc_dir: &Path, target_root: &Path) -> Result<usize> {
+    prune_dangling_symlinks(etc_dir, target_root)
+}
+
+fn prune_recursive(dir: &Path, etc_root: &Path, target_root: &Path, removed: &mut usize) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -240,18 +250,25 @@ fn prune_recursive(dir: &Path, target_root: &Path, removed: &mut usize) -> Resul
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            let target_str = target.to_string_lossy();
-            if !target_str.starts_with("/usr/") {
-                continue;
-            }
-            // Strip leading slash and resolve against target_root.
-            let rel = target_str.trim_start_matches('/');
-            let resolved = target_root.join(rel);
-            // symlink_metadata is fine — we only need to know if the path resolves
-            // to something (file, dir, or another symlink that exists).
+            let target_str = target.to_string_lossy().to_string();
+            let resolved = if target_str.starts_with('/') {
+                if let Some(usr_rel) = target_str.strip_prefix("/usr/") {
+                    target_root.join("usr").join(usr_rel)
+                } else if let Some(etc_rel) = target_str.strip_prefix("/etc/") {
+                    etc_root.join(etc_rel)
+                } else {
+                    // Other absolute target (e.g. /run, /var) — resolve against
+                    // target_root; if it doesn't exist there it's still likely
+                    // fine at runtime (e.g. /run/...), so skip the check.
+                    continue;
+                }
+            } else {
+                // Relative target — resolve against the symlink's parent.
+                path.parent().unwrap_or(Path::new("/")).join(&target_str)
+            };
             if fs::metadata(&resolved).is_err() {
                 eprintln!(
-                    "[phase4] pruning dangling /etc symlink: {} -> {} (not in target /usr)",
+                    "[phase4] pruning dangling /etc symlink: {} -> {}",
                     path.display(),
                     target_str
                 );
@@ -261,7 +278,7 @@ fn prune_recursive(dir: &Path, target_root: &Path, removed: &mut usize) -> Resul
                 *removed += 1;
             }
         } else if ft.is_dir() {
-            prune_recursive(&path, target_root, removed)?;
+            prune_recursive(&path, etc_root, target_root, removed)?;
         }
     }
     Ok(())
@@ -486,6 +503,74 @@ mod tests {
     }
 
     #[test]
+    fn merge_symlink_to_file_type_change_takes_new() {
+        // Regression for #20: Bluefin's /etc/pam.d/password-auth is a symlink
+        // → /etc/authselect/password-auth. Dakota ships it as a regular file.
+        // The user didn't modify it (old==cur), so the merge MUST take new
+        // (the regular file). Previously the dispatcher unconditionally kept
+        // the cur symlink, leaving PAM broken and sshd disconnecting.
+        let old = tempdir().unwrap();
+        let cur = tempdir().unwrap();
+        let new = tempdir().unwrap();
+        let out = tempdir().unwrap();
+        std::os::unix::fs::symlink("/etc/authselect/password-auth", old.path().join("password-auth")).unwrap();
+        std::os::unix::fs::symlink("/etc/authselect/password-auth", cur.path().join("password-auth")).unwrap();
+        fs::write(new.path().join("password-auth"), b"auth  required  pam_unix.so\n").unwrap();
+
+        merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
+
+        let dest = out.path().join("password-auth");
+        let meta = fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.is_file(), "result must be a regular file, not a symlink");
+        let content = fs::read(&dest).unwrap();
+        assert!(content.starts_with(b"auth"), "content must come from new image: {:?}", content);
+    }
+
+    #[test]
+    fn merge_file_to_symlink_type_change_takes_new() {
+        // Mirror of the above: source had a regular file, target ships it
+        // as a symlink. User unchanged → take new (symlink).
+        let old = tempdir().unwrap();
+        let cur = tempdir().unwrap();
+        let new = tempdir().unwrap();
+        let out = tempdir().unwrap();
+        fs::write(old.path().join("nsswitch.conf"), b"factory\n").unwrap();
+        fs::write(cur.path().join("nsswitch.conf"), b"factory\n").unwrap();
+        std::os::unix::fs::symlink("/usr/etc/nsswitch.conf", new.path().join("nsswitch.conf")).unwrap();
+
+        merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
+
+        let dest = out.path().join("nsswitch.conf");
+        let meta = fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_symlink(), "result must be a symlink");
+        let target = fs::read_link(&dest).unwrap();
+        assert_eq!(target.to_string_lossy(), "/usr/etc/nsswitch.conf");
+    }
+
+    #[test]
+    fn merge_user_changed_file_to_symlink_keeps_user_symlink() {
+        // User replaced a regular file with a symlink. Target still has the
+        // factory file. The user's modification wins (keep cur symlink).
+        let old = tempdir().unwrap();
+        let cur = tempdir().unwrap();
+        let new = tempdir().unwrap();
+        let out = tempdir().unwrap();
+        fs::write(old.path().join("resolv.conf"), b"factory\n").unwrap();
+        std::os::unix::fs::symlink("/run/NetworkManager/resolv.conf", cur.path().join("resolv.conf")).unwrap();
+        fs::write(new.path().join("resolv.conf"), b"factory\n").unwrap();
+
+        merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
+
+        let dest = out.path().join("resolv.conf");
+        let meta = fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_symlink(), "user's symlink modification must survive");
+        assert_eq!(
+            fs::read_link(&dest).unwrap().to_string_lossy(),
+            "/run/NetworkManager/resolv.conf"
+        );
+    }
+
+    #[test]
     fn merge_machine_id_takes_current_verbatim() {
         let old = tempdir().unwrap();
         let cur = tempdir().unwrap();
@@ -524,6 +609,37 @@ mod tests {
         assert!(!etc.path().join("systemd/system/dbus.service").exists()
                 && fs::symlink_metadata(etc.path().join("systemd/system/dbus.service")).is_err());
         assert!(fs::symlink_metadata(etc.path().join("systemd/system/autovt@.service")).is_ok());
+    }
+
+    #[test]
+    fn prune_drops_dangling_etc_symlink() {
+        // Regression for #19: Bluefin's PAM files are symlinks into
+        // /etc/authselect/, which Dakota doesn't ship. Without pruning the
+        // dangling link survives the merge and sshd's PAM stack fails to
+        // load.
+        let etc = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        fs::create_dir_all(etc.path().join("pam.d")).unwrap();
+        unix_fs::symlink(
+            "/etc/authselect/password-auth",
+            etc.path().join("pam.d/password-auth"),
+        ).unwrap();
+
+        let removed = prune_dangling_symlinks(etc.path(), target.path()).unwrap();
+        assert_eq!(removed, 1);
+        assert!(fs::symlink_metadata(etc.path().join("pam.d/password-auth")).is_err());
+    }
+
+    #[test]
+    fn prune_keeps_etc_symlink_when_target_exists_in_merged_etc() {
+        // /etc/foo → /etc/bar where /etc/bar exists in the merged etc — keep.
+        let etc = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        fs::write(etc.path().join("bar"), b"x").unwrap();
+        unix_fs::symlink("/etc/bar", etc.path().join("foo")).unwrap();
+        let removed = prune_dangling_symlinks(etc.path(), target.path()).unwrap();
+        assert_eq!(removed, 0);
+        assert!(fs::symlink_metadata(etc.path().join("foo")).is_ok());
     }
 
     #[test]

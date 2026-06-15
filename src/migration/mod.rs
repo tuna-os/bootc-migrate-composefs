@@ -569,11 +569,17 @@ fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) 
     // Bluefin → Dakota: e.g. /etc/systemd/system/dbus.service points to
     // dbus-broker.service which Dakota doesn't ship; the dangling symlink
     // breaks dbus and everything downstream (polkit, logind, sshd).
-    match crate::mergetc::prune_dangling_usr_symlinks(etc_dir, &mount_path) {
+    match crate::mergetc::prune_dangling_symlinks(etc_dir, &mount_path) {
         Ok(n) if n > 0 => println!("[phase4] pruned {} dangling /etc symlink(s)", n),
         Ok(_) => {}
         Err(e) => eprintln!("[phase4] warning: dangling-symlink prune failed: {e:#}"),
     }
+
+    // Drop OSTree/GRUB-era /etc artifacts that don't belong on a composefs
+    // deployment. The 3-way merge keeps these because Bluefin's factory has
+    // them and the user didn't modify them, but they actively lie about
+    // system state on Dakota.
+    drop_ostree_era_etc_artifacts(etc_dir);
 
     // Ensure the TCP 22 SSH socket-activated listener is always present in the
     // deploy /etc. On Bluefin, sshd only binds Unix-local + vsock by default;
@@ -583,6 +589,38 @@ fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) 
     ensure_e2e_ssh_socket(etc_dir)?;
 
     Ok(())
+}
+
+/// Drop GRUB / rpm-ostree artifacts that don't belong on a composefs +
+/// systemd-boot deploy. These come from the source OS's /etc but reference
+/// boot/state mechanisms the target no longer uses.
+fn drop_ostree_era_etc_artifacts(etc_dir: &Path) {
+    // Concrete known-cruft paths. Keep this tight — only paths that are
+    // unambiguously misleading (lying state files) or actively wrong for
+    // the new bootloader.
+    let drops = [
+        ".rpm-ostree-shadow-mode-fixed2.stamp",
+        ".updated",
+        "grub2.cfg",
+        "grub2-efi.cfg",
+        "grub.d",
+    ];
+    for name in &drops {
+        let p = etc_dir.join(name);
+        let exists = p.exists() || p.is_symlink();
+        if !exists {
+            continue;
+        }
+        let res = if p.is_dir() && !p.is_symlink() {
+            fs::remove_dir_all(&p)
+        } else {
+            fs::remove_file(&p)
+        };
+        match res {
+            Ok(()) => println!("[phase4] dropped OSTree-era /etc artifact: {}", name),
+            Err(e) => eprintln!("[phase4] warning: failed to drop {}: {}", p.display(), e),
+        }
+    }
 }
 
 /// Ensure the TCP 22 SSH socket-activated listener is present in the deploy
