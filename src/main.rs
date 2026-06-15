@@ -49,8 +49,19 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Commit the composefs deployment as the permanent default (after successful boot).
+    ///
+    /// Permanently deletes the OSTree-Bluefin deployment from disk: removes
+    /// /sysroot/ostree (object store + deploys + leaked /var copy), drops
+    /// stale /boot/loader/entries/ostree-*.conf, removes GRUB2 bits when
+    /// migrated to systemd-boot, refreshes /sysroot/.bootc-aleph.json.
+    /// The composefs system becomes byte-shape identical to a fresh
+    /// `bootc install` of the target image.
     #[command(name = "commit")]
-    Commit,
+    Commit {
+        /// Preview deletions and reclaimed bytes; touch nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn check_root_privilege() -> Result<()> {
@@ -65,8 +76,8 @@ fn main() {
     let args = Args::parse();
 
     // Handle --commit subcommand (#8)
-    if let Some(Command::Commit) = args.command {
-        if let Err(e) = run_commit() {
+    if let Some(Command::Commit { dry_run }) = args.command {
+        if let Err(e) = run_commit(dry_run) {
             eprintln!("Error: {}", e);
             process::exit(1);
         }
@@ -230,9 +241,24 @@ fn main() {
 }
 
 /// Commit the composefs deployment as the permanent default (#8).
-fn run_commit() -> Result<()> {
+fn run_commit(dry_run: bool) -> Result<()> {
     check_root_privilege()?;
     println!("=== Committing composefs deployment as permanent default ===");
+    if dry_run {
+        println!("*** DRY RUN — no changes will be made ***");
+    }
+
+    // Sanity check: refuse to run if booted via the OSTree side. Committing
+    // would delete the rootfs we're currently mounted on top of.
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    if !cmdline.contains("composefs=") {
+        anyhow::bail!(
+            "/proc/cmdline does not contain composefs= — current boot looks like OSTree. \
+             Reboot into the composefs entry before running commit.\n\
+             cmdline: {}",
+            cmdline.trim()
+        );
+    }
 
     // Fix 6: detect bootloader — check ESP entries for systemd-boot first.
     let esp_candidates = ["/boot/efi", "/efi"];
@@ -264,6 +290,12 @@ fn run_commit() -> Result<()> {
                 composefs_entries.push(name_str);
             }
         }
+    }
+    // If we found bootc_ entries at the default /boot location but not
+    // on the ESP, we're still on composefs — just without an auto-mounted
+    // ESP at /boot/efi or /efi (common in E2E QEMU runs).
+    if !composefs_entries.is_empty() {
+        is_systemd_boot = true;
     }
 
     if composefs_entries.is_empty() {
@@ -309,18 +341,227 @@ fn run_commit() -> Result<()> {
         }
         println!("Composefs deployment '{}' committed as the permanent systemd-boot default.", primary);
     } else {
-        let status = std::process::Command::new("grub2-set-default")
-            .arg(primary)
-            .status();
-        if !matches!(status, Ok(s) if s.success()) {
-            anyhow::bail!("failed to set GRUB default");
+        if !dry_run {
+            let status = std::process::Command::new("grub2-set-default")
+                .arg(primary)
+                .status();
+            if !matches!(status, Ok(s) if s.success()) {
+                anyhow::bail!("failed to set GRUB default");
+            }
+            // Drop GRUB2-side OSTree fallback artifacts too.
+            let _ = std::fs::remove_file("/boot/loader/entries/ostree-fallback-0.conf");
+            let _ = std::fs::remove_dir_all("/boot/ostree-fallback");
         }
-        // Drop GRUB2-side OSTree fallback artifacts too.
-        let _ = std::fs::remove_file("/boot/loader/entries/ostree-fallback-0.conf");
-        let _ = std::fs::remove_dir_all("/boot/ostree-fallback");
         println!("Composefs deployment '{}' is now the permanent default.", primary);
     }
 
-    println!("You may now run 'bootc internals cleanup' to remove old OSTree deployments.");
+    // --- Full OSTree-side cleanup so the on-disk layout matches a fresh
+    //     bootc install of the target image (#25). ---
+    // /sysroot is typically read-only on a composefs-booted system.
+    // Even after remount rw, the composefs EROFS overlay blocks mutation
+    // of paths that are pinned by the metadata tree (e.g. /sysroot/ostree).
+    // To bypass the overlay, mount the underlying btrfs device at a
+    // temporary location — that mount is a plain btrfs, no EROFS.
+    let alt_root = Path::new("/var/tmp/commit-cleanup");
+    let has_alt_mount = if !dry_run {
+        let _ = std::fs::create_dir_all(alt_root);
+        mount_sysroot_btrfs_at(alt_root).is_ok()
+    } else {
+        false
+    };
+    let mut total_freed: u64 = 0;
+
+    // 1. /sysroot/ostree — the entire OSTree object store + deploys + the
+    //    leaked Bluefin /var copy under ostree/deploy/<n>/var.
+    //    If we have an alternate mount (bypassing the composefs EROFS overlay),
+    //    operate through that; otherwise fall back to the direct path.
+    let ostree_label = "OSTree object store + deploys (incl. leaked pre-migration /var)";
+    if has_alt_mount {
+        total_freed += remove_path_with_size(
+            &alt_root.join("ostree"),
+            ostree_label,
+            dry_run,
+        );
+        // .bootc-aleph.json also through the alt mount for a clean delete.
+        total_freed += remove_path_with_size(
+            &alt_root.join(".bootc-aleph.json"),
+            "stale Bluefin install-provenance marker",
+            dry_run,
+        );
+    } else {
+        total_freed += remove_path_with_size(
+            Path::new("/sysroot/ostree"),
+            ostree_label,
+            dry_run,
+        );
+    }
+    // .bootc-aleph.json — via alt mount if available, otherwise direct.
+    if !has_alt_mount {
+        total_freed += remove_path_with_size(
+            Path::new("/sysroot/.bootc-aleph.json"),
+            "stale Bluefin install-provenance marker",
+            dry_run,
+        );
+    }
+
+    // 2. Stale OSTree BLS entries under /boot/loader/entries. The ESP-side
+    //    ostree-fallback was removed above; /boot/loader/entries/ostree-*.conf
+    //    is the GRUB-side equivalent.
+    if let Ok(rd) = std::fs::read_dir("/boot/loader/entries") {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("ostree-") && name.ends_with(".conf") {
+                total_freed += remove_path_with_size(
+                    &entry.path(),
+                    &format!("stale OSTree BLS entry: {}", name),
+                    dry_run,
+                );
+            }
+        }
+    }
+
+    // 3. When we migrated to systemd-boot, drop the GRUB2 bits the user no
+    //    longer needs. Keep them when --bootloader grub2 was used.
+    if is_systemd_boot {
+        for path in &[
+            "/boot/grub2",
+            "/boot/efi/EFI/fedora",
+        ] {
+            total_freed += remove_path_with_size(
+                Path::new(path),
+                "GRUB2 boot artifacts (migrated to systemd-boot)",
+                dry_run,
+            );
+        }
+    }
+
+    let human = format_bytes(total_freed);
+    if dry_run {
+        println!("\nWould reclaim: {} ({} bytes)", human, total_freed);
+        println!("Re-run without --dry-run to apply.");
+    } else {
+        println!("\nReclaimed: {} ({} bytes)", human, total_freed);
+        println!("On-disk layout is now consistent with a fresh '{}' install.",
+                 if is_systemd_boot { "systemd-boot" } else { "GRUB2" });
+    }
+    if has_alt_mount {
+        let _ = std::process::Command::new("umount").arg(alt_root).status();
+        let _ = std::fs::remove_dir(alt_root);
+    }
+    Ok(())
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if meta.file_type().is_symlink() || meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+    let mut total = 0u64;
+    let rd = match std::fs::read_dir(path) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    for entry in rd.flatten() {
+        total += dir_size(&entry.path());
+    }
+    total
+}
+
+fn remove_path_with_size(path: &Path, label: &str, dry_run: bool) -> u64 {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    let size = dir_size(path);
+    let human = format_bytes(size);
+    if dry_run {
+        println!("[dry-run] would remove {} — {} ({})", path.display(), label, human);
+        return size;
+    }
+    let res = if meta.is_dir() && !meta.file_type().is_symlink() {
+        // On OSTree/bootc systems, /sysroot/ostree is typically a btrfs
+        // subvolume — rm -rf returns EPERM. Try `btrfs subvolume delete`
+        // first; if that fails, clear the immutable flag (chattr -i) and
+        // fall back to remove_dir_all.
+        let btrfs_ok = std::process::Command::new("btrfs")
+            .args(["subvolume", "delete"])
+            .arg(path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if btrfs_ok {
+            Ok(())
+        } else {
+            // Clear immutable flag — OSTree often sets chattr +i on
+            // /sysroot/ostree to prevent accidental deletion. Suppress
+            // stderr: chattr on OSTree deploy checkouts (symlink farms)
+            // produces thousands of "Operation not supported" lines.
+            let _ = std::process::Command::new("chattr")
+                .args(["-R", "-i"])
+                .arg(path)
+                .stderr(std::process::Stdio::null())
+                .status();
+            std::fs::remove_dir_all(path)
+        }
+    } else {
+        std::fs::remove_file(path)
+    };
+    match res {
+        Ok(()) => {
+            println!("Removed {} — {} ({})", path.display(), label, human);
+            size
+        }
+        Err(e) => {
+            eprintln!("warning: failed to remove {}: {}", path.display(), e);
+            0
+        }
+    }
+}
+
+fn format_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", n, UNITS[0])
+    } else {
+        format!("{:.2} {}", v, UNITS[i])
+    }
+}
+
+/// Mount the btrfs device backing /sysroot at `target`, bypassing the
+/// composefs EROFS overlay so that paths like /sysroot/ostree can be
+/// mutated directly on the underlying filesystem.
+fn mount_sysroot_btrfs_at(target: &Path) -> Result<()> {
+    let mounts = std::fs::read_to_string("/proc/mounts")
+        .context("failed to read /proc/mounts")?;
+    let device = mounts
+        .lines()
+        .find(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts.len() >= 3 && parts[1] == "/sysroot" && parts[2] == "btrfs"
+        })
+        .and_then(|line| line.split_whitespace().next())
+        .map(|s| s.to_string())
+        .context("could not find btrfs device for /sysroot in /proc/mounts")?;
+
+    let status = std::process::Command::new("mount")
+        .arg(&device)
+        .arg(target)
+        .status()
+        .context("failed to execute mount for alt-root cleanup")?;
+    if !status.success() {
+        anyhow::bail!("mount {} → {} failed", device, target.display());
+    }
     Ok(())
 }

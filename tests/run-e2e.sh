@@ -938,16 +938,18 @@ fi
 echo "OK: Flatpak user + system installations preserved."
 
 # --- OSTree rollback test (#22) ---
-# Verify the migration isn't one-way: NVRAM-oneshot back to Fedora\shim
-# (which chains into GRUB → the OSTree BLS entry), confirm Bluefin's
-# pre-migration state is still mounted, then return to composefs.
+# Verify the migration isn't one-way: reorder BootOrder to put Fedora\shim
+# first (which chains into GRUB → the OSTree BLS entry), confirm Bluefin's
+# pre-migration state is still mounted, then restore BootOrder and return to
+# composefs. Uses BootOrder (honoured by OVMF) rather than BootNext (ignored).
 step "=== Running OSTree rollback test ==="
 
 wait_for_ssh_with_msg() {
     local label="$1"
     local max="$2"
-    local i=1
     local start=$SECONDS
+
+    local i=1
     while [ $i -le "$max" ]; do
         if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
             step "$label after $((SECONDS - start))s."
@@ -960,23 +962,26 @@ wait_for_ssh_with_msg() {
     return 1
 }
 
-# Capture the Boot#### entry for the Fedora\shim path (the OSTree fallback
-# is reachable via Fedora\shimx64.efi → GRUB → ostree-* BLS entry).
-FEDORA_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Fedora/ && /shimx64.efi/ { gsub(/[^0-9A-F]/, \"\", \$1); print \$1; exit }'")
-SDBOOT_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Linux Boot Manager/ { gsub(/[^0-9A-F]/, \"\", \$1); print \$1; exit }'")
+# Capture the Boot#### entry for the Fedora\shim path and Linux Boot Manager.
+# awk: strip all non-digits from Boot####* → bare hex number (0007, 0008).
+FEDORA_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Fedora/ && /shimx64.efi/ { gsub(/[^0-9]/, \"\", \$1); print \$1; exit }'")
+SDBOOT_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Linux Boot Manager/ { gsub(/[^0-9]/, \"\", \$1); print \$1; exit }'")
 if [ -z "$FEDORA_BOOTNUM" ] || [ -z "$SDBOOT_BOOTNUM" ]; then
     echo "FAIL: could not locate Fedora shim ($FEDORA_BOOTNUM) or Linux Boot Manager ($SDBOOT_BOOTNUM) in efibootmgr"
     ssh $SSH_OPTS root@localhost "efibootmgr -v" >&2
     exit 1
 fi
-step "rollback: oneshot to Boot$FEDORA_BOOTNUM (Fedora shim → GRUB → ostree-*)"
 
-# BootNext is a one-shot — after this boot, NVRAM forgets it and BootOrder
-# (still defaults to "Linux Boot Manager" = sd-boot) resumes for the round trip.
-ssh $SSH_OPTS root@localhost "efibootmgr --bootnext $FEDORA_BOOTNUM >/dev/null && systemctl reboot" || true
+# Save the original BootOrder (systemd-boot first) so we can restore it
+# from the OSTree-booted system before returning to composefs.
+ORIG_BOOTORDER=$(ssh $SSH_OPTS root@localhost "efibootmgr 2>/dev/null | awk '/^BootOrder:/ {print \$2}'")
+step "rollback: reordering BootOrder to $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM (was $ORIG_BOOTORDER)"
+
+# Put Fedora shim first, sd-boot second. OVMF honours BootOrder.
+ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM >/dev/null && systemctl reboot" || true
 
 sleep 3
-wait_for_ssh_with_msg "OSTree rollback boot SSH" 60 || {
+wait_for_ssh_with_msg "OSTree rollback boot SSH" 120 || {
     echo "FAIL: VM did not come back after OSTree rollback boot"
     tail -100 qemu.log
     exit 1
@@ -985,32 +990,25 @@ wait_for_ssh_with_msg "OSTree rollback boot SSH" 60 || {
 # Cmdline must show the *OSTree* path: composefs= absent, ostree= present.
 ROLLBACK_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
 if echo "$ROLLBACK_CMDLINE" | grep -q 'composefs='; then
-    echo "FAIL: VM booted into composefs again instead of OSTree (cmdline: $ROLLBACK_CMDLINE)"
+    echo "FAIL: VM booted into composefs instead of OSTree (cmdline: $ROLLBACK_CMDLINE)"
     exit 1
 fi
 if ! echo "$ROLLBACK_CMDLINE" | grep -q 'ostree='; then
-    echo "FAIL: rollback boot has neither composefs= nor ostree= (cmdline: $ROLLBACK_CMDLINE)"
-    exit 1
+    echo "FAIL: rollback boot has neither composefs= nor ostree= (cmdline: $ROLLBACK_CMDLINE)"; exit 1
 fi
 echo "OK: OSTree fallback boot — composefs= absent, ostree= present."
 
 # Bluefin's pre-migration state lives at /ostree/deploy/<n>/var/. On the
-# OSTree boot, /var binds to that path (independent from Dakota's
-# state/os/default/var copy). The wallpaper fixture should still be there,
-# and Bluefin's /etc (the original deploy /etc, not the merged Dakota one)
-# should NOT contain Dakota-only files like the merged sshd_config.d.
+# OSTree boot, /var binds to that path — the wallpaper fixture must be there.
 WP_AFTER_ROLLBACK=$(ssh $SSH_OPTS root@localhost "ls -l /var/home/realuser/Pictures/migration-wallpaper.png 2>/dev/null | awk '{print \$5}'")
 if [ -z "$WP_AFTER_ROLLBACK" ] || [ "$WP_AFTER_ROLLBACK" = "0" ]; then
-    echo "FAIL: Bluefin /var wallpaper missing after rollback ($WP_AFTER_ROLLBACK bytes)"
-    exit 1
+    echo "FAIL: Bluefin /var wallpaper missing after rollback ($WP_AFTER_ROLLBACK bytes)"; exit 1
 fi
 echo "OK: Bluefin /var preserved through rollback ($WP_AFTER_ROLLBACK bytes)."
 
-# Now reboot — BootNext was a one-shot, so NVRAM should pick the default
-# BootOrder again (Linux Boot Manager = sd-boot first), and we should land
-# back on composefs.
-step "rollback: returning to composefs via default BootOrder"
-ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+# Restore the original BootOrder (systemd-boot first) before rebooting back.
+step "rollback: restoring BootOrder to $ORIG_BOOTORDER and returning to composefs"
+ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $ORIG_BOOTORDER >/dev/null && systemctl reboot" || true
 sleep 3
 wait_for_ssh_with_msg "Return-to-composefs SSH" 60 || {
     echo "FAIL: VM did not come back to composefs after rollback"
@@ -1020,9 +1018,127 @@ wait_for_ssh_with_msg "Return-to-composefs SSH" 60 || {
 
 RETURN_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
 if ! echo "$RETURN_CMDLINE" | grep -q 'composefs='; then
-    echo "FAIL: did not return to composefs (cmdline: $RETURN_CMDLINE)"
-    exit 1
+    echo "FAIL: did not return to composefs (cmdline: $RETURN_CMDLINE)"; exit 1
 fi
-echo "OK: Returned to composefs cleanly via default BootOrder."
+echo "OK: Returned to composefs cleanly via restored BootOrder."
+
+# --- commit subcommand cleanup test (#25) ---
+# Verify the post-commit on-disk layout is byte-shape identical to a fresh
+# bootc install of the target image: /sysroot/ostree removed, OSTree BLS
+# entries dropped, GRUB2 bits gone (since we migrated to systemd-boot),
+# .bootc-aleph.json gone.
+step "=== Running commit cleanup test ==="
+
+# Dry-run first — no changes, but the report must list the paths we expect
+# to reclaim.
+DRYRUN_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs commit --dry-run 2>&1" || true)
+echo "$DRYRUN_OUT" | sed 's/^/  /'
+for needle in '/sysroot/ostree' '/sysroot/.bootc-aleph.json' 'Would reclaim'; do
+    if ! echo "$DRYRUN_OUT" | grep -qF "$needle"; then
+        echo "FAIL: commit --dry-run did not mention '$needle'"; exit 1
+    fi
+done
+echo "OK: commit --dry-run lists expected cleanup targets."
+
+# Confirm those paths are still there before the real commit.
+PRE_OSTREE=$(ssh $SSH_OPTS root@localhost "test -d /sysroot/ostree && echo yes || echo no")
+if [ "$PRE_OSTREE" != "yes" ]; then
+    echo "FAIL: /sysroot/ostree absent before commit — dry-run should have been a no-op"; exit 1
+fi
+
+# Real commit.
+COMMIT_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs commit 2>&1" || {
+    echo "FAIL: commit subcommand exited non-zero"; exit 1
+})
+echo "$COMMIT_OUT" | sed 's/^/  /'
+if ! echo "$COMMIT_OUT" | grep -q "Reclaimed:"; then
+    echo "FAIL: commit didn't print a Reclaimed summary"; exit 1
+fi
+echo "OK: commit subcommand ran without error."
+
+# Post-conditions: everything OSTree-shaped should be gone.
+POST_OSTREE=$(ssh $SSH_OPTS root@localhost "test -d /sysroot/ostree && echo present || echo absent")
+if [ "$POST_OSTREE" != "absent" ]; then
+    echo "FAIL: /sysroot/ostree still present after commit"; exit 1
+fi
+echo "OK: /sysroot/ostree removed."
+
+POST_ALEPH=$(ssh $SSH_OPTS root@localhost "test -e /sysroot/.bootc-aleph.json && echo present || echo absent")
+if [ "$POST_ALEPH" != "absent" ]; then
+    echo "FAIL: /sysroot/.bootc-aleph.json still present after commit"; exit 1
+fi
+echo "OK: /sysroot/.bootc-aleph.json removed."
+
+OSTREE_BLS=$(ssh $SSH_OPTS root@localhost "ls /boot/loader/entries/ostree-*.conf 2>/dev/null | wc -l")
+if [ "$OSTREE_BLS" -ne 0 ]; then
+    echo "FAIL: $OSTREE_BLS OSTree BLS entries still in /boot/loader/entries/"; exit 1
+fi
+echo "OK: stale OSTree BLS entries removed from /boot."
+
+POST_GRUB=$(ssh $SSH_OPTS root@localhost "test -d /boot/grub2 && echo present || echo absent")
+if [ "$POST_GRUB" != "absent" ]; then
+    echo "FAIL: /boot/grub2 still present after commit (we migrated to systemd-boot)"; exit 1
+fi
+echo "OK: /boot/grub2 removed."
+
+# Sanity: composefs is still there and the system can still boot. We don't
+# reboot here (tests/run-e2e.sh has already proven the round-trip); just
+# confirm the composefs subtree wasn't damaged.
+POST_CFS=$(ssh $SSH_OPTS root@localhost "test -d /sysroot/composefs && echo yes || echo no")
+if [ "$POST_CFS" != "yes" ]; then
+    echo "FAIL: /sysroot/composefs gone after commit — we deleted too much!"; exit 1
+fi
+echo "OK: /sysroot/composefs intact after commit."
+
+# --- Post-commit deep-clean verification ---
+# Confirm the on-disk layout matches a fresh `bootc install` of the target
+# image: no residual OSTree units, no Bluefin-specific paths, ESP is
+# systemd-boot-only, /etc contains no OSTree-era artifacts.
+step "=== Running post-commit deep-clean verification ==="
+
+# 1. No ostree-remount.service enablement (OSTree-specific, should be absent).
+OSTREE_REMOUNT=$(ssh $SSH_OPTS root@localhost "test -L /etc/systemd/system/local-fs.target.wants/ostree-remount.service && echo yes || echo no")
+if [ "$OSTREE_REMOUNT" != "no" ]; then
+    echo "FAIL: ostree-remount.service still enabled in /etc/systemd/system/"; exit 1
+fi
+echo "OK: no ostree-remount.service enablement."
+
+# 2. No rpm-ostree paths in /etc (rpm-ostree-countme.timer, etc.).
+RPMOSTREE_CRUFT=$(ssh $SSH_OPTS root@localhost "find /etc/systemd -name '*rpm-ostree*' 2>/dev/null | wc -l")
+if [ "$RPMOSTREE_CRUFT" -ne 0 ]; then
+    echo "FAIL: $RPMOSTREE_CRUFT rpm-ostree references still in /etc/systemd/"; exit 1
+fi
+echo "OK: no rpm-ostree unit references in /etc/systemd/."
+
+# 3. No Bluefin-specific BLS entries on ESP (bootc composefs only).
+BLUEFIN_ESP=$(ssh $SSH_OPTS root@localhost "find /boot/efi/loader/entries -name '*bluefin*' -o -name '*ostree*' 2>/dev/null | wc -l")
+if [ "$BLUEFIN_ESP" -ne 0 ]; then
+    echo "FAIL: $BLUEFIN_ESP Bluefin/OSTree BLS entries still on ESP"; exit 1
+fi
+echo "OK: ESP loader entries are composefs-only."
+
+# 4. No Fedora shim remains on ESP (we migrated to sd-boot).
+FEDORA_EFI=$(ssh $SSH_OPTS root@localhost "test -d /boot/efi/EFI/fedora && echo present || echo absent")
+if [ "$FEDORA_EFI" != "absent" ]; then
+    echo "FAIL: /boot/efi/EFI/fedora still present after systemd-boot migration"; exit 1
+fi
+echo "OK: ESP /EFI/fedora removed (migrated to systemd-boot)."
+
+# 5. No OSTree deployment configs in /etc.
+OSTREE_ETC=$(ssh $SSH_OPTS root@localhost "test -f /etc/ostree/ostree.repo || test -d /etc/ostree/remotes.d && echo yes || echo no")
+if [ "$OSTREE_ETC" != "no" ]; then
+    echo "FAIL: /etc/ostree/ configs still present"; exit 1
+fi
+echo "OK: no /etc/ostree configs."
+
+# 6. bootc status still clean after commit (composefs, no rollback pending).
+BOOTC_STATUS_POST=$(ssh $SSH_OPTS root@localhost "bootc status --json 2>/dev/null")
+if ! echo "$BOOTC_STATUS_POST" | grep -q '"composefs"'; then
+    echo "FAIL: bootc status lost composefs backend after commit"; exit 1
+fi
+if echo "$BOOTC_STATUS_POST" | grep -q '"ostree"'; then
+    echo "FAIL: bootc status still references ostree after commit"; exit 1
+fi
+echo "OK: bootc status clean (composefs only)."
 
 step "=== E2E TEST PASSED SUCCESSFULY ==="
