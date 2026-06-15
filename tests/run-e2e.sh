@@ -937,4 +937,92 @@ if [ "$FLAT_SYS" != "flatpak-system-stub-com.example.SystemApp" ]; then
 fi
 echo "OK: Flatpak user + system installations preserved."
 
+# --- OSTree rollback test (#22) ---
+# Verify the migration isn't one-way: NVRAM-oneshot back to Fedora\shim
+# (which chains into GRUB → the OSTree BLS entry), confirm Bluefin's
+# pre-migration state is still mounted, then return to composefs.
+step "=== Running OSTree rollback test ==="
+
+wait_for_ssh_with_msg() {
+    local label="$1"
+    local max="$2"
+    local i=1
+    local start=$SECONDS
+    while [ $i -le "$max" ]; do
+        if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
+            step "$label after $((SECONDS - start))s."
+            return 0
+        fi
+        sleep 3
+        i=$((i + 1))
+    done
+    echo "ERROR: $label timeout ($((SECONDS - start))s)" >&2
+    return 1
+}
+
+# Capture the Boot#### entry for the Fedora\shim path (the OSTree fallback
+# is reachable via Fedora\shimx64.efi → GRUB → ostree-* BLS entry).
+FEDORA_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Fedora/ && /shimx64.efi/ { gsub(/[^0-9A-F]/, \"\", \$1); print \$1; exit }'")
+SDBOOT_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Linux Boot Manager/ { gsub(/[^0-9A-F]/, \"\", \$1); print \$1; exit }'")
+if [ -z "$FEDORA_BOOTNUM" ] || [ -z "$SDBOOT_BOOTNUM" ]; then
+    echo "FAIL: could not locate Fedora shim ($FEDORA_BOOTNUM) or Linux Boot Manager ($SDBOOT_BOOTNUM) in efibootmgr"
+    ssh $SSH_OPTS root@localhost "efibootmgr -v" >&2
+    exit 1
+fi
+step "rollback: oneshot to Boot$FEDORA_BOOTNUM (Fedora shim → GRUB → ostree-*)"
+
+# BootNext is a one-shot — after this boot, NVRAM forgets it and BootOrder
+# (still defaults to "Linux Boot Manager" = sd-boot) resumes for the round trip.
+ssh $SSH_OPTS root@localhost "efibootmgr --bootnext $FEDORA_BOOTNUM >/dev/null && systemctl reboot" || true
+
+sleep 3
+wait_for_ssh_with_msg "OSTree rollback boot SSH" 60 || {
+    echo "FAIL: VM did not come back after OSTree rollback boot"
+    tail -100 qemu.log
+    exit 1
+}
+
+# Cmdline must show the *OSTree* path: composefs= absent, ostree= present.
+ROLLBACK_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
+if echo "$ROLLBACK_CMDLINE" | grep -q 'composefs='; then
+    echo "FAIL: VM booted into composefs again instead of OSTree (cmdline: $ROLLBACK_CMDLINE)"
+    exit 1
+fi
+if ! echo "$ROLLBACK_CMDLINE" | grep -q 'ostree='; then
+    echo "FAIL: rollback boot has neither composefs= nor ostree= (cmdline: $ROLLBACK_CMDLINE)"
+    exit 1
+fi
+echo "OK: OSTree fallback boot — composefs= absent, ostree= present."
+
+# Bluefin's pre-migration state lives at /ostree/deploy/<n>/var/. On the
+# OSTree boot, /var binds to that path (independent from Dakota's
+# state/os/default/var copy). The wallpaper fixture should still be there,
+# and Bluefin's /etc (the original deploy /etc, not the merged Dakota one)
+# should NOT contain Dakota-only files like the merged sshd_config.d.
+WP_AFTER_ROLLBACK=$(ssh $SSH_OPTS root@localhost "ls -l /var/home/realuser/Pictures/migration-wallpaper.png 2>/dev/null | awk '{print \$5}'")
+if [ -z "$WP_AFTER_ROLLBACK" ] || [ "$WP_AFTER_ROLLBACK" = "0" ]; then
+    echo "FAIL: Bluefin /var wallpaper missing after rollback ($WP_AFTER_ROLLBACK bytes)"
+    exit 1
+fi
+echo "OK: Bluefin /var preserved through rollback ($WP_AFTER_ROLLBACK bytes)."
+
+# Now reboot — BootNext was a one-shot, so NVRAM should pick the default
+# BootOrder again (Linux Boot Manager = sd-boot first), and we should land
+# back on composefs.
+step "rollback: returning to composefs via default BootOrder"
+ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+sleep 3
+wait_for_ssh_with_msg "Return-to-composefs SSH" 60 || {
+    echo "FAIL: VM did not come back to composefs after rollback"
+    tail -100 qemu.log
+    exit 1
+}
+
+RETURN_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
+if ! echo "$RETURN_CMDLINE" | grep -q 'composefs='; then
+    echo "FAIL: did not return to composefs (cmdline: $RETURN_CMDLINE)"
+    exit 1
+fi
+echo "OK: Returned to composefs cleanly via default BootOrder."
+
 step "=== E2E TEST PASSED SUCCESSFULY ==="
