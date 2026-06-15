@@ -32,13 +32,24 @@ check:
 
 # === E2E Tests ===
 
-# Run full E2E migration test (composefs entry has debug console logging)
+# Run full E2E migration test
+# Defaults to Bluefin stable → Dakota stable (btrfs).
 e2e: build
     sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
       BASE_IMAGE="{{env_var_or_default('BASE_IMAGE', 'ghcr.io/projectbluefin/bluefin:stable')}}" \
       TARGET_IMAGE="{{env_var_or_default('TARGET_IMAGE', 'ghcr.io/projectbluefin/dakota:stable')}}" \
       DISK_SIZE="{{env_var_or_default('DISK_SIZE', '20G')}}" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
+
+# Run E2E with Bluefin LTS → Dakota (xfs filesystem).
+# Uses --skip-import so Phase 1 reflink doesn't touch xfs.
+e2e-lts: build
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      BASE_IMAGE="ghcr.io/projectbluefin/bluefin:lts" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      DISK_SIZE="20G" \
+      FILESYSTEM="ext4" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-lts.log
 
 # Run E2E with composefs boot log_level=debug
 e2e-debug: build

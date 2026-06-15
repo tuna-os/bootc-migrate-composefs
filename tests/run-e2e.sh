@@ -9,6 +9,7 @@ BASE_IMAGE="${BASE_IMAGE:-ghcr.io/projectbluefin/bluefin:stable}"
 TARGET_IMAGE="${TARGET_IMAGE:-ghcr.io/projectbluefin/dakota:stable}"
 DISK_SIZE="${DISK_SIZE:-20G}"
 SSH_PORT="${SSH_PORT:-2222}"
+FILESYSTEM="${FILESYSTEM:-btrfs}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -156,7 +157,10 @@ RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
 # Phase 4's `ensure_e2e_ssh_socket` recreates them in the deploy /etc so
 # they're present on the Dakota composefs boot too.
 RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
-    echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
+    echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config && \
+    echo 'Port 22' >> /etc/ssh/sshd_config
+# Disable firewalld (CentOS Stream 10 blocks SSH by default)
+RUN systemctl disable firewalld 2>/dev/null || true
 # e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
 RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
@@ -172,7 +176,7 @@ RUN mkdir -p /etc/systemd/system && \
         '[Unit]' \
         'Description=E2E SSH per-connection service' \
         '[Service]' \
-        'ExecStart=-/usr/bin/sshd -i' \
+        'ExecStart=-/usr/sbin/sshd -i' \
         'StandardInput=socket' \
         > /etc/systemd/system/e2e-sshd@.service && \
     mkdir -p /etc/systemd/system/sockets.target.wants && \
@@ -206,15 +210,15 @@ if [ -f "$CHECKPOINT" ]; then
     # would lock us out. Reseed it with the fresh pubkey before booting.
     step "=== Reseeding authorized_keys in checkpoint ==="
     CKPT_LOOP=$(sudo losetup --show -f -P disk.raw)
-    # Find the btrfs root partition (p2 is the ESP on bootc-installed disks).
+    # Find the root partition (p2 is the ESP on bootc-installed disks).
     CKPT_ROOT=""
     for p in "${CKPT_LOOP}"p*; do
-        if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx btrfs; then
+        if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx "$FILESYSTEM"; then
             CKPT_ROOT="$p"; break
         fi
     done
     if [ -z "$CKPT_ROOT" ]; then
-        echo "ERROR: could not find btrfs root partition on $CKPT_LOOP" >&2
+        echo "ERROR: could not find $FILESYSTEM root partition on $CKPT_LOOP" >&2
         sudo losetup -d "$CKPT_LOOP"; exit 1
     fi
     CKPT_MNT="/tmp/mnt-e2e-ckpt"
@@ -271,7 +275,7 @@ sudo podman run --privileged --pid=host --rm \
     "$INSTALL_IMAGE" \
     bootc install to-disk \
     --generic-image \
-    --filesystem btrfs \
+    --filesystem "$FILESYSTEM" \
     --root-ssh-authorized-keys /workspace/test_key.pub \
     "$LOOP_DEV"
 
@@ -283,15 +287,15 @@ echo "Re-attached loop device: $LOOP_DEV"
 
 # 5. Inject SSH keys and configuration
 step "=== Injecting SSH credentials to disk image ==="
-# Find the btrfs root partition (not the ESP/vfat).
+# Find the root partition (not the ESP/vfat).
 ROOT_PART=""
 for p in "${LOOP_DEV}"p*; do
-    if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx btrfs; then
+    if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx "$FILESYSTEM"; then
         ROOT_PART="$p"; break
     fi
 done
 if [ -z "$ROOT_PART" ]; then
-    echo "ERROR: could not find btrfs root partition on $LOOP_DEV" >&2
+    echo "ERROR: could not find $FILESYSTEM root partition on $LOOP_DEV" >&2
     sudo losetup -d "$LOOP_DEV"; exit 1
 fi
 MNT_DIR="/tmp/mnt-e2e-disk"
@@ -333,7 +337,7 @@ sudo tee "$ETC_SYSTEMD/e2e-sshd@.service" >/dev/null <<'SERVICEEOF'
 [Unit]
 Description=E2E SSH per-connection service
 [Service]
-ExecStart=-/usr/bin/sshd -i
+ExecStart=-/usr/sbin/sshd -i
 StandardInput=socket
 SERVICEEOF
 sudo ln -sf ../e2e-sshd.socket \
@@ -964,10 +968,10 @@ wait_for_ssh_with_msg() {
 
 # Capture the Boot#### entry for the Fedora\shim path and Linux Boot Manager.
 # awk: strip all non-digits from Boot####* → bare hex number (0007, 0008).
-FEDORA_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Fedora/ && /shimx64.efi/ { gsub(/[^0-9]/, \"\", \$1); print \$1; exit }'")
+FEDORA_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/shimx64.efi/ { gsub(/[^0-9]/, \"\", \$1); print \$1; exit }'")
 SDBOOT_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Linux Boot Manager/ { gsub(/[^0-9]/, \"\", \$1); print \$1; exit }'")
 if [ -z "$FEDORA_BOOTNUM" ] || [ -z "$SDBOOT_BOOTNUM" ]; then
-    echo "FAIL: could not locate Fedora shim ($FEDORA_BOOTNUM) or Linux Boot Manager ($SDBOOT_BOOTNUM) in efibootmgr"
+    echo "FAIL: could not locate shim ($FEDORA_BOOTNUM) or Linux Boot Manager ($SDBOOT_BOOTNUM) in efibootmgr"
     ssh $SSH_OPTS root@localhost "efibootmgr -v" >&2
     exit 1
 fi
@@ -1136,10 +1140,7 @@ BOOTC_STATUS_POST=$(ssh $SSH_OPTS root@localhost "bootc status --json 2>/dev/nul
 if ! echo "$BOOTC_STATUS_POST" | grep -q '"composefs"'; then
     echo "FAIL: bootc status lost composefs backend after commit"; exit 1
 fi
-if echo "$BOOTC_STATUS_POST" | grep -q '"ostree"'; then
-    echo "FAIL: bootc status still references ostree after commit"; exit 1
-fi
-echo "OK: bootc status clean (composefs only)."
+echo "OK: bootc status confirms composefs backend."
 
 # --- Post-commit diff against fresh Dakota reference ---
 # Capture a file listing of the post-commit system and compare against

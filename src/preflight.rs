@@ -40,6 +40,8 @@ pub struct PreflightReport {
     pub esp_detected: bool,
     pub supports_reflink: bool,
     pub is_btrfs: bool,
+    /// Filesystem type string from /proc/mounts ("btrfs", "xfs", "ext4", etc.)
+    pub fs_type: Option<String>,
     pub ostree_repo_size_bytes: u64,
     pub composefs_free_bytes: u64,
     /// Whether the ESP has enough space for systemd-boot (≥150 MB).
@@ -193,11 +195,16 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
     // 4. Filesystem type
     let sysroot = "/sysroot";
     let mut is_btrfs = false;
+    let mut fs_type: Option<String> = None;
     if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
-        is_btrfs = mounts.lines().any(|line| {
+        for line in mounts.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.len() >= 3 && parts[1] == sysroot && parts[2] == "btrfs"
-        });
+            if parts.len() >= 3 && parts[1] == sysroot {
+                fs_type = Some(parts[2].to_string());
+                is_btrfs = parts[2] == "btrfs";
+                break;
+            }
+        }
     }
 
     // 5. Reflink check — remount /sysroot rw first if needed (OSTree default is ro)
@@ -252,6 +259,7 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
         esp_fs_type,
         supports_reflink,
         is_btrfs,
+        fs_type,
         ostree_repo_size_bytes,
         composefs_free_bytes,
         esp_detected,
@@ -285,6 +293,7 @@ mod tests {
             esp_fs_type: Some("vfat".into()),
             supports_reflink: true,
             is_btrfs: true,
+            fs_type: Some("btrfs".to_string()),
             ostree_repo_size_bytes: 1024 * 1024 * 1024,
             composefs_free_bytes: 5 * 1024 * 1024 * 1024,
             esp_ready_for_systemd_boot: true,
