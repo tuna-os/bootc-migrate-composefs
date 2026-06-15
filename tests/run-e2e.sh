@@ -172,9 +172,8 @@ RUN mkdir -p /etc/systemd/system && \
         '[Unit]' \
         'Description=E2E SSH per-connection service' \
         '[Service]' \
-        'ExecStart=-/usr/bin/sshd -i' \
+        'ExecStart=-/usr/bin/sshd -d -i 2>/dev/console' \
         'StandardInput=socket' \
-        'StandardError=journal+console' \
         > /etc/systemd/system/e2e-sshd@.service && \
     mkdir -p /etc/systemd/system/sockets.target.wants && \
     ln -sf /etc/systemd/system/e2e-sshd.socket \
