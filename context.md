@@ -1,112 +1,121 @@
 # Code Context
 
 ## Files Retrieved
-1. `tests/run-e2e.sh` (lines 940-1038) — OSTree rollback test section (#22), the core logic
-2. `tests/run-e2e.sh` (lines 459-477) — QEMU command line with machine type, firmware, boot params
-3. `tests/run-e2e.sh` (lines 640-703) — Pre-reboot diagnostic collection (grubenv, grub.cfg, efibootmgr, BLS entries)
-4. `tests/run-e2e.sh` (lines 384-452) — OVMF pair detection and VARS persistence
-5. `e2e-run.log` (lines 186-195) — Migration-time efibootmgr output (BootOrder, Boot#### entries)
-6. `e2e-run.log` (lines 236-302) — GRUB2 configuration: grubenv, grub.cfg head, blscfg refs
-7. `e2e-run.log` (lines 207-222) — Pre-reboot BLS entry `ostree-1.conf` contents
-8. `e2e-run.log` (lines 378-383) — BdsDxe boot sequence (loading Boot0008 "Linux Boot Manager")
-9. `e2e-run.log` (lines 969-1036) — Rollback test execution and failure output
-10. `e2e-run.log` (lines 515-522) — bootc status showing `rollback: null`, `rollbackQueued: false`
+
+1. **`qemu.log`** (full file) — GRUB rescue shell, the raw boot failure evidence
+2. **`/tmp/e2e-sudo3.log`** (full file) — E2E LTS run log showing SSH timeout at pre-migration boot
+3. **`tests/run-e2e.sh`** (full file, 1170 lines) — E2E test harness
+   - Lines 127-181: Containerfile for modified image (sshd enable + e2e-sshd.socket)
+   - Lines 193-229: Checkpoint restore + authorized_keys reseed logic
+   - Lines 258-278: `bootc install to-disk` invocation (`--generic-image --filesystem btrfs`)
+   - Lines 460-510: VM boot + SSH wait loop (60 attempts, 3s each)
+4. **`justfile`** (full file) — `e2e-lts` target (lines 46-51) does NOT set `FILESYSTEM` env var
+5. **`src/migration/kernel_options.rs`** (full file) — `should_filter()` strips `rootflags=*`, `ostree=*`, etc.
+6. **Checkpoint ESP files:**
+   - `EFI/centos/grub.cfg` — UEFI boot chain: `search --fs-uuid "${BOOT_UUID}"` → `configfile`
+   - `EFI/centos/bootuuid.cfg` — `set BOOT_UUID="5feade0d-fe38-4f5b-b8c1-375401f2607c"` (btrfs root UUID)
+   - `/boot/grub2/bootuuid.cfg` — same UUID string
 
 ## Key Code
 
-### Rollback test logic (`tests/run-e2e.sh` lines 984-1000)
+### GRUB UEFI boot chain (from the LTS checkpoint ESP)
+
+```
+OVMF → EFI/centos/shimx64.efi → EFI/centos/grubx64.efi
+  → EFI/centos/grub.cfg:
+      source bootuuid.cfg          # BOOT_UUID="5feade0d-..."
+      search --fs-uuid "${BOOT_UUID}" --set prefix   # ← FAILS HERE
+      configfile ($prefix)/grub2/grub.cfg
+```
+
+### GRUB module support in Bluefin LTS `grubx64.efi`
+
+```
+$ strings EFI/centos/grubx64.efi | grep -iE 'grub-core/fs/'
+../../grub-core/fs/ext2.c    ← ext2/3/4: YES
+../../grub-core/fs/xfs.c     ← XFS: YES
+# btrfs: COMPLETELY ABSENT     ← btrfs: NO
+```
+
+### `bootc install to-disk` invocation (run-e2e.sh lines 266-278)
+
 ```bash
-FEDORA_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Fedora/ && /shimx64.efi/ { gsub(/[^0-9A-F]/, \"\", \$1); print \$1; exit }'")
-SDBOOT_BOOTNUM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null | awk '/Linux Boot Manager/ { gsub(/[^0-9A-F]/, \"\", \$1); print \$1; exit }'")
-# ...
-ssh $SSH_OPTS root@localhost "efibootmgr --bootnext $FEDORA_BOOTNUM >/dev/null && systemctl reboot" || true
+sudo podman run --privileged --pid=host --rm \
+    -v /dev:/dev -v /var/tmp:/var/tmp -v /tmp:/tmp \
+    -v "$WORKSPACE_DIR":/workspace \
+    "$INSTALL_IMAGE" \
+    bootc install to-disk \
+    --generic-image \
+    --filesystem btrfs \           # ← hardcoded btrfs
+    --root-ssh-authorized-keys /workspace/test_key.pub \
+    "$LOOP_DEV"
 ```
 
-### BUG: awk regex produces invalid boot number
-The awk `gsub(/[^0-9A-F]/, "", $1)` on field `Boot0007*` strips `oot` and `*` but keeps `B`, producing `B0007` instead of `0007`. This causes `efibootmgr --bootnext B0007` to fail with "Invalid BootNext value: B0007" (confirmed in e2e-run.log line 1016).
+### `e2e-lts` justfile target (justfile lines 46-51)
 
-### Boot entries available after migration
-```
-BootOrder: 0008,0007,0000,0001,0002,0003,0004,0005,0006
-Boot0007* Fedora   → HD(2,.../\EFI\fedora\shimx64.efi         (chains into GRUB)
-Boot0008* Linux Boot Manager → HD(2,.../\EFI\systemd\systemd-bootx64.efi
-```
-
-### OSTree BLS entry (`/boot/loader/entries/ostree-1.conf`, e2e-run.log lines 218-222)
-```
-title Bluefin (Version: testing-44.20260612.2) (ostree:0)
-options root=UUID=6602ff8d-... rw ostree=/ostree/boot.1/default/.../0 console=ttyS0,115200n8 ...
-linux /boot/ostree/default-.../vmlinuz-7.0.12-201.fc44.x86_64
-initrd /boot/ostree/default-.../initramfs-7.0.12-201.fc44.x86_64.img
+```makefile
+e2e-lts: build
+    sudo -E env PATH="..." \
+      BASE_IMAGE="ghcr.io/projectbluefin/bluefin:lts" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      DISK_SIZE="20G" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-lts.log
+# NOTE: no FILESYSTEM env var — run-e2e.sh hardcodes btrfs
 ```
 
-### QEMU command line (`tests/run-e2e.sh` lines 465-476)
-```bash
-qemu-system-x86_64 \
-    -machine q35 \
-    -m 4096 -smp 2 -nographic \
-    -cpu host -enable-kvm \
-    -drive if=pflash,format=raw,readonly=on,file="$OVMF_PATH" \
-    -drive if=pflash,format=raw,file="$OVMF_VARS" \
-    -drive file=disk.raw,format=raw,if=virtio \
-    -netdev user,id=n1,hostfwd=tcp::"$SSH_PORT"-:22 \
-    -device virtio-net-pci,netdev=n1
+### `should_filter()` in kernel_options.rs (lines 36-49)
+
+```rust
+fn should_filter(word: &str) -> bool {
+    if word.starts_with("ostree=")
+        || word.starts_with("BOOT_IMAGE=")
+        || word.starts_with("initrd=")
+        || word.starts_with("rootflags=")     // ← strips btrfs subvol, XFS opts too
+        || word.starts_with("rd.systemd.unit=")
+    { return true; }
+    if word.starts_with("ostree.") { return true; }
+    false
+}
 ```
 
-### GRUB2 configuration (`e2e-run.log` lines 236-302)
-- **grubenv**: `boot_success=1` only; no `saved_entry` or `next_entry` keys
-- **grub.cfg**: CoreOS-based, uses `blscfg` module (lines 72-74) for BLS auto-discovery. Does **NOT** have `saved_entry` or `next_entry` logic in the GRUB script.
-- **grub2-editenv**: Available on Bluefin image
-- No `/etc/default/grub` present (missing)
+Not the *current* failure (failure is pre-migration), but relevant: `rootflags=` stripping is filesystem-agnostic. For btrfs, `rootflags=subvol=root` is critical; for XFS, `rootflags=` is typically empty.
 
 ## Architecture
 
-### Current rollback attempt (broken)
-```
-ComposeFS boot → efibootmgr --bootnext FEDORA_BOOTNUM → reboot
-  → OVMF should boot BootNext (0007=Fedora\shim)
-  → shim → GRUB → blscfg picks ostree-1.conf
-  → OSTree boot → verify → reboot → BootOrder resumes systemd-boot
-```
-**TWO failures:**
-1. awk bug: `FEDORA_BOOTNUM` = `B0007` (invalid, efibootmgr rejects it)
-2. BootNext silently ignored by OVMF/QEMU in this setup (per code comment at line 1001-1004)
+### Boot flow (pre-migration)
 
-### Recommended fix: systemd-boot's own oneshot (`bootctl set-oneshot`)
 ```
-ComposeFS boot → bootctl set-oneshot ostree-1.conf → reboot
-  → systemd-boot reads LoaderEntryOneShot EFI var
-  → boots OSTree entry directly (no GRUB chain, no UEFI BootNext)
-  → OSTree boot → verify → reboot → LoaderEntryOneShot cleared → composefs
+[Host] QEMU -machine q35 -bios OVMF (UEFI)
+  → OVMF reads ESP (partition 2, vfat)
+  → BootOrder: Fedora shim (EFI/centos/shimx64.efi)
+  → shim chains to grubx64.efi
+  → GRUB reads EFI/centos/grub.cfg → sources bootuuid.cfg → search --fs-uuid
+  → SEARCH FAILS because grubx64.efi has no btrfs module
+  → GRUB rescue shell
 ```
 
-Why this is the best path:
-- **No BootNext dependency**: Uses systemd-boot's own EFI variable (`LoaderEntryOneShot`), not UEFI's `BootNext`
-- **No GRUB involved**: The OSTree BLS entry (`/boot/loader/entries/ostree-1.conf`) is already present and readable by systemd-boot
-- **Atomic**: `bootctl set-oneshot` sets once, systemd-boot clears after reading
-- **No awk bug**: Don't need to extract boot numbers at all
-- Available since systemd v256; composefs system runs v257+ (has `systemd-bootctl.socket`)
+### Why `e2e` (stable) works but `e2e-lts` fails
 
-### Alternative: BootOrder reordering
-If `bootctl set-oneshot` is unavailable, reorder BootOrder to put Fedora first:
-```bash
-efibootmgr --bootorder 0007,0008,... && systemctl reboot
-```
-Then on OSTree boot, restore: `efibootmgr --bootorder 0008,0007,...`
-This avoids BootNext entirely. More robust in OVMF than BootNext.
+| | Bluefin stable | Bluefin LTS |
+|---|---|---|
+| OS base | Fedora Silverblue 44 | CentOS Stream 10 |
+| GRUB path | `EFI/fedora/grubx64.efi` | `EFI/centos/grubx64.efi` |
+| btrfs module | YES (boots fine) | NO (GRUB rescue) |
+| xfs module | likely YES | YES |
+| ext2 module | YES | YES |
 
-### Why GRUB2 one-shot won't work
-- grub.cfg doesn't support `saved_entry`/`next_entry` in its script logic
-- Would still need BootNext or BootOrder change to reach GRUB
-- After migration, EFI boots systemd-boot first (BootOrder 0008)
+### Data flow for the failure
+
+1. `bootc install to-disk --filesystem btrfs` formats root partition (p3) as btrfs
+2. `bootc` writes `bootuuid.cfg` → `BOOT_UUID=<btrfs-fs-uuid>` on both ESP and /boot
+3. `bootc` copies `grubx64.efi` from container image to ESP — LTS image's binary lacks btrfs
+4. On boot, GRUB can't find the btrfs filesystem by UUID → rescue shell
+5. SSH never comes up → E2E times out after 300s
 
 ## Start Here
 
-Open `tests/run-e2e.sh` at line 984. The rollback test needs two changes:
-1. **Replace lines 984-994** (the efibootmgr BootNext approach) with `bootctl set-oneshot ostree-1.conf`
-2. **Keep the same verification logic** (lines 1005-1038) — just the oneshot mechanism changes
+Open **`tests/run-e2e.sh`** at line 258. The fix is to make the `--filesystem` argument configurable via an env var (default `btrfs` for backward compat, but allow `xfs` or `ext4`), then have the `e2e-lts` justfile target pass `FILESYSTEM="xfs"` (the LTS GRUB supports XFS).
 
-The OSTree BLS entry filename is `ostree-1.conf` (confirmed at e2e-run.log line 219). The verification on the OSTree-booted system checks:
-- `/proc/cmdline` contains `ostree=` and NOT `composefs=`
-- `/var/home/realuser/Pictures/migration-wallpaper.png` exists with nonzero size
-- After second reboot, `/proc/cmdline` has `composefs=`
+Alternative fix if XFS causes other problems: use `ext4` as the filesystem, which the LTS GRUB also supports.
+
+The `kernel_options.rs` `rootflags=` filtering is *not* the current failure but will matter for composefs boot on btrfs — stripping `rootflags=subvol=root` is correct there. For XFS this is a no-op since XFS rootflags are typically empty.

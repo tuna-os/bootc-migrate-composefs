@@ -1,104 +1,120 @@
-[1;36m[e2e 15:29:19][0m Reaping stray processes from prior runs...
-Reaping PIDs: 1940389
-1946019
-[1;36m[e2e 15:29:19][0m === E2E Test Configuration ===
-Base Image (OSTree):   ghcr.io/projectbluefin/bluefin:stable
+[1;36m[e2e 21:31:22][0m Reaping stray processes from prior runs...
+Reaping PIDs: 30407
+[1;36m[e2e 21:31:23][0m === E2E Test Configuration ===
+Base Image (OSTree):   ghcr.io/projectbluefin/bluefin:lts
 Target Image (Cfs):    ghcr.io/projectbluefin/dakota:stable
 Disk Size:             20G
 Workspace:             /var/home/james/dev/ostree-composefs-rebase
-[1;36m[e2e 15:29:19][0m === Preflight checks ===
+[1;36m[e2e 21:31:23][0m === Preflight checks ===
 Using UEFI firmware:   /sysroot/state/os/default/var/home/james/.local/share/containers/storage/overlay/733cb0c247aa882228fe836e61e10e1db0e3ca41c6039fd1e821f282fdb96c92/diff/usr/share/OVMF/OVMF_CODE_4M.fd
 Using UEFI VARS:       /sysroot/state/os/default/var/home/james/.local/share/containers/storage/overlay/733cb0c247aa882228fe836e61e10e1db0e3ca41c6039fd1e821f282fdb96c92/diff/usr/share/OVMF/OVMF_VARS_4M.fd
-[1;36m[e2e 15:30:04][0m === Building migration utility ===
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
-[1;36m[e2e 15:30:04][0m === Generating SSH test key ===
+[1;36m[e2e 21:32:03][0m === Building migration utility ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+[1;36m[e2e 21:32:03][0m === Generating SSH test key ===
 Generating public/private rsa key pair.
 Your identification has been saved in ./test_key
 Your public key has been saved in ./test_key.pub
 The key fingerprint is:
-SHA256:WFFLQryr8PL3HtAMMOYF0O222KofSo+rmghKJP5FvAE root@himachal
+SHA256:fcDPMWF7DVPnxpc+jReNN29awozcM/k/Afhw2N0+voc root@himachal
 The key's randomart image is:
 +---[RSA 3072]----+
-|    .o===.o      |
-|     o.+o+ .     |
-|   E  ..o..      |
-|    o  o++       |
-|..   +.+Soo      |
-|+   o + +.       |
-|.o  .=.o  .      |
-|=...o++..  .     |
-|=..o=*+. oo      |
+|            o o.o|
+|         . . o B+|
+|          o B ++X|
+|         . O %.*B|
+|        S . X @+*|
+|           . . %o|
+|              o.+|
+|              Eoo|
+|               .=|
 +----[SHA256]-----+
-[1;36m[e2e 15:30:05][0m === Preparing bootable image with sshd ===
+[1;36m[e2e 21:32:03][0m === Preparing bootable image with sshd ===
 Building modified image with sshd enabled...
-STEP 1/6: FROM ghcr.io/projectbluefin/bluefin:stable
-STEP 2/6: RUN mkdir -p /usr/lib/systemd/system-preset &&     echo 'enable sshd.service' > /usr/lib/systemd/system-preset/50-e2e-ssh.preset &&     echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
---> Using cache b475a668c2df1579e17a041476ee3970c196d5649e5fbafe7b6bf8b9f068181d
---> b475a668c2df
-STEP 3/6: RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
---> Using cache 0e1ca5d2abf6448a1f908e5791f52aaef6c5ad5be25730c4e9b54088892beefa
---> 0e1ca5d2abf6
-STEP 4/6: RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants &&     ln -sf /usr/lib/systemd/system/sshd.service            /usr/lib/systemd/system/multi-user.target.wants/sshd.service
---> Using cache d1e8cb39c18d0fdeb9008a2b272764535f0ed0e510808a3d42b356622479228b
---> d1e8cb39c18d
-STEP 5/6: RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config &&     echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
---> Using cache 507bb0f2d2ecaf586734dfa9c847cbdb60b4bb64866ca070cdee7eaf4452df74
---> 507bb0f2d2ec
-STEP 6/6: RUN mkdir -p /etc/systemd/system &&     printf '%s\n'         '[Unit]'         'Description=E2E SSH TCP Socket (port 22)'         '[Socket]'         'ListenStream=22'         'Accept=yes'         '[Install]'         'WantedBy=sockets.target'         > /etc/systemd/system/e2e-sshd.socket &&     printf '%s\n'         '[Unit]'         'Description=E2E SSH per-connection service'         '[Service]'         'ExecStart=-/usr/bin/sshd -i'         'StandardInput=socket'         > /etc/systemd/system/e2e-sshd@.service &&     mkdir -p /etc/systemd/system/sockets.target.wants &&     ln -sf /etc/systemd/system/e2e-sshd.socket            /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
---> Using cache e2111767e42b15c04d797332a9f420ed4ff908a3000354a999783d848b862567
+STEP 1/7: FROM ghcr.io/projectbluefin/bluefin:lts
+STEP 2/7: RUN mkdir -p /usr/lib/systemd/system-preset &&     echo 'enable sshd.service' > /usr/lib/systemd/system-preset/50-e2e-ssh.preset &&     echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
+--> Using cache dc572f561f69a09eec19d7fdfd7de8ff359196cf3344002a4ca9ac30d941640d
+--> dc572f561f69
+STEP 3/7: RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
+--> Using cache 7150eab8854272859f5ab9c47d197f6119e6896b45227a8fb0ce8a764659fa5c
+--> 7150eab88542
+STEP 4/7: RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants &&     ln -sf /usr/lib/systemd/system/sshd.service            /usr/lib/systemd/system/multi-user.target.wants/sshd.service
+--> Using cache ef636fb2b72b7c51de8cededc3365227b52d7c4ff911a0784ca5d25f73c443d8
+--> ef636fb2b72b
+STEP 5/7: RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config &&     echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config &&     echo 'Port 22' >> /etc/ssh/sshd_config
+--> Using cache 91421a6402c55f83362af63e4e637c1ee298bb2835297a29876d42928a228b04
+--> 91421a6402c5
+STEP 6/7: RUN systemctl disable firewalld 2>/dev/null || true
+--> Using cache 5cf26c81035b2beb524d61a09f1aa1abeae4b961531aa377af731af29ff5804d
+--> 5cf26c81035b
+STEP 7/7: RUN mkdir -p /etc/systemd/system &&     printf '%s\n'         '[Unit]'         'Description=E2E SSH TCP Socket (port 22)'         '[Socket]'         'ListenStream=22'         'Accept=yes'         '[Install]'         'WantedBy=sockets.target'         > /etc/systemd/system/e2e-sshd.socket &&     printf '%s\n'         '[Unit]'         'Description=E2E SSH per-connection service'         '[Service]'         'ExecStart=-/usr/sbin/sshd -i'         'StandardInput=socket'         > /etc/systemd/system/e2e-sshd@.service &&     mkdir -p /etc/systemd/system/sockets.target.wants &&     ln -sf /etc/systemd/system/e2e-sshd.socket            /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
+--> Using cache 2610b5d8d491cda43ff8896476b19f7b1a4112f54f36e58cb589c214022d3c99
 COMMIT localhost/e2e-bluefin-ssh:latest
---> e2111767e42b
+--> 2610b5d8d491
 Successfully tagged localhost/e2e-bluefin-ssh:latest
-e2111767e42b15c04d797332a9f420ed4ff908a3000354a999783d848b862567
+2610b5d8d491cda43ff8896476b19f7b1a4112f54f36e58cb589c214022d3c99
 Using install image: localhost/e2e-bluefin-ssh:latest
-[1;36m[e2e 15:30:05][0m === Restoring pre-migration checkpoint ===
-[1;36m[e2e 15:30:05][0m === Reseeding authorized_keys in checkpoint ===
-[1;36m[e2e 15:30:06][0m === Booting VM under QEMU ===
+[1;36m[e2e 21:32:04][0m === Restoring pre-migration checkpoint ===
+[1;36m[e2e 21:32:04][0m === Reseeding authorized_keys in checkpoint ===
+[1;36m[e2e 21:32:05][0m === Booting VM under QEMU ===
 KVM acceleration enabled; CPU=host.
 Waiting for VM to boot and SSH to become available on port 2222...
 [vm-serial] GRUB version 2.12
-[vm-serial]       a command-line. ESC to return previous menu.                                             *Bluefin (Version: testing-44.20260612.2) (ostree:0)                                             UEFI Firmware Settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             The highlighted entry will be executed automatically in 1s.                                        The highlighted entry will be executed automatically in 0s.                                       Booting `Bluefin (Version: testing-44.20260612.2) (ostree:0)'
-[vm-serial] [    0.011872] Booting paravirtualized kernel on KVM
-[vm-serial] [    0.271124] smpboot: x86: Booting SMP configuration:
-[vm-serial] [    0.571122] simple-framebuffer simple-framebuffer.0: [drm] Registered 1 planes with drm panic
-[vm-serial] bochs-drm 0000:00:01.0: [drm] Registered 1 planes with drm panic
-[vm-serial] Welcome to Bluefin (Version: testing-44.20260612.2)!
+[vm-serial]       a command-line. ESC to return previous menu.                                             *Bluefin LTS (ostree:0)                                                                          UEFI Firmware Settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             The highlighted entry will be executed automatically in 1s.                                        The highlighted entry will be executed automatically in 0s.                                       Booting `Bluefin LTS (ostree:0)'
+[vm-serial] [    0.026509] Booting paravirtualized kernel on KVM
+[vm-serial] [    0.285600] smpboot: x86: Booting SMP configuration:
+[vm-serial] [    1.633659] systemd[1]: Listening on dbus.socket - D-Bus System Message Bus Socket.
+[vm-serial] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
+[vm-serial] Welcome to Bluefin LTS!
 [vm-serial] [  OK  ] Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
 [vm-serial] systemd[1]: Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
-[vm-serial] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 [vm-serial] [  OK  ] Listening on systemd-bootctl.socket - Boot Entries Service Socket.
 [vm-serial] [  OK  ] Listening on dbus.socket - D-Bus System Message Bus Socket.
 [vm-serial] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
 [vm-serial] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
-[vm-serial]          Starting sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK)...
-[vm-serial] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-serial]          Starting dbus-broker.service - D-Bus System Message Bus...
 [vm-serial] [  OK  ] Listening on sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
+[vm-serial]          Starting dbus-broker.service - D-Bus System Message Bus...
 [vm-serial] [  OK  ] Started dbus-broker.service - D-Bus System Message Bus.
 [vm-serial]          Starting polkit.service - Authorization Manager...
 [vm-serial]          Starting sshd-keygen@ecdsa.service - OpenSSH ecdsa Server Key Generation...
 [vm-serial]          Starting sshd-keygen@ed25519.service - OpenSSH ed25519 Server Key Generation...
 [vm-serial]          Starting sshd-keygen@rsa.service - OpenSSH rsa Server Key Generation...
-[vm-serial] [  OK  ] Finished sshd-keygen@ecdsa.service - OpenSSH ecdsa Server Key Generation.
-[vm-serial] [  OK  ] Finished sshd-keygen@ed25519.service - OpenSSH ed25519 Server Key Generation.
 [vm-serial]          Starting systemd-logind.service - User Login Management...
 [vm-serial] [  OK  ] Started systemd-logind.service - User Login Management.
-[vm-serial] [  OK  ] Started polkit.service - Authorization Manager.
+[vm-serial] [  OK  ] Finished sshd-keygen@ecdsa.service - OpenSSH ecdsa Server Key Generation.
+[vm-serial] [  OK  ] Finished sshd-keygen@ed25519.service - OpenSSH ed25519 Server Key Generation.
 [vm-serial] [  OK  ] Finished sshd-keygen@rsa.service - OpenSSH rsa Server Key Generation.
 [vm-serial] [  OK  ] Reached target sshd-keygen.target.
-[vm-serial]          Starting sshd.service - OpenSSH server daemon...
-[vm-serial] [FAILED] Failed to start sshd.service - OpenSSH server daemon.
-[vm-serial] See 'systemctl status sshd.service' for details.
-[1;36m[e2e 15:30:25][0m VM accessible via SSH after 19s.
-[1;36m[e2e 15:30:25][0m === Verifying target image ===
-[1;36m[e2e 15:30:25][0m === Copying migration utility to VM ===
+[vm-serial] [  OK  ] Started polkit.service - Authorization Manager.
+[vm-serial] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
+[vm-serial] Welcome to Bluefin LTS!
+[vm-serial] [  OK  ] Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
+[vm-serial] systemd[1]: Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
+[vm-serial] [  OK  ] Listening on systemd-bootctl.socket - Boot Entries Service Socket.
+[vm-serial] [  OK  ] Listening on dbus.socket - D-Bus System Message Bus Socket.
+[vm-serial] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
+[vm-serial] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
+[vm-serial] [  OK  ] Listening on sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
+[vm-serial]          Starting dbus-broker.service - D-Bus System Message Bus...
+[vm-serial] [  OK  ] Started dbus-broker.service - D-Bus System Message Bus.
+[vm-serial]          Starting polkit.service - Authorization Manager...
+[vm-serial]          Starting sshd-keygen@ecdsa.service - OpenSSH ecdsa Server Key Generation...
+[vm-serial]          Starting sshd-keygen@ed25519.service - OpenSSH ed25519 Server Key Generation...
+[vm-serial]          Starting sshd-keygen@rsa.service - OpenSSH rsa Server Key Generation...
+[vm-serial]          Starting systemd-logind.service - User Login Management...
+[vm-serial] [  OK  ] Started systemd-logind.service - User Login Management.
+[vm-serial] [  OK  ] Finished sshd-keygen@ecdsa.service - OpenSSH ecdsa Server Key Generation.
+[vm-serial] [  OK  ] Finished sshd-keygen@ed25519.service - OpenSSH ed25519 Server Key Generation.
+[vm-serial] [  OK  ] Finished sshd-keygen@rsa.service - OpenSSH rsa Server Key Generation.
+[vm-serial] [  OK  ] Reached target sshd-keygen.target.
+[vm-serial] [  OK  ] Started polkit.service - Authorization Manager.
+[1;36m[e2e 21:32:24][0m VM accessible via SSH after 19s.
+[1;36m[e2e 21:32:24][0m === Verifying target image ===
+[1;36m[e2e 21:32:24][0m === Copying migration utility to VM ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-[1;36m[e2e 15:30:29][0m === Injecting /etc fixtures (live, copied by migration) ===
+[1;36m[e2e 21:32:24][0m === Injecting /etc fixtures (live, copied by migration) ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-/usr/bin/ublue-motd: line 4: /usr/share/ublue-os/motd/env.sh: No such file or directory
-[1;36m[e2e 15:30:30][0m === Running migration inside VM ===
+[1;36m[e2e 21:32:25][0m === Running migration inside VM ===
 [migrate] Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-[migrate] /usr/bin/ublue-motd: line 4: /usr/share/ublue-os/motd/env.sh: No such file or directory
 [migrate] === OSTree to ComposeFS Migration Utility ===
 [migrate] Checking system state...
 [migrate] mount: /sysroot: mount point is busy.
@@ -108,56 +124,73 @@ Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hos
 [migrate]   - NVRAM writable:        Yes
 [migrate]   - ESP Mounted Path:      None — GRUB2-only migration
 [migrate]   - ESP Filesystem:        vfat
-[migrate]   - ESP Free Space:        497.86 MB
-[migrate]   - Btrfs Filesystem:      Yes
+[migrate]   - ESP Free Space:        502.42 MB
+[migrate]   - Filesystem:            ext4
+[migrate]   - Btrfs Filesystem:      No
 [migrate]   - /sysroot was RO:       Yes (remounted rw for reflink test)
-[migrate]   - Reflink (CoW) Support: Yes
-[migrate]   - OSTree repo size:      7.68 GB
-[migrate]   - ComposeFS free space:  11.57 GB
+[migrate]   - Reflink (CoW) Support: No
+[migrate]   - OSTree repo size:      5.86 GB
+[migrate]   - ComposeFS free space:  12.11 GB
 [migrate]   - GRUB tools available:  Yes
 [migrate]   - ESP ready for sd-boot: Yes (>=150 MB)
 [migrate]   - systemd-boot binaries: No (bootctl install would fail)
 [migrate] 
 [migrate] === Migration Readiness ===
 [migrate]   ⚠ systemd-boot binaries missing in source OS — migration will extract them from the target image instead.
+[migrate]   ⚠ No reflink support — object copies will use 1.5× more disk space.
 [migrate] 
 [migrate] Bootloader: Will migrate to systemd-boot (ESP ready, NVRAM writable).
 [migrate] Starting migration to OCI image: 10.0.2.2:5000/dakota:stable...
 [migrate] === Phase 0: Free-space check ===
-[migrate] Free space check: ostree repo = 7.68 GB, free = 11.57 GB, needed ≈ 8.45 GB (reflink: true)
+[migrate] Free space check: ostree repo = 5.86 GB, free = 12.10 GB, needed ≈ 8.79 GB (reflink: false)
 [migrate] === Phase 1: Skipped (--skip-import) ===
 [migrate] === Phase 2: Pulling OCI image ===
 [migrate] Pulling target image: 10.0.2.2:5000/dakota:stable...
-[vm-serial] Bluefin (Version: testing-44.20260612.2)
-[2;36m[e2e 15:30:51][0m still migration in progress (21s elapsed)
-[2;36m[e2e 15:31:11][0m still migration in progress (41s elapsed)
-[2;36m[e2e 15:31:31][0m still migration in progress (61s elapsed)
+[2;36m[e2e 21:32:45][0m still migration in progress (20s elapsed)
+[2;36m[e2e 21:33:05][0m still migration in progress (40s elapsed)
+[2;36m[e2e 21:33:25][0m still migration in progress (60s elapsed)
+[2;36m[e2e 21:33:45][0m still migration in progress (80s elapsed)
+[2;36m[e2e 21:34:05][0m still migration in progress (100s elapsed)
 [migrate] Target image pulled. Manifest: sha256:aafe7045940dc0604a7f276e7c902977fed02267ad742531f2a86ab3ed258320, Config: sha256:9b3641e781f97c3b0083b447758aa9dabd65d31f74ea81a830117323a9872bfc
 [migrate] === Phase 3: Creating ComposeFS EROFS Image ===
-[2;36m[e2e 15:31:51][0m still migration in progress (81s elapsed)
-[2;36m[e2e 15:32:11][0m still migration in progress (101s elapsed)
+[2;36m[e2e 21:34:25][0m still migration in progress (120s elapsed)
+[2;36m[e2e 21:34:45][0m still migration in progress (140s elapsed)
+[2;36m[e2e 21:35:05][0m still migration in progress (160s elapsed)
+[2;36m[e2e 21:35:25][0m still migration in progress (180s elapsed)
+[2;36m[e2e 21:35:45][0m still migration in progress (200s elapsed)
+[2;36m[e2e 21:36:05][0m still migration in progress (220s elapsed)
+[2;36m[e2e 21:36:25][0m still migration in progress (240s elapsed)
+[2;36m[e2e 21:36:45][0m still migration in progress (260s elapsed)
 [migrate] ComposeFS EROFS image created. Verity digest: 9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
 [migrate] Sealing composefs image...
-[2;36m[e2e 15:32:31][0m still migration in progress (121s elapsed)
+[2;36m[e2e 21:37:05][0m still migration in progress (280s elapsed)
+[2;36m[e2e 21:37:25][0m still migration in progress (300s elapsed)
+[2;36m[e2e 21:37:45][0m still migration in progress (320s elapsed)
+[2;36m[e2e 21:38:05][0m still migration in progress (340s elapsed)
+[2;36m[e2e 21:38:25][0m still migration in progress (360s elapsed)
 [migrate] Image sealed successfully.
 [migrate] === Phase 4: Staging Deployment State ===
 [migrate] Performing 3-way /etc merge...
 [migrate] Warning: bootc cfs mount failed (error: Opening stream 'oci-config-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc': Opening ref 'streams/oci-config-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc': No such file or directory (os error 2)), fell back to raw EROFS — file content beyond the inline threshold will read as zeros.
-[2;36m[e2e 15:32:51][0m still migration in progress (141s elapsed)
-[2;36m[e2e 15:33:11][0m still migration in progress (161s elapsed)
-[2;36m[e2e 15:33:31][0m still migration in progress (181s elapsed)
+[2;36m[e2e 21:38:45][0m still migration in progress (380s elapsed)
+[2;36m[e2e 21:39:05][0m still migration in progress (400s elapsed)
+[2;36m[e2e 21:39:25][0m still migration in progress (420s elapsed)
+[2;36m[e2e 21:39:45][0m still migration in progress (440s elapsed)
+[2;36m[e2e 21:40:05][0m still migration in progress (460s elapsed)
 [migrate] [phase4] streamed target /etc from registry for merge source
-[migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/audit/rules.d/10-base-config.rules -> ../../../usr/share/audit-rules/10-base-config.rules
+[2;36m[e2e 21:40:25][0m still migration in progress (480s elapsed)
 [migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/mtab -> ../../proc/self/mounts
-[migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/os-release -> ../usr/lib/os-release
 [migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/profile.d/70-systemd-shell-extra.sh -> ../../usr/lib/systemd/profile.d/70-systemd-shell-extra.sh
 [migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/profile.d/80-systemd-osc-context.sh -> ../../usr/lib/systemd/profile.d/80-systemd-osc-context.sh
+[migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/audit/rules.d/10-base-config.rules -> ../../../usr/share/audit-rules/10-base-config.rules
 [migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf -> ../../../usr/lib/systemd/ssh_config.d/20-systemd-ssh-proxy.conf
 [migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/ssh/sshd_config.d/20-systemd-userdb.conf -> ../../../usr/lib/systemd/sshd_config.d/20-systemd-userdb.conf
+[migrate] [phase4] pruning dangling /etc symlink: /sysroot/state/deploy/9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc/etc/os-release -> ../usr/lib/os-release
 [migrate] [phase4] pruned 7 dangling /etc symlink(s)
 [migrate] [phase4] dropped OSTree-era /etc artifact: .rpm-ostree-shadow-mode-fixed2.stamp
 [migrate] [phase4] dropped OSTree-era /etc artifact: .updated
 [migrate] [phase4] dropped OSTree-era /etc artifact: grub.d
+[migrate] [phase4] removed ostree-remount.service enablement (composefs doesn't need OSTree bind mounts)
 [migrate] [phase4] ensured e2e-sshd.socket in deploy /etc
 [migrate] Writing .imginfo file...
 [migrate] === Migrating /var data to ComposeFS state ===
@@ -167,10 +200,13 @@ Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hos
 [migrate] Auto-mounted ESP /dev/vda2 at /var/tmp/esp-migration
 [migrate] Warning: bootc cfs mount failed (error: Opening stream 'oci-config-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc': Opening ref 'streams/oci-config-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc': No such file or directory (os error 2)), fell back to raw EROFS — file content beyond the inline threshold will read as zeros.
 [migrate] Found kernel version: 7.0.7
-[2;36m[e2e 15:33:51][0m still migration in progress (201s elapsed)
-[2;36m[e2e 15:34:11][0m still migration in progress (221s elapsed)
-[2;36m[e2e 15:34:31][0m still migration in progress (241s elapsed)
-[2;36m[e2e 15:34:51][0m still migration in progress (261s elapsed)
+[2;36m[e2e 21:40:45][0m still migration in progress (500s elapsed)
+[2;36m[e2e 21:41:05][0m still migration in progress (520s elapsed)
+[2;36m[e2e 21:41:26][0m still migration in progress (541s elapsed)
+[2;36m[e2e 21:41:46][0m still migration in progress (561s elapsed)
+[2;36m[e2e 21:42:06][0m still migration in progress (581s elapsed)
+[2;36m[e2e 21:42:26][0m still migration in progress (601s elapsed)
+[2;36m[e2e 21:42:46][0m still migration in progress (621s elapsed)
 [migrate] [phase5] patched origin boot_digest = b1f3df0eb411086a5fd55a461cf294b8988a59dfea987a1c8bd0be483cb14a66
 [migrate] BootCurrent: 0001
 [migrate] Timeout: 0 seconds
@@ -182,8 +218,8 @@ Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hos
 [migrate] Boot0004* UEFI HTTPv4 (MAC:525400123456)	PciRoot(0x0)/Pci(0x2,0x0)/MAC(525400123456,1)/IPv4(0.0.0.0,0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri(){auto_created_boot_option}
 [migrate] Boot0005* UEFI HTTPv6 (MAC:525400123456)	PciRoot(0x0)/Pci(0x2,0x0)/MAC(525400123456,1)/IPv6([::],0,Static,[::],[::],64)/Uri(){auto_created_boot_option}
 [migrate] Boot0006* EFI Internal Shell	FvVol(7cb8bdc9-f8eb-4f34-aaea-3ee4af6516a1)/FvFile(7c04a583-9e3e-4f1c-ad65-e05268d0b4d1)
-[migrate] Boot0007* Fedora	HD(2,GPT,25840fb0-e205-4eb9-9471-36ef76363c90,0x1000,0x100000)/\EFI\fedora\shimx64.efi
-[migrate] Boot0008* Linux Boot Manager	HD(2,GPT,25840fb0-e205-4eb9-9471-36ef76363c90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+[migrate] Boot0007* centos	HD(2,GPT,d7a45922-f1db-4f88-b548-b8e1955b42dc,0x1000,0x100000)/\EFI\centos\shimx64.efi
+[migrate] Boot0008* Linux Boot Manager	HD(2,GPT,d7a45922-f1db-4f88-b548-b8e1955b42dc,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
 [migrate] Registered 'Linux Boot Manager' in UEFI NVRAM.
 [migrate] systemd-boot installed from target image. Composefs is the default; OSTree fallback available in the loader menu (3s timeout).
 [migrate] 
@@ -192,40 +228,38 @@ Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hos
 [migrate] Primary bootloader: systemd-boot
 [migrate] Please reboot the system to finalize the transition.
 [migrate] After successful boot, run 'bootc-migrate-composefs commit' to make composefs permanent.
-[1;36m[e2e 15:35:00][0m Migration completed in 270s (rc=0)
-[1;36m[e2e 15:35:00][0m === Verifying migration artifacts before reboot ===
+[1;36m[e2e 21:43:00][0m Migration completed in 635s (rc=0)
+[1;36m[e2e 21:43:00][0m === Verifying migration artifacts before reboot ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-/usr/bin/ublue-motd: line 4: /usr/share/ublue-os/motd/env.sh: No such file or directory
 --- Deployments ---
-total 0
-drwxr-xr-x. 1 root root 256 Jun 15 10:02 .
-drwxr-xr-x. 1 root root  16 Jun 15 10:03 ..
-drwxr-xr-x. 1 root root 282 Jun 15 10:03 9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+total 12
+drwxr-xr-x. 3 root root 4096 Jun 15 16:08 .
+drwxr-xr-x. 4 root root 4096 Jun 15 16:10 ..
+drwxr-xr-x. 3 root root 4096 Jun 15 16:10 9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
 --- BLS entries (list) ---
-total 4
-drwxr-xr-x. 1 root root  26 Jun 15 04:17 .
-drwxr-xr-x. 1 root root  14 Jun 15 04:17 ..
--rw-r--r--  1 root root 535 Jun 15 04:17 ostree-1.conf
+total 12
+drwxr-xr-x. 2 root root 4096 Jun 15 13:47 .
+drwxr-xr-x. 3 root root 4096 Jun 15 13:47 ..
+-rw-r--r--. 1 root root  506 Jun 15 13:47 ostree-1.conf
 --- BLS entry contents ---
 >>> /boot/loader/entries/ostree-1.conf
-title Bluefin (Version: testing-44.20260612.2) (ostree:0)
+title Bluefin LTS (ostree:0)
 version 1
-options root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw ostree=/ostree/boot.1/default/c39c46be95dea8dd59c8a610ec731d6c1345c64772a1a2e10c41ce343925ec42/0 console=ttyS0,115200n8 console=tty0 systemd.log_level=info
-linux /boot/ostree/default-c39c46be95dea8dd59c8a610ec731d6c1345c64772a1a2e10c41ce343925ec42/vmlinuz-7.0.12-201.fc44.x86_64
-initrd /boot/ostree/default-c39c46be95dea8dd59c8a610ec731d6c1345c64772a1a2e10c41ce343925ec42/initramfs-7.0.12-201.fc44.x86_64.img
+options root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw ostree=/ostree/boot.1/default/549db339023c5a1f7eca29847feae7790d86bf6354254eec9ae6419a2ab2dc48/0 console=ttyS0,115200n8 console=tty0 systemd.log_level=info
+linux /boot/ostree/default-549db339023c5a1f7eca29847feae7790d86bf6354254eec9ae6419a2ab2dc48/vmlinuz-6.12.0-233.el10.x86_64
+initrd /boot/ostree/default-549db339023c5a1f7eca29847feae7790d86bf6354254eec9ae6419a2ab2dc48/initramfs-6.12.0-233.el10.x86_64.img
 
 --- Boot dirs (/boot, GRUB2 path) ---
 No bootc_composefs dirs in /boot
 --- ESP loader entries (systemd-boot path) ---
 --- ComposeFS images ---
-total 4
-drwxr-xr-x. 1 root root 256 Jun 15 10:02 .
-drwxr-xr-x. 1 root root  40 Jun 15 10:02 ..
-lrwxrwxrwx. 1 root root 140 Jun 15 10:02 9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc -> ../objects/9a/f734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+total 12
+drwxr-xr-x. 2 root root 4096 Jun 15 16:07 .
+drwxr-xr-x. 5 root root 4096 Jun 15 16:07 ..
+lrwxrwxrwx. 1 root root  140 Jun 15 16:07 9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc -> ../objects/9a/f734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
 --- /etc/default/grub ---
 missing
 --- grubenv (grub2-editenv list) ---
-boot_success=1
 --- grub.cfg blscfg references ---
 72:### BEGIN 10_blscfg.cfg ###
 73:blscfg
@@ -314,130 +348,96 @@ Boot0005* UEFI HTTPv6 (MAC:525400123456)	PciRoot(0x0)/Pci(0x2,0x0)/MAC(525400123
     data: 4e ac 08 81 11 9f 59 4d 85 0e e2 1a 52 2c 59 b2
 Boot0006* EFI Internal Shell	FvVol(7cb8bdc9-f8eb-4f34-aaea-3ee4af6516a1)/FvFile(7c04a583-9e3e-4f1c-ad65-e05268d0b4d1)
       dp: 04 07 14 00 c9 bd b8 7c eb f8 34 4f aa ea 3e e4 af 65 16 a1 / 04 06 14 00 83 a5 04 7c 3e 9e 1c 4f ad 65 e0 52 68 d0 b4 d1 / 7f ff 04 00
-Boot0007* Fedora	HD(2,GPT,25840fb0-e205-4eb9-9471-36ef76363c90,0x1000,0x100000)/\EFI\fedora\shimx64.efi
-      dp: 04 01 2a 00 02 00 00 00 00 10 00 00 00 00 00 00 00 00 10 00 00 00 00 00 b0 0f 84 25 05 e2 b9 4e 94 71 36 ef 76 36 3c 90 02 02 / 04 04 34 00 5c 00 45 00 46 00 49 00 5c 00 66 00 65 00 64 00 6f 00 72 00 61 00 5c 00 73 00 68 00 69 00 6d 00 78 00 36 00 34 00 2e 00 65 00 66 00 69 00 00 00 / 7f ff 04 00
-Boot0008* Linux Boot Manager	HD(2,GPT,25840fb0-e205-4eb9-9471-36ef76363c90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-      dp: 04 01 2a 00 02 00 00 00 00 10 00 00 00 00 00 00 00 00 10 00 00 00 00 00 b0 0f 84 25 05 e2 b9 4e 94 71 36 ef 76 36 3c 90 02 02 / 04 04 46 00 5c 00 45 00 46 00 49 00 5c 00 73 00 79 00 73 00 74 00 65 00 6d 00 64 00 5c 00 73 00 79 00 73 00 74 00 65 00 6d 00 64 00 2d 00 62 00 6f 00 6f 00 74 00 78 00 36 00 34 00 2e 00 65 00 66 00 69 00 00 00 / 7f ff 04 00
-[1;36m[e2e 15:35:00][0m === Rebooting VM ===
+Boot0007* centos	HD(2,GPT,d7a45922-f1db-4f88-b548-b8e1955b42dc,0x1000,0x100000)/\EFI\centos\shimx64.efi
+      dp: 04 01 2a 00 02 00 00 00 00 10 00 00 00 00 00 00 00 00 10 00 00 00 00 00 22 59 a4 d7 db f1 88 4f b5 48 b8 e1 95 5b 42 dc 02 02 / 04 04 34 00 5c 00 45 00 46 00 49 00 5c 00 63 00 65 00 6e 00 74 00 6f 00 73 00 5c 00 73 00 68 00 69 00 6d 00 78 00 36 00 34 00 2e 00 65 00 66 00 69 00 00 00 / 7f ff 04 00
+Boot0008* Linux Boot Manager	HD(2,GPT,d7a45922-f1db-4f88-b548-b8e1955b42dc,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+      dp: 04 01 2a 00 02 00 00 00 00 10 00 00 00 00 00 00 00 00 10 00 00 00 00 00 22 59 a4 d7 db f1 88 4f b5 48 b8 e1 95 5b 42 dc 02 02 / 04 04 46 00 5c 00 45 00 46 00 49 00 5c 00 73 00 79 00 73 00 74 00 65 00 6d 00 64 00 5c 00 73 00 79 00 73 00 74 00 65 00 6d 00 64 00 2d 00 62 00 6f 00 6f 00 74 00 78 00 36 00 34 00 2e 00 65 00 66 00 69 00 00 00 / 7f ff 04 00
+[1;36m[e2e 21:43:00][0m === Rebooting VM ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-/usr/bin/ublue-motd: line 4: /usr/share/ublue-os/motd/env.sh: No such file or directory
-[vm-serial] fedora login: [!p]104\[?7h[  OK  ] Removed slice user-0.slice - User Slice of UID 0.
-[1;36m[e2e 15:35:06][0m Waiting for VM to boot back after migration...
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-[1;36m[e2e 15:35:18][0m still waiting for post-reboot SSH (12s elapsed, attempt 5/60)
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-[1;36m[e2e 15:35:33][0m still waiting for post-reboot SSH (27s elapsed, attempt 10/60)
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-Connection closed by 127.0.0.1 port 2222
-[vm-serial]          Stopping systemd-logind.service - User Login Management...
-[vm-post]          Stopping systemd-logind.service - User Login Management...
-[vm-serial] [  OK  ] Stopped systemd-logind.service - User Login Management.
-[vm-post] [  OK  ] Stopped systemd-logind.service - User Login Management.
 [vm-serial]          Stopping polkit.service - Authorization Manager...
-[vm-post]          Stopping polkit.service - Authorization Manager...
-[vm-post] [  OK  ] Stopped polkit.service - Authorization Manager.
 [vm-serial] [  OK  ] Stopped polkit.service - Authorization Manager.
+[vm-serial]          Stopping systemd-logind.service - User Login Management...
+[vm-serial] [  OK  ] Stopped systemd-logind.service - User Login Management.
 [vm-serial] [  OK  ] Closed e2e-sshd.socket - E2E SSH TCP Socket (port 22).
-[vm-post] [  OK  ] Closed e2e-sshd.socket - E2E SSH TCP Socket (port 22).
-[vm-post] [  OK  ] Closed sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
 [vm-serial] [  OK  ] Closed sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
-[vm-serial]          Stopping sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK)...
-[vm-post]          Stopping sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK)...
-[vm-serial] [  OK  ] Closed systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-post] [  OK  ] Closed systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-serial]          Stopping dbus-broker.service - D-Bus System Message Bus...
-[vm-post]          Stopping dbus-broker.service - D-Bus System Message Bus...
-[vm-serial] [  OK  ] Stopped dbus-broker.service - D-Bus System Message Bus.
-[vm-post] [  OK  ] Stopped dbus-broker.service - D-Bus System Message Bus.
-[vm-post] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
-[vm-serial] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
-[vm-post] [  OK  ] Closed sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
 [vm-serial] [  OK  ] Closed sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
-[vm-post] [=3h[=3h[=3hBdsDxe: loading Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-[vm-serial] [=3h[=3h[=3hBdsDxe: loading Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-[vm-serial] BdsDxe: starting Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-[vm-post] BdsDxe: starting Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+[vm-serial]          Stopping dbus-broker.service - D-Bus System Message Bus...
+[vm-serial] [  OK  ] Stopped dbus-broker.service - D-Bus System Message Bus.
+[vm-serial] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
+[vm-serial] [=3h[=3h[=3hBdsDxe: loading Boot0008 "Linux Boot Manager" from HD(2,GPT,D7A45922-F1DB-4F88-B548-B8E1955B42DC,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+[vm-serial] BdsDxe: starting Boot0008 "Linux Boot Manager" from HD(2,GPT,D7A45922-F1DB-4F88-B548-B8E1955B42DC,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+[1;36m[e2e 21:43:06][0m Waiting for VM to boot back after migration...
 Connection timed out during banner exchange
 Connection to 127.0.0.1 port 2222 timed out
-[1;36m[e2e 15:35:50][0m still waiting for post-reboot SSH (44s elapsed, attempt 15/60)
-[vm-post]           Linux (composefs)             Reboot Into Firmware Interface                                               Boot in 3s.                                            ──────────────────────────────────────────                                            Boot in 2s.                                            ──────────────────────────────────────────                                            Boot in 1s.                                            ──────────────────────────────────────────[    0.000000] Linux version 7.0.7 (tomjon@buildbox) (gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT_DYNAMIC Thu Nov 10 15:00:00 UTC 2011
 [vm-serial]           Linux (composefs)             Reboot Into Firmware Interface                                               Boot in 3s.                                            ──────────────────────────────────────────                                            Boot in 2s.                                            ──────────────────────────────────────────                                            Boot in 1s.                                            ──────────────────────────────────────────[    0.000000] Linux version 7.0.7 (tomjon@buildbox) (gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT_DYNAMIC Thu Nov 10 15:00:00 UTC 2011
-[vm-serial] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-post] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-serial] [    0.011267] Booting paravirtualized kernel on KVM
-[vm-post] [    0.011267] Booting paravirtualized kernel on KVM
-[vm-post] [    0.037895] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-serial] [    0.037895] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-post] [    0.037942] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
-[vm-serial] [    0.037942] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
-[vm-serial] [    0.292338] smpboot: x86: Booting SMP configuration:
-[vm-post] [    0.292338] smpboot: x86: Booting SMP configuration:
-[vm-post] [    0.925364] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
-[vm-serial] [    0.925364] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
+[vm-serial] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-post] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-post] [    0.016399] Booting paravirtualized kernel on KVM
+[vm-serial] [    0.016399] Booting paravirtualized kernel on KVM
+[vm-serial] [    0.057867] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-post] [    0.057867] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-post] [    0.057939] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
+[vm-serial] [    0.057939] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
+[vm-post] [    0.394934] smpboot: x86: Booting SMP configuration:
+[vm-serial] [    0.394934] smpboot: x86: Booting SMP configuration:
+[vm-serial] [    1.395359] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
+[vm-post] [    1.395359] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
 Connection timed out during banner exchange
 Connection to 127.0.0.1 port 2222 timed out
-[vm-post] Welcome to Bluefin!
 [vm-serial] Welcome to Bluefin!
+[vm-post] Welcome to Bluefin!
 [vm-post] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 [vm-serial] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
-[vm-post] systemd[1]: systemd-pcrlock-machine-id.service - Lock Machine ID to TPM PCR Policy skipped, unmet condition check ConditionSecurity=measured-uki
 [vm-serial] systemd[1]: systemd-pcrlock-machine-id.service - Lock Machine ID to TPM PCR Policy skipped, unmet condition check ConditionSecurity=measured-uki
+[vm-post] systemd[1]: systemd-pcrlock-machine-id.service - Lock Machine ID to TPM PCR Policy skipped, unmet condition check ConditionSecurity=measured-uki
 [vm-serial] [  OK  ] Listening on systemd-bootctl.socket - Boot Loader Control Service Socket.
 [vm-post] [  OK  ] Listening on systemd-bootctl.socket - Boot Loader Control Service Socket.
-[vm-serial]          Starting systemd-boot-random-seed.service - Update Boot Loader Random Seed...
 [vm-post]          Starting systemd-boot-random-seed.service - Update Boot Loader Random Seed...
-[vm-post]          Starting systemd-boot-update.service - Automatic Boot Loader Update...
+[vm-serial]          Starting systemd-boot-random-seed.service - Update Boot Loader Random Seed...
 [vm-serial]          Starting systemd-boot-update.service - Automatic Boot Loader Update...
-[vm-serial] [  OK  ] Finished systemd-boot-random-seed.service - Update Boot Loader Random Seed.
+[vm-post]          Starting systemd-boot-update.service - Automatic Boot Loader Update...
 [vm-post] [  OK  ] Finished systemd-boot-random-seed.service - Update Boot Loader Random Seed.
-[vm-post] [  OK  ] Finished systemd-boot-update.service - Automatic Boot Loader Update.
+[vm-serial] [  OK  ] Finished systemd-boot-random-seed.service - Update Boot Loader Random Seed.
 [vm-serial] [  OK  ] Finished systemd-boot-update.service - Automatic Boot Loader Update.
+[vm-post] [  OK  ] Finished systemd-boot-update.service - Automatic Boot Loader Update.
+Connection timed out during banner exchange
+Connection to 127.0.0.1 port 2222 timed out
 [vm-serial] [  OK  ] Listening on dbus.socket - D-Bus System Message Bus Socket.
 [vm-post] [  OK  ] Listening on dbus.socket - D-Bus System Message Bus Socket.
-[vm-serial] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
 [vm-post] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
-[vm-serial] [  OK  ] Listening on polkit-agent-helper.socket - Authorization Manager Agent Helper.
+[vm-serial] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
 [vm-post] [  OK  ] Listening on polkit-agent-helper.socket - Authorization Manager Agent Helper.
-[vm-post] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
+[vm-serial] [  OK  ] Listening on polkit-agent-helper.socket - Authorization Manager Agent Helper.
 [vm-serial] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
-[vm-serial] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
+[vm-post] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
 [vm-post] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-post]          Starting dbus.service - D-Bus System Message Bus...
+[vm-serial] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
 [vm-serial]          Starting dbus.service - D-Bus System Message Bus...
+[vm-post]          Starting dbus.service - D-Bus System Message Bus...
 [vm-serial]          Starting polkit.service - Authorization Manager...
 [vm-post]          Starting polkit.service - Authorization Manager...
 [vm-post]          Starting systemd-logind.service - User Login Management...
 [vm-serial]          Starting systemd-logind.service - User Login Management...
-[vm-post]          Starting ublue-boot-timeout.service - Set systemd-boot menu timeout...
 [vm-serial]          Starting ublue-boot-timeout.service - Set systemd-boot menu timeout...
-[vm-post]          Starting ublue-firstboot-date.service - Record Dakota first-boot installation date...
+[vm-post]          Starting ublue-boot-timeout.service - Set systemd-boot menu timeout...
 [vm-serial]          Starting ublue-firstboot-date.service - Record Dakota first-boot installation date...
+[vm-post]          Starting ublue-firstboot-date.service - Record Dakota first-boot installation date...
 [vm-serial]          Starting ublue-wallpaper-month.service - Point Dakota wallpaper at the current month...
 [vm-post]          Starting ublue-wallpaper-month.service - Point Dakota wallpaper at the current month...
-Connection timed out during banner exchange
-Connection to 127.0.0.1 port 2222 timed out
 [vm-post] [  OK  ] Finished ublue-firstboot-date.service - Record Dakota first-boot installation date.
 [vm-serial] [  OK  ] Finished ublue-firstboot-date.service - Record Dakota first-boot installation date.
-[vm-post] [  OK  ] Finished ublue-wallpaper-month.service - Point Dakota wallpaper at the current month.
-[vm-serial] [  OK  ] Finished ublue-wallpaper-month.service - Point Dakota wallpaper at the current month.
 [vm-post] [  OK  ] Finished ublue-boot-timeout.service - Set systemd-boot menu timeout.
 [vm-serial] [  OK  ] Finished ublue-boot-timeout.service - Set systemd-boot menu timeout.
-[vm-serial] [  OK  ] Started systemd-logind.service - User Login Management.
-[vm-post] [  OK  ] Started systemd-logind.service - User Login Management.
+[vm-serial] [  OK  ] Finished ublue-wallpaper-month.service - Point Dakota wallpaper at the current month.
+[vm-post] [  OK  ] Finished ublue-wallpaper-month.service - Point Dakota wallpaper at the current month.
 [vm-post] [  OK  ] Started dbus.service - D-Bus System Message Bus.
 [vm-serial] [  OK  ] Started dbus.service - D-Bus System Message Bus.
+[vm-serial] [  OK  ] Started systemd-logind.service - User Login Management.
+[vm-post] [  OK  ] Started systemd-logind.service - User Login Management.
 [vm-post] [  OK  ] Started polkit.service - Authorization Manager.
 [vm-serial] [  OK  ] Started polkit.service - Authorization Manager.
+Connection timed out during banner exchange
+Connection to 127.0.0.1 port 2222 timed out
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -451,10 +451,10 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47010 22
-  SSH_CONNECTION=10.0.2.2 47010 10.0.2.15 22
-[1;36m[e2e 15:36:03][0m VM accessible via SSH after reboot (57s).
-[1;36m[e2e 15:36:03][0m === Running post-migration validation checks ===
+  SSH_CLIENT=10.0.2.2 57718 22
+  SSH_CONNECTION=10.0.2.2 57718 10.0.2.15 22
+[1;36m[e2e 21:43:27][0m VM accessible via SSH after reboot (21s).
+[1;36m[e2e 21:43:27][0m === Running post-migration validation checks ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -468,8 +468,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47016 22
-  SSH_CONNECTION=10.0.2.2 47016 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57720 22
+  SSH_CONNECTION=10.0.2.2 57720 10.0.2.15 22
 apiVersion: org.containers.bootc/v1
 kind: BootcHost
 metadata:
@@ -520,8 +520,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47028 22
-  SSH_CONNECTION=10.0.2.2 47028 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57726 22
+  SSH_CONNECTION=10.0.2.2 57726 10.0.2.15 22
 OK: Booted backend is ComposeFS.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -536,8 +536,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47034 22
-  SSH_CONNECTION=10.0.2.2 47034 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57728 22
+  SSH_CONNECTION=10.0.2.2 57728 10.0.2.15 22
 OK: Persistent /var data preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -552,8 +552,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47048 22
-  SSH_CONNECTION=10.0.2.2 47048 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57744 22
+  SSH_CONNECTION=10.0.2.2 57744 10.0.2.15 22
 OK: User home directory data preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -568,8 +568,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47064 22
-  SSH_CONNECTION=10.0.2.2 47064 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57756 22
+  SSH_CONNECTION=10.0.2.2 57756 10.0.2.15 22
 OK: Dotfiles preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -584,8 +584,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47076 22
-  SSH_CONNECTION=10.0.2.2 47076 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57766 22
+  SSH_CONNECTION=10.0.2.2 57766 10.0.2.15 22
 OK: Multi-user nested directory structure preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -600,8 +600,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47084 22
-  SSH_CONNECTION=10.0.2.2 47084 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57770 22
+  SSH_CONNECTION=10.0.2.2 57770 10.0.2.15 22
 OK: SSH key files preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -616,8 +616,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47100 22
-  SSH_CONNECTION=10.0.2.2 47100 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57772 22
+  SSH_CONNECTION=10.0.2.2 57772 10.0.2.15 22
 OK: System state files preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -632,8 +632,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 47108 22
-  SSH_CONNECTION=10.0.2.2 47108 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57774 22
+  SSH_CONNECTION=10.0.2.2 57774 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -647,8 +647,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48318 22
-  SSH_CONNECTION=10.0.2.2 48318 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57776 22
+  SSH_CONNECTION=10.0.2.2 57776 10.0.2.15 22
 OK: Symlinks preserved and functional.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -663,8 +663,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48332 22
-  SSH_CONNECTION=10.0.2.2 48332 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57792 22
+  SSH_CONNECTION=10.0.2.2 57792 10.0.2.15 22
 OK: Hidden directory data preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -679,8 +679,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48338 22
-  SSH_CONNECTION=10.0.2.2 48338 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57798 22
+  SSH_CONNECTION=10.0.2.2 57798 10.0.2.15 22
 OK: /etc custom config preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -695,8 +695,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48340 22
-  SSH_CONNECTION=10.0.2.2 48340 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57808 22
+  SSH_CONNECTION=10.0.2.2 57808 10.0.2.15 22
 OK: Nested /etc files preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -711,8 +711,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48350 22
-  SSH_CONNECTION=10.0.2.2 48350 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57818 22
+  SSH_CONNECTION=10.0.2.2 57818 10.0.2.15 22
 OK: In-place /etc edits preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -727,8 +727,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48354 22
-  SSH_CONNECTION=10.0.2.2 48354 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57820 22
+  SSH_CONNECTION=10.0.2.2 57820 10.0.2.15 22
 OK: /etc symlinks preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -743,8 +743,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48370 22
-  SSH_CONNECTION=10.0.2.2 48370 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57834 22
+  SSH_CONNECTION=10.0.2.2 57834 10.0.2.15 22
 OK: /home/<user> resolves and content preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -759,10 +759,10 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48380 22
-  SSH_CONNECTION=10.0.2.2 48380 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57850 22
+  SSH_CONNECTION=10.0.2.2 57850 10.0.2.15 22
 OK: User account from /etc/passwd preserved: realuser:x:1000:1000::/var/home/realuser:/bin/bash
-[1;36m[e2e 15:36:06][0m === Running full-fat user state validation ===
+[1;36m[e2e 21:43:30][0m === Running full-fat user state validation ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -776,8 +776,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48392 22
-  SSH_CONNECTION=10.0.2.2 48392 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57866 22
+  SSH_CONNECTION=10.0.2.2 57866 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -791,8 +791,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48404 22
-  SSH_CONNECTION=10.0.2.2 48404 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57880 22
+  SSH_CONNECTION=10.0.2.2 57880 10.0.2.15 22
 OK: /etc/sudoers.d entry preserved with 440 mode.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -807,8 +807,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48420 22
-  SSH_CONNECTION=10.0.2.2 48420 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57886 22
+  SSH_CONNECTION=10.0.2.2 57886 10.0.2.15 22
 OK: /etc/hosts append preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -823,8 +823,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48424 22
-  SSH_CONNECTION=10.0.2.2 48424 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57898 22
+  SSH_CONNECTION=10.0.2.2 57898 10.0.2.15 22
 OK: /etc/ssh/sshd_config.d/99-local.conf preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -839,8 +839,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48440 22
-  SSH_CONNECTION=10.0.2.2 48440 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57904 22
+  SSH_CONNECTION=10.0.2.2 57904 10.0.2.15 22
 OK: wallpaper file (25 bytes) preserved under /var/home/realuser/Pictures/.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -855,8 +855,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48446 22
-  SSH_CONNECTION=10.0.2.2 48446 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57906 22
+  SSH_CONNECTION=10.0.2.2 57906 10.0.2.15 22
 OK: GNOME extension dir + metadata preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -871,8 +871,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48448 22
-  SSH_CONNECTION=10.0.2.2 48448 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57912 22
+  SSH_CONNECTION=10.0.2.2 57912 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -886,8 +886,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48456 22
-  SSH_CONNECTION=10.0.2.2 48456 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57918 22
+  SSH_CONNECTION=10.0.2.2 57918 10.0.2.15 22
 OK: dconf db + gsettings keyfile (accent, wallpaper URI, keybinding) preserved.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -902,8 +902,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48466 22
-  SSH_CONNECTION=10.0.2.2 48466 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57932 22
+  SSH_CONNECTION=10.0.2.2 57932 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -917,8 +917,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48472 22
-  SSH_CONNECTION=10.0.2.2 48472 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57934 22
+  SSH_CONNECTION=10.0.2.2 57934 10.0.2.15 22
 OK: Homebrew Cellar preserved (INSTALL_RECEIPT.json + executable binary mode).
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -933,8 +933,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48482 22
-  SSH_CONNECTION=10.0.2.2 48482 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57942 22
+  SSH_CONNECTION=10.0.2.2 57942 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -948,10 +948,10 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48496 22
-  SSH_CONNECTION=10.0.2.2 48496 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57948 22
+  SSH_CONNECTION=10.0.2.2 57948 10.0.2.15 22
 OK: Flatpak user + system installations preserved.
-[1;36m[e2e 15:36:08][0m === Running OSTree rollback test ===
+[1;36m[e2e 21:43:33][0m === Running OSTree rollback test ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -965,8 +965,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48512 22
-  SSH_CONNECTION=10.0.2.2 48512 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57958 22
+  SSH_CONNECTION=10.0.2.2 57958 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -980,8 +980,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48524 22
-  SSH_CONNECTION=10.0.2.2 48524 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 57970 22
+  SSH_CONNECTION=10.0.2.2 57970 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -995,9 +995,9 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48536 22
-  SSH_CONNECTION=10.0.2.2 48536 10.0.2.15 22
-[1;36m[e2e 15:36:09][0m rollback: reordering BootOrder to 0007,0008 (was 0008,0007,0000,0001,0002,0003,0004,0005,0006)
+  SSH_CLIENT=10.0.2.2 57986 22
+  SSH_CONNECTION=10.0.2.2 57986 10.0.2.15 22
+[1;36m[e2e 21:43:33][0m rollback: reordering BootOrder to 0007,0008 (was 0008,0007,0000,0001,0002,0003,0004,0005,0006)
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -1011,28 +1011,26 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 48540 22
-  SSH_CONNECTION=10.0.2.2 48540 10.0.2.15 22
-[vm-serial] GRUB version 2.12
+  SSH_CLIENT=10.0.2.2 57998 22
+  SSH_CONNECTION=10.0.2.2 57998 10.0.2.15 22
 [vm-post] GRUB version 2.12
-[vm-serial]       a command-line. ESC to return previous menu.                                             *Bluefin (Version: testing-44.20260612.2) (ostree:0)                                             UEFI Firmware Settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             The highlighted entry will be executed automatically in 1s.                                        The highlighted entry will be executed automatically in 0s.                                       Booting `Bluefin (Version: testing-44.20260612.2) (ostree:0)'
-[vm-post]       a command-line. ESC to return previous menu.                                             *Bluefin (Version: testing-44.20260612.2) (ostree:0)                                             UEFI Firmware Settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             The highlighted entry will be executed automatically in 1s.                                        The highlighted entry will be executed automatically in 0s.                                       Booting `Bluefin (Version: testing-44.20260612.2) (ostree:0)'
-[vm-serial] [    0.011682] Booting paravirtualized kernel on KVM
-[vm-post] [    0.011682] Booting paravirtualized kernel on KVM
-[vm-post] [    0.255638] smpboot: x86: Booting SMP configuration:
-[vm-serial] [    0.255638] smpboot: x86: Booting SMP configuration:
-[vm-post] [    0.620213] simple-framebuffer simple-framebuffer.0: [drm] Registered 1 planes with drm panic
-[vm-serial] [    0.620213] simple-framebuffer simple-framebuffer.0: [drm] Registered 1 planes with drm panic
-[vm-post] bochs-drm 0000:00:01.0: [drm] Registered 1 planes with drm panic
-[vm-serial] bochs-drm 0000:00:01.0: [drm] Registered 1 planes with drm panic
-[vm-post] Welcome to Bluefin (Version: testing-44.20260612.2)!
-[vm-serial] Welcome to Bluefin (Version: testing-44.20260612.2)!
+[vm-serial] GRUB version 2.12
+[vm-serial]       a command-line. ESC to return previous menu.                                             *Bluefin LTS (ostree:0)                                                                          UEFI Firmware Settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             The highlighted entry will be executed automatically in 1s.                                        The highlighted entry will be executed automatically in 0s.                                       Booting `Bluefin LTS (ostree:0)'
+[vm-post]       a command-line. ESC to return previous menu.                                             *Bluefin LTS (ostree:0)                                                                          UEFI Firmware Settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             The highlighted entry will be executed automatically in 1s.                                        The highlighted entry will be executed automatically in 0s.                                       Booting `Bluefin LTS (ostree:0)'
+[vm-serial] [    0.029554] Booting paravirtualized kernel on KVM
+[vm-post] [    0.029554] Booting paravirtualized kernel on KVM
+[vm-serial] [    0.373867] smpboot: x86: Booting SMP configuration:
+[vm-post] [    0.373867] smpboot: x86: Booting SMP configuration:
+[vm-serial] [    1.756758] systemd[1]: Listening on dbus.socket - D-Bus System Message Bus Socket.
+[vm-post] [    1.756758] systemd[1]: Listening on dbus.socket - D-Bus System Message Bus Socket.
+[vm-serial] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
+[vm-post] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
+[vm-serial] Welcome to Bluefin LTS!
+[vm-post] Welcome to Bluefin LTS!
 [vm-serial] [  OK  ] Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
 [vm-post] [  OK  ] Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
 [vm-serial] systemd[1]: Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
 [vm-post] systemd[1]: Created slice system-sshd\x2dkeygen.slice - Slice /system/sshd-keygen.
-[vm-serial] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
-[vm-post] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 [vm-post] [  OK  ] Listening on systemd-bootctl.socket - Boot Entries Service Socket.
 [vm-serial] [  OK  ] Listening on systemd-bootctl.socket - Boot Entries Service Socket.
 [vm-serial] [  OK  ] Listening on dbus.socket - D-Bus System Message Bus Socket.
@@ -1041,88 +1039,61 @@ Environment:
 [vm-post] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
 [vm-serial] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
 [vm-post] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
-[vm-post]          Starting sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK)...
-[vm-serial]          Starting sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK)...
-[vm-serial] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-post] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-serial]          Starting dbus-broker.service - D-Bus System Message Bus...
-[vm-post]          Starting dbus-broker.service - D-Bus System Message Bus...
 [vm-post] [  OK  ] Listening on sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
 [vm-serial] [  OK  ] Listening on sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
-[vm-post] [  OK  ] Started dbus-broker.service - D-Bus System Message Bus.
+[vm-serial]          Starting dbus-broker.service - D-Bus System Message Bus...
+[vm-post]          Starting dbus-broker.service - D-Bus System Message Bus...
 [vm-serial] [  OK  ] Started dbus-broker.service - D-Bus System Message Bus.
+[vm-post] [  OK  ] Started dbus-broker.service - D-Bus System Message Bus.
 [vm-serial]          Starting polkit.service - Authorization Manager...
 [vm-post]          Starting polkit.service - Authorization Manager...
-[vm-post] [  OK  ] Reached target sshd-keygen.target.
 [vm-serial] [  OK  ] Reached target sshd-keygen.target.
+[vm-post] [  OK  ] Reached target sshd-keygen.target.
 [vm-post]          Starting systemd-logind.service - User Login Management...
 [vm-serial]          Starting systemd-logind.service - User Login Management...
-[vm-post] [  OK  ] Started systemd-logind.service - User Login Management.
 [vm-serial] [  OK  ] Started systemd-logind.service - User Login Management.
+[vm-post] [  OK  ] Started systemd-logind.service - User Login Management.
 [vm-post] [  OK  ] Started polkit.service - Authorization Manager.
 [vm-serial] [  OK  ] Started polkit.service - Authorization Manager.
-[1;36m[e2e 15:36:30][0m OSTree rollback boot SSH after 18s.
+[vm-serial]          Starting sshd.service - OpenSSH server daemon...
+[vm-post]          Starting sshd.service - OpenSSH server daemon...
+[vm-post] [FAILED] Failed to start sshd.service - OpenSSH server daemon.
+[vm-serial] [FAILED] Failed to start sshd.service - OpenSSH server daemon.
+[vm-post] See 'systemctl status sshd.service' for details.
+[vm-serial] See 'systemctl status sshd.service' for details.
+[1;36m[e2e 21:43:52][0m OSTree rollback boot SSH after 16s.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-/usr/bin/ublue-motd: line 4: /usr/share/ublue-os/motd/env.sh: No such file or directory
 OK: OSTree fallback boot — composefs= absent, ostree= present.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-/usr/bin/ublue-motd: line 4: /usr/share/ublue-os/motd/env.sh: No such file or directory
 OK: Bluefin /var preserved through rollback (25 bytes).
-[1;36m[e2e 15:36:30][0m rollback: restoring BootOrder to 0008,0007,0000,0001,0002,0003,0004,0005,0006 and returning to composefs
+[1;36m[e2e 21:43:53][0m rollback: restoring BootOrder to 0008,0007,0000,0001,0002,0003,0004,0005,0006 and returning to composefs
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
-/usr/bin/ublue-motd: line 4: /usr/share/ublue-os/motd/env.sh: No such file or directory
-[vm-post]          Stopping systemd-logind.service - User Login Management...
-[vm-serial]          Stopping systemd-logind.service - User Login Management...
-[vm-serial] [  OK  ] Stopped systemd-logind.service - User Login Management.
-[vm-post] [  OK  ] Stopped systemd-logind.service - User Login Management.
-[vm-serial]          Stopping polkit.service - Authorization Manager...
-[vm-post]          Stopping polkit.service - Authorization Manager...
-[vm-serial] [  OK  ] Stopped polkit.service - Authorization Manager.
-[vm-post] [  OK  ] Stopped polkit.service - Authorization Manager.
-[vm-post] [  OK  ] Closed e2e-sshd.socket - E2E SSH TCP Socket (port 22).
-[vm-serial] [  OK  ] Closed e2e-sshd.socket - E2E SSH TCP Socket (port 22).
-[vm-serial] [  OK  ] Closed sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
-[vm-post] [  OK  ] Closed sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
-[vm-serial]          Stopping sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK)...
-[vm-post]          Stopping sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK)...
-[vm-serial] [  OK  ] Closed systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-post] [  OK  ] Closed systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-serial]          Stopping dbus-broker.service - D-Bus System Message Bus...
-[vm-post]          Stopping dbus-broker.service - D-Bus System Message Bus...
-[vm-serial] [  OK  ] Stopped dbus-broker.service - D-Bus System Message Bus.
-[vm-post] [  OK  ] Stopped dbus-broker.service - D-Bus System Message Bus.
-[vm-post] [  OK  ] Closed sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
-[vm-serial] [  OK  ] Closed sshd-vsock.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_VSOCK).
-[vm-post] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
-[vm-serial] [  OK  ] Closed dbus.socket - D-Bus System Message Bus Socket.
-[vm-post] [=3h[=3h[=3hBdsDxe: loading Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-[vm-serial] [=3h[=3h[=3hBdsDxe: loading Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-[vm-serial] BdsDxe: starting Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-[vm-post] BdsDxe: starting Boot0008 "Linux Boot Manager" from HD(2,GPT,25840FB0-E205-4EB9-9471-36EF76363C90,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
-[vm-serial]           Linux (composefs)             Reboot Into Firmware Interface                                               Boot in 5s.                                            ──────────────────────────────────────────                                            Boot in 4s.                                            ──────────────────────────────────────────                                            Boot in 3s.                                            ──────────────────────────────────────────                                            Boot in 2s.                                            ──────────────────────────────────────────                                            Boot in 1s.                                            ──────────────────────────────────────────[    0.000000] Linux version 7.0.7 (tomjon@buildbox) (gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT_DYNAMIC Thu Nov 10 15:00:00 UTC 2011
+[vm-serial] [=3h[=3h[=3hBdsDxe: loading Boot0008 "Linux Boot Manager" from HD(2,GPT,D7A45922-F1DB-4F88-B548-B8E1955B42DC,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+[vm-post] [=3h[=3h[=3hBdsDxe: loading Boot0008 "Linux Boot Manager" from HD(2,GPT,D7A45922-F1DB-4F88-B548-B8E1955B42DC,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+[vm-post] BdsDxe: starting Boot0008 "Linux Boot Manager" from HD(2,GPT,D7A45922-F1DB-4F88-B548-B8E1955B42DC,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
+[vm-serial] BdsDxe: starting Boot0008 "Linux Boot Manager" from HD(2,GPT,D7A45922-F1DB-4F88-B548-B8E1955B42DC,0x1000,0x100000)/\EFI\systemd\systemd-bootx64.efi
 [vm-post]           Linux (composefs)             Reboot Into Firmware Interface                                               Boot in 5s.                                            ──────────────────────────────────────────                                            Boot in 4s.                                            ──────────────────────────────────────────                                            Boot in 3s.                                            ──────────────────────────────────────────                                            Boot in 2s.                                            ──────────────────────────────────────────                                            Boot in 1s.                                            ──────────────────────────────────────────[    0.000000] Linux version 7.0.7 (tomjon@buildbox) (gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT_DYNAMIC Thu Nov 10 15:00:00 UTC 2011
-[vm-post] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-serial] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-post] [    0.011265] Booting paravirtualized kernel on KVM
-[vm-serial] [    0.011265] Booting paravirtualized kernel on KVM
-[vm-post] [    0.037276] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-serial] [    0.037276] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6602ff8d-fe4a-49b1-8fb3-c33f7895e230 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
-[vm-post] [    0.037323] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
-[vm-serial] [    0.037323] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
-[vm-post] [    0.265534] smpboot: x86: Booting SMP configuration:
-[vm-serial] [    0.265534] smpboot: x86: Booting SMP configuration:
-[vm-serial] [    0.993296] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
-[vm-post] [    0.993296] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
+[vm-serial]           Linux (composefs)             Reboot Into Firmware Interface                                               Boot in 5s.                                            ──────────────────────────────────────────                                            Boot in 4s.                                            ──────────────────────────────────────────                                            Boot in 3s.                                            ──────────────────────────────────────────                                            Boot in 2s.                                            ──────────────────────────────────────────                                            Boot in 1s.                                            ──────────────────────────────────────────[    0.000000] Linux version 7.0.7 (tomjon@buildbox) (gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT_DYNAMIC Thu Nov 10 15:00:00 UTC 2011
+[vm-post] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-serial] [    0.000000] Command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-serial] [    0.024105] Booting paravirtualized kernel on KVM
+[vm-post] [    0.024105] Booting paravirtualized kernel on KVM
+[vm-post] [    0.061785] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-serial] [    0.061785] Kernel command line: initrd=\EFI\Linux\bootc_composefs-9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc\initrd root=UUID=6ef7d7d5-7e77-4d24-9626-d2505b297fb1 rw console=ttyS0,115200n8 console=tty0 systemd.log_level=info composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc
+[vm-post] [    0.061857] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
+[vm-serial] [    0.061857] Unknown kernel command line parameters "composefs=9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd9a4e4acc9ffd26bd27c1e99f4b023d760324a36fb20205de333f8a784d267dfc", will be passed to user space.
+[vm-post] [    0.409846] smpboot: x86: Booting SMP configuration:
+[vm-serial] [    0.409846] smpboot: x86: Booting SMP configuration:
+[vm-post] [    1.296665] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
+[vm-serial] [    1.296665] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
 [vm-post] Welcome to Bluefin!
 [vm-serial] Welcome to Bluefin!
-[vm-serial] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 [vm-post] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
-[vm-serial] systemd[1]: systemd-pcrlock-machine-id.service - Lock Machine ID to TPM PCR Policy skipped, unmet condition check ConditionSecurity=measured-uki
-[vm-post] systemd[1]: systemd-pcrlock-machine-id.service - Lock Machine ID to TPM PCR Policy skipped, unmet condition check ConditionSecurity=measured-uki
-[vm-post] [  OK  ] Listening on systemd-bootctl.socket - Boot Loader Control Service Socket.
+[vm-serial] systemd[1]: systemd-boot-clear-sysfail.service - Clear SysFail Entry If The Boot Is Successful skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/LoaderEntrySysFail-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 [vm-serial] [  OK  ] Listening on systemd-bootctl.socket - Boot Loader Control Service Socket.
-[vm-serial]          Starting systemd-boot-random-seed.service - Update Boot Loader Random Seed...
+[vm-post] [  OK  ] Listening on systemd-bootctl.socket - Boot Loader Control Service Socket.
 [vm-post]          Starting systemd-boot-random-seed.service - Update Boot Loader Random Seed...
+[vm-serial]          Starting systemd-boot-random-seed.service - Update Boot Loader Random Seed...
 [vm-serial]          Starting systemd-boot-update.service - Automatic Boot Loader Update...
 [vm-post]          Starting systemd-boot-update.service - Automatic Boot Loader Update...
 [vm-serial] [  OK  ] Finished systemd-boot-random-seed.service - Update Boot Loader Random Seed.
@@ -1131,31 +1102,31 @@ Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hos
 [vm-serial] [  OK  ] Finished systemd-boot-update.service - Automatic Boot Loader Update.
 [vm-post] [  OK  ] Listening on dbus.socket - D-Bus System Message Bus Socket.
 [vm-serial] [  OK  ] Listening on dbus.socket - D-Bus System Message Bus Socket.
-[vm-serial] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
 [vm-post] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
-[vm-serial] [  OK  ] Listening on polkit-agent-helper.socket - Authorization Manager Agent Helper.
+[vm-serial] [  OK  ] Listening on e2e-sshd.socket - E2E SSH TCP Socket (port 22).
 [vm-post] [  OK  ] Listening on polkit-agent-helper.socket - Authorization Manager Agent Helper.
-[vm-serial] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
+[vm-serial] [  OK  ] Listening on polkit-agent-helper.socket - Authorization Manager Agent Helper.
 [vm-post] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
-[vm-serial] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
+[vm-serial] [  OK  ] Listening on sshd-unix-local.socket - OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
 [vm-post] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
-[vm-post]          Starting dbus.service - D-Bus System Message Bus...
+[vm-serial] [  OK  ] Listening on systemd-logind-varlink.socket - User Login Management Varlink Socket.
 [vm-serial]          Starting dbus.service - D-Bus System Message Bus...
-[vm-serial]          Starting polkit.service - Authorization Manager...
+[vm-post]          Starting dbus.service - D-Bus System Message Bus...
 [vm-post]          Starting polkit.service - Authorization Manager...
-[vm-serial]          Starting systemd-logind.service - User Login Management...
+[vm-serial]          Starting polkit.service - Authorization Manager...
 [vm-post]          Starting systemd-logind.service - User Login Management...
+[vm-serial]          Starting systemd-logind.service - User Login Management...
 [vm-post]          Starting ublue-wallpaper-month.service - Point Dakota wallpaper at the current month...
 [vm-serial]          Starting ublue-wallpaper-month.service - Point Dakota wallpaper at the current month...
-[vm-serial] [  OK  ] Finished ublue-wallpaper-month.service - Point Dakota wallpaper at the current month.
 [vm-post] [  OK  ] Finished ublue-wallpaper-month.service - Point Dakota wallpaper at the current month.
+[vm-serial] [  OK  ] Finished ublue-wallpaper-month.service - Point Dakota wallpaper at the current month.
 [vm-serial] [  OK  ] Started systemd-logind.service - User Login Management.
 [vm-post] [  OK  ] Started systemd-logind.service - User Login Management.
 [vm-post] [  OK  ] Started dbus.service - D-Bus System Message Bus.
 [vm-serial] [  OK  ] Started dbus.service - D-Bus System Message Bus.
 [vm-serial] [  OK  ] Started polkit.service - Authorization Manager.
 [vm-post] [  OK  ] Started polkit.service - Authorization Manager.
-[1;36m[e2e 15:37:16][0m Return-to-composefs SSH after 43s.
+[1;36m[e2e 21:44:12][0m Return-to-composefs SSH after 15s.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -1169,10 +1140,10 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 53030 22
-  SSH_CONNECTION=10.0.2.2 53030 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 36620 22
+  SSH_CONNECTION=10.0.2.2 36620 10.0.2.15 22
 OK: Returned to composefs cleanly via restored BootOrder.
-[1;36m[e2e 15:37:16][0m === Running commit cleanup test ===
+[1;36m[e2e 21:44:13][0m === Running commit cleanup test ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -1186,15 +1157,15 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 53034 22
-  SSH_CONNECTION=10.0.2.2 53034 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 36624 22
+  SSH_CONNECTION=10.0.2.2 36624 10.0.2.15 22
   === Committing composefs deployment as permanent default ===
   *** DRY RUN — no changes will be made ***
   Composefs deployment 'bootc_linux-9af734da164d-1' committed as the permanent systemd-boot default.
-  [dry-run] would remove /sysroot/ostree — OSTree object store + deploys (incl. leaked pre-migration /var) (13.93 GiB)
-  [dry-run] would remove /sysroot/.bootc-aleph.json — stale Bluefin install-provenance marker (1.71 KiB)
+  [dry-run] would remove /sysroot/ostree — OSTree object store + deploys (incl. leaked pre-migration /var) (11.61 GiB)
+  [dry-run] would remove /sysroot/.bootc-aleph.json — stale Bluefin install-provenance marker (938 B)
   
-  Would reclaim: 13.93 GiB (14952502885 bytes)
+  Would reclaim: 11.61 GiB (12467547110 bytes)
   Re-run without --dry-run to apply.
 OK: commit --dry-run lists expected cleanup targets.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
@@ -1210,8 +1181,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 53048 22
-  SSH_CONNECTION=10.0.2.2 53048 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 49608 22
+  SSH_CONNECTION=10.0.2.2 49608 10.0.2.15 22
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -1225,15 +1196,15 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 53054 22
-  SSH_CONNECTION=10.0.2.2 53054 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 49622 22
+  SSH_CONNECTION=10.0.2.2 49622 10.0.2.15 22
   === Committing composefs deployment as permanent default ===
   Composefs deployment 'bootc_linux-9af734da164d-1' committed as the permanent systemd-boot default.
-  ERROR: Not a Btrfs subvolume: Invalid argument
-  Removed /var/tmp/commit-cleanup/ostree — OSTree object store + deploys (incl. leaked pre-migration /var) (13.93 GiB)
-  Removed /var/tmp/commit-cleanup/.bootc-aleph.json — stale Bluefin install-provenance marker (1.71 KiB)
+  ERROR: Not a Btrfs filesystem: Invalid argument
+  Removed /var/tmp/commit-cleanup/ostree — OSTree object store + deploys (incl. leaked pre-migration /var) (11.61 GiB)
+  Removed /var/tmp/commit-cleanup/.bootc-aleph.json — stale Bluefin install-provenance marker (938 B)
   
-  Reclaimed: 13.93 GiB (14952502885 bytes)
+  Reclaimed: 11.61 GiB (12467547110 bytes)
   On-disk layout is now consistent with a fresh 'systemd-boot' install.
 OK: commit subcommand ran without error.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
@@ -1249,8 +1220,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 40630 22
-  SSH_CONNECTION=10.0.2.2 40630 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 58342 22
+  SSH_CONNECTION=10.0.2.2 58342 10.0.2.15 22
 OK: /sysroot/ostree removed.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -1265,8 +1236,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 40644 22
-  SSH_CONNECTION=10.0.2.2 40644 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 58352 22
+  SSH_CONNECTION=10.0.2.2 58352 10.0.2.15 22
 OK: /sysroot/.bootc-aleph.json removed.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -1281,8 +1252,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 40656 22
-  SSH_CONNECTION=10.0.2.2 40656 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 58358 22
+  SSH_CONNECTION=10.0.2.2 58358 10.0.2.15 22
 OK: stale OSTree BLS entries removed from /boot.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -1297,8 +1268,8 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 40662 22
-  SSH_CONNECTION=10.0.2.2 40662 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 58364 22
+  SSH_CONNECTION=10.0.2.2 58364 10.0.2.15 22
 OK: /boot/grub2 removed.
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
@@ -1313,10 +1284,10 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 40674 22
-  SSH_CONNECTION=10.0.2.2 40674 10.0.2.15 22
+  SSH_CLIENT=10.0.2.2 58378 22
+  SSH_CONNECTION=10.0.2.2 58378 10.0.2.15 22
 OK: /sysroot/composefs intact after commit.
-[1;36m[e2e 15:37:31][0m === Running post-commit deep-clean verification ===
+[1;36m[e2e 21:44:31][0m === Running post-commit deep-clean verification ===
 Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
 Environment:
   USER=root
@@ -1330,112 +1301,91 @@ Environment:
   XDG_SESSION_CLASS=user
   XDG_RUNTIME_DIR=/run/user/0
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
-  SSH_CLIENT=10.0.2.2 40684 22
-  SSH_CONNECTION=10.0.2.2 40684 10.0.2.15 22
-FAIL: ostree-remount.service still enabled in /etc/systemd/system/
-[1;36m[e2e 15:37:32][0m Terminating QEMU (PID: 1968697)...
-=== Files present post-commit but absent from fresh Dakota (user state) ===
-/boot/loader/entries/bootc_linux-9af734da164d-1.conf
-/etc/.linuxbrew
-/etc/.pwd.lock
-/etc/.updated
-/etc/UPower/UPower.conf
-/etc/UPower/UPower.conf.d/README.md
-/etc/X11/xinit/xinitrc.d/50-systemd-user.sh
-/etc/audit/audit-stop.rules
-/etc/audit/audit.rules
-/etc/containers/registries.conf.d/50-local-registry.conf
-/etc/cups/cups-files.conf
-/etc/cups/cups-files.conf.default
-/etc/cups/snmp.conf
-/etc/cups/snmp.conf.default
-/etc/fonts/conf.avail/20-unhint-small-dejavu-sans-mono.conf
-/etc/fonts/conf.avail/57-dejavu-sans-mono.conf
-/etc/fonts/conf.avail/70-no-bitmaps-except-emoji.conf
-/etc/fonts/conf.d/20-unhint-small-dejavu-sans-mono.conf
-/etc/fonts/conf.d/57-dejavu-sans-mono.conf
-/etc/foomatic/hashes.d/hashes.new
-/etc/fwupd/remotes.d/lvfs-embargo.conf
-/etc/fwupd/remotes.d/lvfs-testing.conf
-/etc/group
-/etc/gshadow
-/etc/issue
-/etc/ld.so.cache.stamp-20260611
-/etc/migration-test/marker.conf
-/etc/migration-test/marker.link
-/etc/migration-test/nested.conf
-/etc/modprobe.d/tuned.conf
-/etc/nsswitch.conf
-/etc/pki/ca-trust/README
-/etc/pki/ca-trust/extracted/README
-/etc/pki/ca-trust/extracted/edk2/README
-/etc/pki/ca-trust/extracted/java/README
-/etc/pki/ca-trust/extracted/pem/README
-/etc/pki/ca-trust/extracted/pem/directory-hash/ACCVRAIZ1.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/AC_RAIZ_FNMT-RCM.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/AC_RAIZ_FNMT-RCM_SERVIDORES_SEGUROS.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/ANF_Secure_Server_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Actalis_Authentication_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/AffirmTrust_Commercial.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/AffirmTrust_Networking.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/AffirmTrust_Premium.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/AffirmTrust_Premium_ECC.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Amazon_Root_CA_1.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Amazon_Root_CA_2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Amazon_Root_CA_3.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Amazon_Root_CA_4.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Atos_TrustedRoot_2011.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Atos_TrustedRoot_Root_CA_ECC_TLS_2021.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Atos_TrustedRoot_Root_CA_RSA_TLS_2021.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Autoridad_de_Certificacion_Firmaprofesional_CIF_A62634068.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/BJCA_Global_Root_CA1.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/BJCA_Global_Root_CA2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Buypass_Class_2_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Buypass_Class_3_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/CA_Disig_Root_R2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/CFCA_EV_ROOT.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/COMODO_Certification_Authority.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/COMODO_ECC_Certification_Authority.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/COMODO_RSA_Certification_Authority.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certainly_Root_E1.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certainly_Root_R1.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certigna.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certigna_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certum_EC-384_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certum_Trusted_Network_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certum_Trusted_Network_CA_2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Certum_Trusted_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/CommScope_Public_Trust_ECC_Root-01.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/CommScope_Public_Trust_ECC_Root-02.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/CommScope_Public_Trust_RSA_Root-01.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/CommScope_Public_Trust_RSA_Root-02.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/D-TRUST_BR_Root_CA_1_2020.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/D-TRUST_BR_Root_CA_2_2023.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/D-TRUST_EV_Root_CA_1_2020.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/D-TRUST_EV_Root_CA_2_2023.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/D-TRUST_Root_Class_3_CA_2_2009.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/D-TRUST_Root_Class_3_CA_2_EV_2009.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_Assured_ID_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_Assured_ID_Root_G2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_Assured_ID_Root_G3.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_Global_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_Global_Root_G2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_Global_Root_G3.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_High_Assurance_EV_Root_CA.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_TLS_ECC_P384_Root_G5.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_TLS_RSA4096_Root_G5.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/DigiCert_Trusted_Root_G4.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Entrust_Root_Certification_Authority.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Entrust_Root_Certification_Authority_-_EC1.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/Entrust_Root_Certification_Authority_-_G2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/FIRMAPROFESIONAL_CA_ROOT-A_WEB.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/GDCA_TrustAUTH_R5_ROOT.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/GLOBALTRUST_2020.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/GTS_Root_R1.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/GTS_Root_R2.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/GTS_Root_R3.pem
-/etc/pki/ca-trust/extracted/pem/directory-hash/GTS_Root_R4.pem
-=== Files present post-commit but absent from fresh Dakota (user state) ===
+  SSH_CLIENT=10.0.2.2 58382 22
+  SSH_CONNECTION=10.0.2.2 58382 10.0.2.15 22
+OK: no ostree-remount.service enablement.
+Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
+Environment:
+  USER=root
+  LOGNAME=root
+  HOME=/root
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  SHELL=/bin/bash
+  GNOME_SHELL_SLOWDOWN_FACTOR=0.8
+  XDG_SESSION_ID=c13
+  XDG_SESSION_TYPE=tty
+  XDG_SESSION_CLASS=user
+  XDG_RUNTIME_DIR=/run/user/0
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+  SSH_CLIENT=10.0.2.2 58398 22
+  SSH_CONNECTION=10.0.2.2 58398 10.0.2.15 22
+OK: no rpm-ostree unit references in /etc/systemd/.
+Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
+Environment:
+  USER=root
+  LOGNAME=root
+  HOME=/root
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  SHELL=/bin/bash
+  GNOME_SHELL_SLOWDOWN_FACTOR=0.8
+  XDG_SESSION_ID=c14
+  XDG_SESSION_TYPE=tty
+  XDG_SESSION_CLASS=user
+  XDG_RUNTIME_DIR=/run/user/0
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+  SSH_CLIENT=10.0.2.2 58412 22
+  SSH_CONNECTION=10.0.2.2 58412 10.0.2.15 22
+OK: ESP loader entries are composefs-only.
+Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
+Environment:
+  USER=root
+  LOGNAME=root
+  HOME=/root
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  SHELL=/bin/bash
+  GNOME_SHELL_SLOWDOWN_FACTOR=0.8
+  XDG_SESSION_ID=c15
+  XDG_SESSION_TYPE=tty
+  XDG_SESSION_CLASS=user
+  XDG_RUNTIME_DIR=/run/user/0
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+  SSH_CLIENT=10.0.2.2 58424 22
+  SSH_CONNECTION=10.0.2.2 58424 10.0.2.15 22
+OK: ESP /EFI/fedora removed (migrated to systemd-boot).
+Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
+Environment:
+  USER=root
+  LOGNAME=root
+  HOME=/root
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  SHELL=/bin/bash
+  GNOME_SHELL_SLOWDOWN_FACTOR=0.8
+  XDG_SESSION_ID=c16
+  XDG_SESSION_TYPE=tty
+  XDG_SESSION_CLASS=user
+  XDG_RUNTIME_DIR=/run/user/0
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+  SSH_CLIENT=10.0.2.2 58434 22
+  SSH_CONNECTION=10.0.2.2 58434 10.0.2.15 22
+OK: no /etc/ostree configs.
+Warning: Permanently added '[localhost]:2222' (ED25519) to the list of known hosts.
+Environment:
+  USER=root
+  LOGNAME=root
+  HOME=/root
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  SHELL=/bin/bash
+  GNOME_SHELL_SLOWDOWN_FACTOR=0.8
+  XDG_SESSION_ID=c17
+  XDG_SESSION_TYPE=tty
+  XDG_SESSION_CLASS=user
+  XDG_RUNTIME_DIR=/run/user/0
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+  SSH_CLIENT=10.0.2.2 58444 22
+  SSH_CONNECTION=10.0.2.2 58444 10.0.2.15 22
+OK: bootc status confirms composefs backend.
+[1;36m[e2e 21:44:33][0m === Capturing post-commit vs fresh-Dakota diff ===
+9b3641e781f97c3b0083b447758aa9dabd65d31f74ea81a830117323a9872bfc
 /boot/loader/entries/bootc_linux-9af734da164d-1.conf
 /etc/.linuxbrew
 /etc/.pwd.lock
@@ -1536,3 +1486,4 @@ FAIL: ostree-remount.service still enabled in /etc/systemd/system/
 /etc/pki/ca-trust/extracted/pem/directory-hash/GTS_Root_R1.pem
 /etc/pki/ca-trust/extracted/pem/directory-hash/GTS_Root_R2.pem
 /etc/pki/ca-trust/extracted/pem/directory-hash/GTS_Root_R3.pem
+[1;36m[e2e 21:44:40][0m Terminating QEMU (PID: 37726)...
