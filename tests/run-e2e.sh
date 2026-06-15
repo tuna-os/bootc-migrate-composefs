@@ -1141,4 +1141,29 @@ if echo "$BOOTC_STATUS_POST" | grep -q '"ostree"'; then
 fi
 echo "OK: bootc status clean (composefs only)."
 
+# --- Post-commit diff against fresh Dakota reference ---
+# Capture a file listing of the post-commit system and compare against
+# a fresh Dakota container image. Saved as a diagnostic artifact — not a
+# hard assertion. Differences should be only intentional user state
+# (/etc customisations, /var data, /home).
+step "=== Capturing post-commit vs fresh-Dakota diff ==="
+
+# File listing from the post-commit VM (key subtrees).
+ssh $SSH_OPTS root@localhost "find /etc /boot/loader/entries /boot/efi/loader/entries /sysroot/composefs/images /sysroot/state -type f -o -type l 2>/dev/null | sort" > /tmp/e2e-post-commit-files.txt 2>/dev/null
+
+# File listing from a fresh Dakota container (reference factory state).
+# Pull if not cached, then list factory /etc + /usr paths (not /var or /home — those are seeded empty).
+podman pull --quiet "$TARGET_IMAGE" 2>/dev/null || true
+podman run --rm "$TARGET_IMAGE" find /etc /usr -type f -o -type l 2>/dev/null | sort > /tmp/e2e-fresh-dakota-files.txt 2>/dev/null
+
+# Diff: show paths in post-commit that are NOT in the fresh factory image.
+# These should be user-introduced files only.
+echo "=== Files present post-commit but absent from fresh Dakota (user state) ===" >> e2e-run.log
+comm -23 /tmp/e2e-post-commit-files.txt /tmp/e2e-fresh-dakota-files.txt 2>/dev/null | head -100 | tee -a e2e-run.log
+echo "=== End diff ===" >> e2e-run.log
+
+# Count lines for summary.
+EXTRA_COUNT=$(comm -23 /tmp/e2e-post-commit-files.txt /tmp/e2e-fresh-dakota-files.txt 2>/dev/null | wc -l)
+echo "Post-commit diff summary: $EXTRA_COUNT paths present beyond fresh Dakota factory state (expected: user /etc + /var data)." | tee -a e2e-run.log
+
 step "=== E2E TEST PASSED SUCCESSFULY ==="
