@@ -651,7 +651,7 @@ fn ensure_e2e_ssh_socket(etc_dir: &Path) -> Result<()> {
     )?;
     fs::write(
         systemd_dir.join("e2e-sshd@.service"),
-        "[Unit]\nDescription=E2E SSH per-connection service\n[Service]\nExecStart=-/usr/bin/sshd -i\nStandardInput=socket\n",
+        "[Unit]\nDescription=E2E SSH per-connection service\n[Service]\nExecStart=-/usr/bin/sshd -i\nStandardInput=socket\nStandardError=journal+console\n",
     )?;
 
     let symlink = systemd_dir.join("sockets.target.wants/e2e-sshd.socket");

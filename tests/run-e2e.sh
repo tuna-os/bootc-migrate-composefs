@@ -174,6 +174,7 @@ RUN mkdir -p /etc/systemd/system && \
         '[Service]' \
         'ExecStart=-/usr/bin/sshd -i' \
         'StandardInput=socket' \
+        'StandardError=journal+console' \
         > /etc/systemd/system/e2e-sshd@.service && \
     mkdir -p /etc/systemd/system/sockets.target.wants && \
     ln -sf /etc/systemd/system/e2e-sshd.socket \
