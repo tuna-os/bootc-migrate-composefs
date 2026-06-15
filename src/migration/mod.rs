@@ -324,6 +324,14 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<VerityDiges
 /// Build the `.origin` file content that bootc parses to identify a composefs
 /// deployment. Uses `tini::Ini` for byte-compatible output with bootc's parser.
 fn build_origin_content(target_image: &str, verity: &VerityDigest, manifest_digest: &str) -> String {
+    // Schema must match bootc's canonical layout (crates/lib/src/composefs_consts.rs):
+    //   [origin] container-image-reference = ...
+    //   [boot]   boot_type = bls
+    //   [boot]   digest    = <verity hex>           # NB: key is "digest", not "boot_digest"
+    //   [image]  manifest_digest = sha256:...
+    // bootc's status code reads from [image]/manifest_digest and [boot]/digest;
+    // wrong section or key names produce "No manifest_digest in origin and no
+    // legacy .imginfo file" or "Could not find boot digest for deployment".
     tini::Ini::new()
         .section("origin")
         .item(
@@ -332,20 +340,19 @@ fn build_origin_content(target_image: &str, verity: &VerityDigest, manifest_dige
         )
         .section("boot")
         .item("boot_type", "bls")
-        .section("boot")
-        .item("boot_digest", verity.as_hex())
-        .section("boot")
+        .item("digest", verity.as_hex())
+        .section("image")
         .item("manifest_digest", manifest_digest)
         .to_string()
 }
 
-/// Patch the `boot_digest` entry in an origin file with a real sha256(vmlinuz || initrd).
-/// This is a pure function so we can test it without filesystem access.
+/// Patch the `digest` entry in `[boot]` with a real sha256(vmlinuz || initrd).
+/// Pure function so we can test it without filesystem access.
 fn patch_boot_digest_in_content(content: &str, new_digest: &str) -> Result<String> {
     let ini = tini::Ini::from_string(content)
         .map_err(|e| anyhow!("parsing origin file: {e}"))?
         .section("boot")
-        .item("boot_digest", new_digest);
+        .item("digest", new_digest);
     Ok(ini.to_string())
 }
 
@@ -1983,10 +1990,15 @@ mod tests {
         );
         assert_eq!(parsed.get::<String>("boot", "boot_type").as_deref(), Some("bls"));
         assert_eq!(
-            parsed.get::<String>("boot", "boot_digest").as_deref(),
-            Some("9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd")
+            parsed.get::<String>("boot", "digest").as_deref(),
+            Some("9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd"),
+            "[boot] digest must match bootc's ORIGIN_KEY_BOOT_DIGEST constant"
         );
-        assert_eq!(parsed.get::<String>("boot", "manifest_digest").as_deref(), Some("sha256:abc123"));
+        assert_eq!(
+            parsed.get::<String>("image", "manifest_digest").as_deref(),
+            Some("sha256:abc123"),
+            "manifest_digest must be under [image], not [boot]"
+        );
     }
 
     #[test]
@@ -2010,9 +2022,9 @@ mod tests {
 
         let parsed = tini::Ini::from_string(&patched).unwrap();
         assert_eq!(
-            parsed.get::<String>("boot", "boot_digest").as_deref(),
+            parsed.get::<String>("boot", "digest").as_deref(),
             Some("abcdef1234567890"),
-            "boot_digest must be replaced with real sha256"
+            "[boot] digest must be replaced with real sha256(vmlinuz||initrd)"
         );
     }
 
@@ -2034,8 +2046,8 @@ mod tests {
             Some("ostree-unverified-image:docker://ghcr.io/example/target:v1")
         );
         assert_eq!(parsed.get::<String>("boot", "boot_type").as_deref(), Some("bls"));
-        assert_eq!(parsed.get::<String>("boot", "manifest_digest").as_deref(), Some("sha256:manifest123"));
-        assert_eq!(parsed.get::<String>("boot", "boot_digest").as_deref(), Some("newdigest111"));
+        assert_eq!(parsed.get::<String>("image", "manifest_digest").as_deref(), Some("sha256:manifest123"));
+        assert_eq!(parsed.get::<String>("boot", "digest").as_deref(), Some("newdigest111"));
     }
 
     #[test]
