@@ -48,6 +48,7 @@ e2e-lts: build
       BASE_IMAGE="ghcr.io/projectbluefin/bluefin:lts" \
       TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
       DISK_SIZE="20G" \
+      FILESYSTEM="ext4" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-lts.log
 
 # Run E2E with composefs boot log_level=debug

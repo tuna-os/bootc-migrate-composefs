@@ -116,6 +116,77 @@ pub fn check_free_space(reflink_available: bool) -> Result<()> {
     Ok(())
 }
 
+/// XFS does not support fs-verity (required by cfs pull). When the /sysroot
+/// filesystem lacks verity, create a loopback ext4 image, mount it at
+/// /sysroot/composefs, and migrate the composefs store onto it.
+fn setup_composefs_loopback_if_needed(report: &PreflightReport) -> Result<Option<MountGuard>> {
+    let fs_type = report.fs_type.as_deref().unwrap_or("unknown");
+    // btrfs and ext4 support fs-verity. xfs does not (as of kernel 6.12).
+    if fs_type == "xfs" {
+        let target = "/sysroot/composefs";
+        let img_path = "/sysroot/composefs-loopback.ext4";
+
+        // Don't recreate if already set up (e.g. re-run after crash).
+        if Path::new(img_path).exists() {
+            // Check if already mounted at target.
+            let mount_out = Command::new("findmnt")
+                .args(["-n", "-o", "SOURCE", target])
+                .output()
+                .ok();
+            if let Some(out) = mount_out {
+                let src = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if src.contains("composefs-loopback") {
+                    println!("ComposeFS loopback already active at {target} (source: {src}).");
+                    return Ok(None);
+                }
+            }
+            // Image exists but not mounted — remove stale and recreate.
+            let _ = fs::remove_file(img_path);
+        }
+
+        // Calculate size: 1.5× ostree repo + 5 GB buffer, min 10 GB, max 30 GB.
+        let ostree_gb = report.ostree_repo_size_bytes as f64 / 1e9;
+        let size_gb = ((ostree_gb * 1.5 + 5.0).ceil() as u64).clamp(10, 30);
+        println!(
+            "XFS detected — setting up {size_gb} GB ext4 loopback for composefs verity support.",
+        );
+
+        // Create sparse file (ext4 will allocate blocks on demand).
+        let status = Command::new("truncate")
+            .args(["-s", &format!("{size_gb}G"), img_path])
+            .status()
+            .context("failed to truncate composefs loopback image")?;
+        if !status.success() {
+            return Err(anyhow!("truncate failed for composefs loopback image"));
+        }
+
+        // Format as ext4 with verity support.
+        let status = Command::new("/usr/sbin/mkfs.ext4")
+            .args(["-F", "-O", "verity", img_path])
+            .status()
+            .context("failed to format composefs loopback as ext4")?;
+        if !status.success() {
+            return Err(anyhow!("mkfs.ext4 failed for composefs loopback"));
+        }
+
+        // Mount.
+        fs::create_dir_all(target)
+            .context("failed to create /sysroot/composefs")?;
+        let status = Command::new("/usr/bin/mount")
+            .args(["-o", "loop", img_path, target])
+            .status()
+            .context("failed to mount composefs loopback")?;
+        if !status.success() {
+            return Err(anyhow!("mount failed for composefs loopback"));
+        }
+
+        println!("ComposeFS loopback mounted at {target} ({size_gb} GB ext4, fs-verity enabled).");
+        Ok(Some(MountGuard::new(Path::new(target))))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Main migration entry point. Orchestrates all 5 phases.
 pub fn run_migration(
     report: &PreflightReport,
@@ -162,6 +233,17 @@ pub fn run_migration(
     } else {
         println!("[DRY RUN] Would check free space on /sysroot/composefs.");
     }
+
+    // ---- XFS workaround: ensure composefs store supports fs-verity ----
+    let _loopback_guard: Option<MountGuard> = if !dry_run {
+        setup_composefs_loopback_if_needed(report)?
+    } else {
+        let fs_type = report.fs_type.as_deref().unwrap_or("unknown");
+        if fs_type == "xfs" {
+            println!("[DRY RUN] Would set up ext4 loopback at /sysroot/composefs for fs-verity.");
+        }
+        None
+    };
 
     // ---- Phase 1: Import OSTree objects (optional / deletable per #3) ----
     // Ensure composefs repository directory exists before any phase touches it.

@@ -1,0 +1,3 @@
+FROM ghcr.io/projectbluefin/dakota:stable
+RUN echo 'add_dracutmodules+=" lvm "' > /etc/dracut.conf.d/50-lvm.conf && \
+    dracut --regenerate-all --force
