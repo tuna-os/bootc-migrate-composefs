@@ -27,6 +27,13 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
     // SPECIFICATION.md §3.4 and §4.2 examples use the bare hex form.
     let bare_hex = crate::VerityDigest::from_prefixed_or_hex(composefs_digest);
     options.push(format!("composefs={}", bare_hex.as_hex()));
+    // DEBUG: pipe all systemd messages to serial console for E2E diagnosis
+    if !options.iter().any(|o| o == "systemd.log_target=console") {
+        options.push("systemd.log_target=console".to_string());
+    }
+    // Replace any existing log_level with debug so we see errno details
+    options.retain(|o| !o.starts_with("systemd.log_level=") && !o.starts_with("loglevel="));
+    options.push("systemd.log_level=debug".to_string());
     Ok(options.join(" "))
 }
 

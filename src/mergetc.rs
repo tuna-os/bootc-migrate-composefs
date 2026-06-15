@@ -107,11 +107,27 @@ pub fn merge_etc_files(
                 let cur = read_file_at(current_dir, rel_path);
                 let new = read_file_at(new_default_dir, rel_path);
 
-                let chosen = choose_merged_content(&MergeContext {
-                    old_default: old,
-                    current: cur,
-                    new_default: new,
-                });
+                let chosen = if is_identity_db(rel_path) {
+                    // Line-merge identity DBs (passwd/shadow/group/gshadow/sub{uid,gid}):
+                    // start with the source's live file (preserves accumulated user
+                    // state), then append entries from the target whose first colon-
+                    // delimited key (username/groupname) isn't already present. This
+                    // covers two failure modes the plain 3-way rule mishandles:
+                    //   1. Bluefin uses dbus-broker so its passwd has no `messagebus`
+                    //      user; Dakota uses classic dbus and needs it. Without this,
+                    //      dbus.service fails with "Unknown user 'messagebus'" 217/USER
+                    //      and the whole bus/polkit/logind/sshd stack cascade-fails.
+                    //   2. The reverse: target's factory file would otherwise drop
+                    //      every system user the source had accumulated (e.g. polkitd).
+                    // machine-id keeps current verbatim (identity preservation).
+                    merge_identity_db(rel_path, cur.as_deref(), new.as_deref())
+                } else {
+                    choose_merged_content(&MergeContext {
+                        old_default: old,
+                        current: cur,
+                        new_default: new,
+                    })
+                };
 
                 if let Some(content) = chosen {
                     let dest = output_dir.join(rel_path);
@@ -136,6 +152,118 @@ pub fn merge_etc_files(
         }
     }
 
+    Ok(())
+}
+
+/// Union-merge an identity-DB file by colon-delimited first field.
+/// `current` lines come first (verbatim, preserving order and state); any line
+/// from `new` whose first field isn't already represented gets appended.
+/// machine-id is opaque — return current as-is.
+fn merge_identity_db(rel_path: &str, current: Option<&[u8]>, new: Option<&[u8]>) -> Option<Vec<u8>> {
+    if rel_path == "machine-id" {
+        return current.map(|s| s.to_vec()).or_else(|| new.map(|s| s.to_vec()));
+    }
+    let cur_text = match current {
+        Some(c) => std::str::from_utf8(c).ok()?,
+        None => return new.map(|s| s.to_vec()),
+    };
+    let new_text = match new {
+        Some(n) => std::str::from_utf8(n).ok()?,
+        None => return Some(cur_text.as_bytes().to_vec()),
+    };
+    let key_of = |line: &str| line.split(':').next().unwrap_or("").to_string();
+    let mut keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = String::with_capacity(cur_text.len() + new_text.len());
+    for line in cur_text.lines() {
+        if !line.is_empty() {
+            keys.insert(key_of(line));
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in new_text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let k = key_of(line);
+        if !keys.contains(&k) {
+            out.push_str(line);
+            out.push('\n');
+            keys.insert(k);
+        }
+    }
+    Some(out.into_bytes())
+}
+
+/// Identity-database files whose contents accumulate system state and must
+/// never be replaced by the target image's factory copy during /etc merge.
+fn is_identity_db(rel_path: &str) -> bool {
+    matches!(
+        rel_path,
+        "passwd"
+            | "passwd-"
+            | "shadow"
+            | "shadow-"
+            | "group"
+            | "group-"
+            | "gshadow"
+            | "gshadow-"
+            | "subuid"
+            | "subuid-"
+            | "subgid"
+            | "subgid-"
+            | "machine-id"
+    )
+}
+
+/// Walk `etc_dir` and remove any symlink whose target points under `/usr/*` but
+/// does not exist relative to `target_root`. Returns the number of links removed.
+///
+/// Why: the 3-way merge brings forward enablement symlinks from the source OS's
+/// /etc (e.g. /etc/systemd/system/dbus.service → /usr/lib/systemd/system/dbus-broker.service).
+/// If the target image doesn't ship the underlying unit, the symlink dangles
+/// after pivot and systemd reports "Failed to load configuration: No such file
+/// or directory" — which cascades through dbus → polkit → logind → sshd.
+pub fn prune_dangling_usr_symlinks(etc_dir: &Path, target_root: &Path) -> Result<usize> {
+    let mut removed = 0usize;
+    prune_recursive(etc_dir, target_root, &mut removed)?;
+    Ok(removed)
+}
+
+fn prune_recursive(dir: &Path, target_root: &Path, removed: &mut usize) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            let target = match fs::read_link(&path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let target_str = target.to_string_lossy();
+            if !target_str.starts_with("/usr/") {
+                continue;
+            }
+            // Strip leading slash and resolve against target_root.
+            let rel = target_str.trim_start_matches('/');
+            let resolved = target_root.join(rel);
+            // symlink_metadata is fine — we only need to know if the path resolves
+            // to something (file, dir, or another symlink that exists).
+            if fs::metadata(&resolved).is_err() {
+                eprintln!(
+                    "[phase4] pruning dangling /etc symlink: {} -> {} (not in target /usr)",
+                    path.display(),
+                    target_str
+                );
+                fs::remove_file(&path).with_context(|| {
+                    format!("failed to remove dangling symlink {}", path.display())
+                })?;
+                *removed += 1;
+            }
+        } else if ft.is_dir() {
+            prune_recursive(&path, target_root, removed)?;
+        }
+    }
     Ok(())
 }
 
@@ -248,14 +376,17 @@ pub fn choose_merged_content(ctx: &MergeContext) -> Option<Vec<u8>> {
                 Some(cur.clone())
             }
         }
-        // File in old and current, removed upstream
-        (Some(old), Some(cur), None) => {
-            if old == cur {
-                None
-            } else {
-                Some(cur.clone())
-            }
-        }
+        // File in old and current, absent in new.
+        // Standard OSTree 3-way upgrade logic would drop the file when
+        // old==cur on the assumption that "upstream removed it, user didn't
+        // touch it, so respect the upstream removal." That's wrong for a
+        // cross-image migration (Bluefin → Dakota): files that ship in the
+        // source factory but not the target factory aren't being deliberately
+        // removed by the user; they're just things the new image happens not
+        // to bundle. Keep them so source-specific units (e2e-sshd.socket,
+        // Bluefin's flatpak-nuke-fedora, etc.) and their enablement symlinks
+        // stay in sync after switch-root.
+        (Some(_old), Some(cur), None) => Some(cur.clone()),
         // File only in current (user-added file)
         (None, Some(cur), None) => Some(cur.clone()),
         // File in new only (upstream-added file)
@@ -320,6 +451,86 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn merge_passwd_preserves_current_and_adds_target_only_users() {
+        // Source (Bluefin) uses dbus-broker → no `messagebus` user in its passwd.
+        // Target (Dakota) uses classic dbus → has `messagebus`. Result must contain
+        // every current user (root, polkitd, sshd) AND the target-only `messagebus`,
+        // otherwise dbus.service 217/USERs at start.
+        let old = tempdir().unwrap();
+        let cur = tempdir().unwrap();
+        let new = tempdir().unwrap();
+        let out = tempdir().unwrap();
+
+        let bluefin = "root:x:0:0::/root:/bin/bash\npolkitd:x:973:973::/:/usr/sbin/nologin\nsshd:x:74:74::/usr/share/empty.sshd:/sbin/nologin\n";
+        fs::write(old.path().join("passwd"), bluefin).unwrap();
+        fs::write(cur.path().join("passwd"), bluefin).unwrap();
+        let dakota = "root:x:0:0::/root:/bin/bash\nmessagebus:x:81:81::/run/dbus:/usr/sbin/nologin\n";
+        fs::write(new.path().join("passwd"), dakota).unwrap();
+
+        merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
+        let merged = fs::read_to_string(out.path().join("passwd")).unwrap();
+        assert!(merged.contains("messagebus:"), "messagebus must be added from target: {merged}");
+        assert!(merged.contains("polkitd:"), "polkitd from current must survive: {merged}");
+        assert!(merged.contains("sshd:"), "sshd from current must survive: {merged}");
+        // Current entries appear before any new-only additions.
+        let msg_idx = merged.find("messagebus:").unwrap();
+        let polk_idx = merged.find("polkitd:").unwrap();
+        assert!(polk_idx < msg_idx);
+    }
+
+    #[test]
+    fn merge_machine_id_takes_current_verbatim() {
+        let old = tempdir().unwrap();
+        let cur = tempdir().unwrap();
+        let new = tempdir().unwrap();
+        let out = tempdir().unwrap();
+        fs::write(old.path().join("machine-id"), "OLD\n").unwrap();
+        fs::write(cur.path().join("machine-id"), "CUR\n").unwrap();
+        fs::write(new.path().join("machine-id"), "NEW\n").unwrap();
+        merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
+        assert_eq!(fs::read_to_string(out.path().join("machine-id")).unwrap(), "CUR\n");
+    }
+
+    #[test]
+    fn prune_drops_dangling_usr_symlink() {
+        let etc = tempdir().unwrap();
+        let target = tempdir().unwrap();
+
+        // /etc/systemd/system/dbus.service -> /usr/lib/systemd/system/dbus-broker.service
+        // (target image has /usr/lib/systemd/system/dbus.service but NOT dbus-broker)
+        fs::create_dir_all(etc.path().join("systemd/system")).unwrap();
+        unix_fs::symlink(
+            "/usr/lib/systemd/system/dbus-broker.service",
+            etc.path().join("systemd/system/dbus.service"),
+        ).unwrap();
+        // Sibling symlink whose target DOES exist — must be preserved.
+        unix_fs::symlink(
+            "/usr/lib/systemd/system/getty@.service",
+            etc.path().join("systemd/system/autovt@.service"),
+        ).unwrap();
+
+        fs::create_dir_all(target.path().join("usr/lib/systemd/system")).unwrap();
+        fs::write(target.path().join("usr/lib/systemd/system/getty@.service"), "").unwrap();
+
+        let removed = prune_dangling_usr_symlinks(etc.path(), target.path()).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!etc.path().join("systemd/system/dbus.service").exists()
+                && fs::symlink_metadata(etc.path().join("systemd/system/dbus.service")).is_err());
+        assert!(fs::symlink_metadata(etc.path().join("systemd/system/autovt@.service")).is_ok());
+    }
+
+    #[test]
+    fn prune_ignores_non_usr_symlinks() {
+        let etc = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        // A symlink pointing outside /usr — leave alone even if dangling.
+        unix_fs::symlink("/var/run/foo", etc.path().join("foo")).unwrap();
+        let removed = prune_dangling_usr_symlinks(etc.path(), target.path()).unwrap();
+        assert_eq!(removed, 0);
+        assert!(fs::symlink_metadata(etc.path().join("foo")).is_ok());
+    }
+
     // --- #4: TDD tests for 3-way /etc merge ---
 
     #[test]
@@ -356,14 +567,16 @@ mod tests {
     }
 
     #[test]
-    fn merge_drops_file_removed_upstream_when_unchanged() {
+    fn merge_keeps_file_absent_in_target_for_cross_image_migration() {
+        // Cross-image migration: source-factory + live, target image doesn't ship it.
+        // Keep cur — the new image just happens not to bundle it; not a user removal.
         let ctx = MergeContext {
-            old_default: Some(b"removed".to_vec()),
-            current: Some(b"removed".to_vec()),
+            old_default: Some(b"keep-me".to_vec()),
+            current: Some(b"keep-me".to_vec()),
             new_default: None,
         };
         let result = choose_merged_content(&ctx);
-        assert_eq!(result, None);
+        assert_eq!(result, Some(b"keep-me".to_vec()));
     }
 
     #[test]
@@ -551,7 +764,8 @@ mod tests {
         // sub/file3 is new upstream
         fs::write(new.join("sub/new-upstream.cfg"), b"brand-new").unwrap();
 
-        // sub/file4 was removed upstream but user didn't change
+        // sub/file4 exists in source factory + live but not in target image —
+        // cross-image migration must preserve it (not a deliberate user removal).
         fs::write(old.join("sub/removed.cfg"), b"stale").unwrap();
         fs::write(cur.join("sub/removed.cfg"), b"stale").unwrap();
 
@@ -560,6 +774,29 @@ mod tests {
         assert_eq!(fs::read_to_string(out.join("unchanged.cfg")).unwrap(), "new-upstream");
         assert_eq!(fs::read_to_string(out.join("modified.cfg")).unwrap(), "my-changes");
         assert_eq!(fs::read_to_string(out.join("sub/new-upstream.cfg")).unwrap(), "brand-new");
-        assert!(!out.join("sub/removed.cfg").exists());
+        assert_eq!(fs::read_to_string(out.join("sub/removed.cfg")).unwrap(), "stale");
+    }
+
+    #[test]
+    fn merge_keeps_source_only_unit_when_target_lacks_it() {
+        // e2e-sshd.socket is baked into Bluefin's bootable image (old + cur),
+        // not in Dakota (new). It must survive the merge so that the
+        // sockets.target.wants symlink doesn't dangle post-pivot.
+        let dir = tempdir().unwrap();
+        let old = dir.path().join("old");
+        let cur = dir.path().join("cur");
+        let new = dir.path().join("new");
+        let out = dir.path().join("out");
+        for d in [&old, &cur, &new] {
+            fs::create_dir_all(d.join("systemd/system")).unwrap();
+        }
+        let unit = "[Socket]\nListenStream=22\n";
+        fs::write(old.join("systemd/system/e2e-sshd.socket"), unit).unwrap();
+        fs::write(cur.join("systemd/system/e2e-sshd.socket"), unit).unwrap();
+        merge_etc_files(&old, &cur, &new, &out).unwrap();
+        assert_eq!(
+            fs::read_to_string(out.join("systemd/system/e2e-sshd.socket")).unwrap(),
+            unit,
+        );
     }
 }

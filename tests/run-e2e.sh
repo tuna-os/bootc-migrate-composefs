@@ -24,7 +24,7 @@ vm_tail() {
     local prefix="${1:-vm-serial}"
     tail -F -q -n 0 qemu.log 2>/dev/null \
       | sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[()][0-9A-Za-z]//g' \
-      | grep --line-buffered -E '\[FAILED\]|Failed to start|panic|Out of memory|kernel BUG|Kernel panic|sshd|fedora login:|Welcome to|GRUB|Booting|systemd-boot|composefs|=== Phase|=== MIGRATION|bootc-migrate|Bluefin \(Version|Dakota|Linux Boot Manager' \
+      | grep --line-buffered -E '\[FAILED\]|Failed to start|panic|Out of memory|kernel BUG|Kernel panic|sshd|fedora login:|Welcome to|GRUB|Booting|systemd-boot|composefs|=== Phase|=== MIGRATION|bootc-migrate|Bluefin \(Version|Dakota|Linux Boot Manager|dbus|messagebus|polkit|logind|machine.id|failed with|error.*starting' \
       | awk -v p="$prefix" '{ print "[" p "] " $0; fflush() }'
 }
 
@@ -626,8 +626,18 @@ done
 
 if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     echo "ERROR: VM did not boot back after migration."
-    step "=== QEMU logs ==="
-    cat qemu.log || true
+    step "=== Post-reboot failure diagnostics ==="
+    echo "--- All FAILED/DEPEND lines ---"
+    grep -E '\[FAILED\]|DEPEND\]' qemu.log | tail -80 || true
+    echo ""
+    echo "--- dbus-related lines ---"
+    grep -iE 'dbus|messagebus|polkit|logind|machine.id' qemu.log | tail -40 || true
+    echo ""
+    echo "--- mount/overlay lines ---"
+    grep -iE 'mount|overlay|composefs|erofs|subvol|fstab' qemu.log | tail -30 || true
+    echo ""
+    echo "--- Last 150 lines of full QEMU log ---"
+    tail -150 qemu.log
     exit 1
 fi
 
