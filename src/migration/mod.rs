@@ -183,7 +183,7 @@ pub fn run_migration(
     let verity = phase3_create_image(&config_digest, dry_run)?;
 
     // ---- Phase 4: Stage deployment state ----
-    let _deploy_dir = phase4_stage_deploy(&verity, target_image, &config_digest, dry_run)?;
+    let _deploy_dir = phase4_stage_deploy(&verity, target_image, &_manifest_digest, &config_digest, dry_run)?;
 
     // ---- Phase 5: Setup bootloader ----
     phase5_setup_bootloader(report, &verity, target_image, dry_run, bootloader)?;
@@ -305,35 +305,54 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<VerityDiges
     let verity = VerityDigest::from_prefixed_or_hex(&sha512_verity_str);
     println!("ComposeFS EROFS image created. Verity digest: {}", verity.as_hex());
 
-    // Idempotency: if the image backing file exists and appears sealed, skip re-seal.
-    let image_path = Path::new("/sysroot/composefs/images").join(verity.as_hex());
-    let seal_needed = if image_path.exists() {
-        // Heuristic: sealed EROFS images have an fsverity digest. Check via ioctl.
-        // Since we don't have direct fs-verity ioctl access here, we rely on the
-        // bootc seal command being idempotent and just call it. The comment has
-        // been clarified to reflect actual behavior.
-        false // bootc seal is idempotent; we can skip to save time
-    } else {
-        true
-    };
-
-    if seal_needed {
-        println!("Sealing composefs image...");
-        crate::composefs::seal_image(config_digest)
-            .context("failed to seal composefs image")?;
-        println!("Image sealed successfully.");
-    } else {
-        println!("Image already sealed, skipping.");
-    }
+    // The `bootc internals cfs seal` command creates the `oci-config-<verity>`
+    // stream in the composefs object store, which the initramfs needs for
+    // proper composefs user-space mounting (without it, bootc falls back to
+    // raw kernel EROFS mount which zero-fills files above the inline threshold,
+    // causing missing unit files like dbus.service and cascading boot failures).
+    // Always seal — idempotency is handled inside bootc.
+    println!("Sealing composefs image...");
+    crate::composefs::seal_image(config_digest)
+        .context("failed to seal composefs image")?;
+    println!("Image sealed successfully.");
 
     Ok(verity)
 }
 
 // ---- Phase 4 (#4, #5, #7) ----
 
+/// Build the `.origin` file content that bootc parses to identify a composefs
+/// deployment. Uses `tini::Ini` for byte-compatible output with bootc's parser.
+fn build_origin_content(target_image: &str, verity: &VerityDigest, manifest_digest: &str) -> String {
+    tini::Ini::new()
+        .section("origin")
+        .item(
+            "container-image-reference",
+            format!("ostree-unverified-image:docker://{}", target_image),
+        )
+        .section("boot")
+        .item("boot_type", "bls")
+        .section("boot")
+        .item("boot_digest", verity.as_hex())
+        .section("boot")
+        .item("manifest_digest", manifest_digest)
+        .to_string()
+}
+
+/// Patch the `boot_digest` entry in an origin file with a real sha256(vmlinuz || initrd).
+/// This is a pure function so we can test it without filesystem access.
+fn patch_boot_digest_in_content(content: &str, new_digest: &str) -> Result<String> {
+    let ini = tini::Ini::from_string(content)
+        .map_err(|e| anyhow!("parsing origin file: {e}"))?
+        .section("boot")
+        .item("boot_digest", new_digest);
+    Ok(ini.to_string())
+}
+
 fn phase4_stage_deploy(
     verity: &VerityDigest,
     target_image: &str,
+    manifest_digest: &str,
     config_digest: &str,
     dry_run: bool,
 ) -> Result<PathBuf> {
@@ -346,8 +365,12 @@ fn phase4_stage_deploy(
         return Ok(deploy_dir);
     }
 
-    // Idempotency (#11): skip if already staged with valid .origin
-    let origin_path = deploy_dir.join(format!("{}.origin", verity.as_prefixed()));
+    // Idempotency (#11): skip if already staged with valid .origin.
+    // bootc expects the filename as `<bare-hex-verity>.origin` (no `sha512:`
+    // prefix); using as_prefixed() here would cause `bootc status` to fail
+    // with "Opening origin file: No such file or directory" and break the
+    // post-reboot validation.
+    let origin_path = deploy_dir.join(format!("{}.origin", verity.as_hex()));
     if deploy_dir.exists() && origin_path.exists() {
         println!("Deployment already staged at {}. Skipping Phase 4.", deploy_dir.display());
         return Ok(deploy_dir);
@@ -360,7 +383,7 @@ fn phase4_stage_deploy(
 
     // 3-way /etc merge (#4)
     println!("Performing 3-way /etc merge...");
-    if let Err(e) = perform_etc_merge(verity, &etc_dir) {
+    if let Err(e) = perform_etc_merge(verity, target_image, &etc_dir) {
         eprintln!("3-way /etc merge failed ({}), falling back to flat /etc copy.", e);
         xattr::copy_dir_all_with_xattrs("/etc", &etc_dir)
             .context("failed to copy /etc (fallback)")?;
@@ -374,19 +397,25 @@ fn phase4_stage_deploy(
     std::os::unix::fs::symlink("../../os/default/var", &var_symlink)
         .context("failed to create /var symlink")?;
 
-    // Write .origin file (Fix 1: validate target_image in main.rs)
-    let origin_content = format!(
-        "[origin]\ncontainer-image-reference = ostree-unverified-image:docker://{}\n\n\
-         [boot]\nboot_type = bls\ndigest = {}\n",
-        target_image,
-        verity.as_prefixed(),
-    );
-    fs::write(&origin_path, origin_content).context("failed to write .origin file")?;
+    // Write .origin file using bootc's expected schema (testutils.rs:316-331).
+    // Use the same `tini::Ini` library bootc uses to parse it so the output
+    // is byte-compatible. Placeholder boot_digest gets patched in Phase 5
+    // with sha256(vmlinuz || initrd) once those files are on the ESP.
+    //
+    // Key names are load-bearing:
+    // - `container-image-reference` is `ostree_ext::container::deploy::ORIGIN_CONTAINER`
+    //   — bootc reads this to populate the BootEntry's image field.
+    // - `manifest_digest` under [boot] lets bootc fetch the OCI manifest from
+    //   the registry without a separate .imginfo file (`bootc internals cfs oci
+    //   inspect` is unreliable in our flow, see [HANDOFF.md]).
+    let origin_content = build_origin_content(target_image, verity, manifest_digest);
+    fs::write(&origin_path, &origin_content)
+        .context("failed to write .origin file")?;
 
     // Write .imginfo file
     println!("Writing .imginfo file...");
     if let Ok(config_json) = crate::migration::inspect_image(config_digest) {
-        let imginfo_path = deploy_dir.join(format!("{}.imginfo", verity.as_prefixed()));
+        let imginfo_path = deploy_dir.join(format!("{}.imginfo", verity.as_hex()));
         if let Err(e) = fs::write(&imginfo_path, &config_json) {
             eprintln!("Warning: failed to write .imginfo file ({}): {}", imginfo_path.display(), e);
         }
@@ -534,27 +563,159 @@ fn resolve_device_uuid(device: &str) -> Option<String> {
 }
 
 /// Perform 3-way /etc merge: old OSTree default, current live /etc, new ComposeFS default.
-fn perform_etc_merge(verity: &VerityDigest, etc_dir: &Path) -> Result<()> {
+fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) -> Result<()> {
     let temp_mount = TempDir::new_in("/var/tmp")
         .context("failed to create temp mount directory")?;
     let mount_path = temp_mount.path().to_path_buf();
 
-    // Mount the new EROFS image to get new default /etc
+    // Mount the new EROFS image — we still need it to validate the prune
+    // step's /usr/* symlink targets. EROFS mount lists directory contents
+    // correctly (it's the file *content* past the inline threshold that
+    // reads as zeros), so symlink-target existence checks work fine here.
     mount_image(verity.as_hex(), &mount_path)
         .context("failed to mount EROFS for etc merge")?;
     let _guard = MountGuard::new(&mount_path);
 
-    let new_default_etc = mount_path.join("etc");
-    if !new_default_etc.exists() {
-        anyhow::bail!("no /etc in new composefs image");
-    }
-
     let old_default_etc = find_ostree_etc_default()?;
     let current_etc = Path::new("/etc");
 
+    // Stream Dakota's real /etc bytes from the registry (oldest layer first,
+    // newer wins). Reading /etc from the local EROFS mount silently returns
+    // zero-filled content for any file past the per-inode inline threshold
+    // because the composefs object store is missing the `oci-config-<verity>`
+    // stream (Phase 2 pull does not produce it), so `bootc internals cfs oci
+    // mount` falls back to bare-EROFS mode. Past attempts to fix this in the
+    // overlay path were brittle; streaming a real `/etc` tree side-steps the
+    // whole thing and the merged result no longer depends on the mount.
+    let registry_etc_temp = TempDir::new_in("/var/tmp")
+        .context("failed to create temp dir for registry /etc")?;
+    let registry_etc = registry_etc_temp.path().to_path_buf();
+    let new_default_etc = match extract_subtree_via_registry(target_image, "etc/", &registry_etc) {
+        Ok(()) if registry_etc.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) => {
+            println!("[phase4] streamed target /etc from registry for merge source");
+            registry_etc.clone()
+        }
+        Ok(()) => {
+            eprintln!("[phase4] warning: registry /etc extract produced no files, falling back to EROFS mount");
+            let p = mount_path.join("etc");
+            if !p.exists() {
+                anyhow::bail!("no /etc in new composefs image");
+            }
+            p
+        }
+        Err(e) => {
+            eprintln!("[phase4] warning: registry /etc extract failed ({e:#}), falling back to EROFS mount");
+            let p = mount_path.join("etc");
+            if !p.exists() {
+                anyhow::bail!("no /etc in new composefs image");
+            }
+            p
+        }
+    };
+
     crate::mergetc::merge_etc_files(&old_default_etc, current_etc, &new_default_etc, etc_dir)
         .context("3-way /etc merge failed")?;
+
+    // Drop /etc symlinks whose /usr/* target does not exist in the target image.
+    // Bluefin → Dakota: e.g. /etc/systemd/system/dbus.service points to
+    // dbus-broker.service which Dakota doesn't ship; the dangling symlink
+    // breaks dbus and everything downstream (polkit, logind, sshd).
+    match crate::mergetc::prune_dangling_usr_symlinks(etc_dir, &mount_path) {
+        Ok(n) if n > 0 => println!("[phase4] pruned {} dangling /etc symlink(s)", n),
+        Ok(_) => {}
+        Err(e) => eprintln!("[phase4] warning: dangling-symlink prune failed: {e:#}"),
+    }
     Ok(())
+}
+
+/// Legacy single-DB supplement path. Kept for callers that don't want the full
+/// `/etc` subtree; not used by `perform_etc_merge` anymore since the full
+/// subtree extract subsumes it.
+#[allow(dead_code)]
+fn supplement_identity_dbs_from_registry(target_image: &str, etc_dir: &Path) -> Result<()> {
+    let scratch = TempDir::new_in("/var/tmp")
+        .context("failed to create temp dir for identity-DB extract")?;
+    let scratch_etc = scratch.path().join("etc");
+    fs::create_dir_all(&scratch_etc).context("failed to create scratch etc dir")?;
+
+    // Try each file individually; tolerate "missing in image" because not
+    // every bootc target ships every identity DB (Dakota has no /etc/subuid
+    // or /etc/subgid). Any other error from a given file is logged and the
+    // others continue.
+    let names = ["passwd", "shadow", "group", "gshadow", "subuid", "subgid"];
+    for name in &names {
+        let src = PathBuf::from("/etc").join(name);
+        let dst = scratch_etc.join(name);
+        let pair = [(src.as_path(), dst.as_path())];
+        if let Err(e) = extract_files_via_registry(target_image, &pair) {
+            let es = format!("{e:#}");
+            if es.contains("missing files") || es.contains("No such file") {
+                // Image doesn't ship this file; that's fine.
+                continue;
+            }
+            eprintln!("[phase4] warning: skopeo extract of /etc/{name} failed: {es}");
+        }
+    }
+
+    let mut supplemented = 0usize;
+    for name in &names {
+        let dakota_path = scratch_etc.join(name);
+        let merged_path = etc_dir.join(name);
+        if !dakota_path.exists() {
+            continue;
+        }
+        let dakota = fs::read_to_string(&dakota_path).unwrap_or_default();
+        if dakota.trim().is_empty() {
+            continue;
+        }
+        let current = fs::read_to_string(&merged_path).unwrap_or_default();
+        let merged = line_union_by_first_colon(&current, &dakota);
+        if merged != current {
+            // Permissions on shadow/gshadow must stay 000; the existing file
+            // already has them, so write in place and preserve mode/xattrs.
+            let perms = fs::metadata(&merged_path).ok().map(|m| m.permissions());
+            fs::write(&merged_path, merged.as_bytes())
+                .with_context(|| format!("failed to rewrite {}", merged_path.display()))?;
+            if let Some(p) = perms {
+                let _ = fs::set_permissions(&merged_path, p);
+            }
+            supplemented += 1;
+        }
+    }
+    if supplemented > 0 {
+        println!(
+            "[phase4] supplemented {} identity-DB file(s) with target's system users",
+            supplemented
+        );
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn line_union_by_first_colon(current: &str, new: &str) -> String {
+    use std::collections::HashSet;
+    let key_of = |line: &str| line.split(':').next().unwrap_or("").to_string();
+    let mut keys: HashSet<String> = HashSet::new();
+    let mut out = String::with_capacity(current.len() + new.len());
+    for line in current.lines() {
+        if !line.is_empty() {
+            keys.insert(key_of(line));
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in new.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let k = key_of(line);
+        if !keys.contains(&k) {
+            out.push_str(line);
+            out.push('\n');
+            keys.insert(k);
+        }
+    }
+    out
 }
 
 fn find_ostree_etc_default() -> Result<PathBuf> {
@@ -749,6 +910,7 @@ fn phase5_setup_bootloader(
                 let mut extract = vec![(in_container_vmlinuz.as_path(), esp_vmlinuz.as_path())];
                 let in_container_initrd;
                 let esp_initrd;
+                let mut have_initrd = false;
                 if initrd_src.exists() {
                     let rel_initrd = initrd_src
                         .strip_prefix(&mount_path)
@@ -756,9 +918,23 @@ fn phase5_setup_bootloader(
                     in_container_initrd = Path::new("/").join(rel_initrd);
                     esp_initrd = esp_boot_dir.join("initrd");
                     extract.push((in_container_initrd.as_path(), esp_initrd.as_path()));
+                    have_initrd = true;
+                } else {
+                    esp_initrd = PathBuf::new();
                 }
                 extract_files_via_registry(target_image, &extract)
                     .context("failed to extract kernel/initrd from target image via registry stream")?;
+
+                // Now that vmlinuz + initrd are on the ESP, compute their
+                // boot_digest (sha256(vmlinuz || initrd)) and patch the .origin
+                // file. `bootc status` requires this digest to set soft-reboot
+                // capability; without it, status fails with "Could not find
+                // boot digest for deployment".
+                if have_initrd {
+                    if let Err(e) = patch_origin_boot_digest(verity, &esp_vmlinuz, &esp_initrd) {
+                        eprintln!("[phase5] warning: failed to patch origin boot_digest: {e:#}");
+                    }
+                }
 
                 // Build composefs BLS entry.
                 let composefs_entry = bootloader::BlsEntry {
@@ -771,18 +947,21 @@ fn phase5_setup_bootloader(
                     sort_key: format!("bootc-{}-0", target_os.id),
                 };
 
-                // Build OSTree fallback BLS targeting the ESP (kernel+initrd copied alongside).
-                let ostree_fallback = build_ostree_fallback_on_esp(esp_path).ok();
-
-                // Stage + atomic-rename both entries.
+                // Stage + atomic-rename. Only the composefs entry goes on the ESP.
+                //
+                // We intentionally do NOT write an OSTree fallback BLS entry here:
+                // `bootc status` (`Parsers/bls_config.rs::boot_artifact_info`) treats
+                // every non-EFI BLS entry on the ESP as a composefs deployment and
+                // bails with "No composefs= param" if it finds one without a
+                // composefs= cmdline. Adding such an entry breaks `bootc status` and
+                // every downstream that depends on it. Recovery is still possible
+                // via firmware menu (`Fedora\shimx64.efi` remains in NVRAM BootOrder)
+                // or by selecting the OSTree GRUB entry from /boot/loader/entries.
                 let staged_dir = esp_path.join("loader/entries.staged");
                 fs::create_dir_all(&staged_dir)?;
                 let entries_dir = esp_path.join("loader/entries");
                 fs::create_dir_all(&entries_dir)?;
-                let mut to_promote: Vec<&bootloader::BlsEntry> = vec![&composefs_entry];
-                if let Some(ref fb) = ostree_fallback {
-                    to_promote.push(fb);
-                }
+                let to_promote: Vec<&bootloader::BlsEntry> = vec![&composefs_entry];
                 for entry in &to_promote {
                     fs::write(staged_dir.join(&entry.filename), entry.render())?;
                     fs::rename(
@@ -1038,6 +1217,123 @@ fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> Resu
             "target image is missing files: {}",
             missing.join(", ")
         ));
+    }
+    Ok(())
+}
+
+/// Compute sha256(vmlinuz || initrd) and patch the `.origin` file's
+/// `boot_digest = …` line. `bootc status` uses this digest to set the soft
+/// reboot capability; without it, status bails with
+/// "Could not find boot digest for deployment".
+fn patch_origin_boot_digest(verity: &VerityDigest, vmlinuz: &Path, initrd: &Path) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let v = fs::read(vmlinuz)
+        .with_context(|| format!("reading vmlinuz {}", vmlinuz.display()))?;
+    let i = fs::read(initrd)
+        .with_context(|| format!("reading initrd {}", initrd.display()))?;
+    hasher.update(&v);
+    hasher.update(&i);
+    let raw = hasher.finalize();
+    let mut digest = String::with_capacity(raw.len() * 2);
+    for b in raw {
+        digest.push_str(&format!("{:02x}", b));
+    }
+
+    let origin_path = Path::new("/sysroot/state/deploy")
+        .join(verity.as_hex())
+        .join(format!("{}.origin", verity.as_hex()));
+    let text = fs::read_to_string(&origin_path)
+        .with_context(|| format!("reading origin {}", origin_path.display()))?;
+    let patched = patch_boot_digest_in_content(&text, &digest)?;
+    fs::write(&origin_path, &patched)
+        .with_context(|| format!("writing patched origin {}", origin_path.display()))?;
+    println!("[phase5] patched origin boot_digest = {}", digest);
+    Ok(())
+}
+
+/// Stream OCI layers oldest→newest and extract everything matching `subtree`
+/// (e.g. `etc/`) into `dst_dir`. Later layers' files overwrite earlier ones,
+/// matching how the container runtime composes the rootfs. Whiteouts
+/// (`.wh.*`) are ignored — at worst we'll keep a few extra stale files in
+/// `etc/`, which doesn't break anything we care about.
+fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) -> Result<()> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    let layers_manifest = if endpoint.is_manifest_index(&manifest_json) {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let entries = manifest_json
+            .get("manifests")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("manifest index has no manifests array"))?;
+        let pick = entries
+            .iter()
+            .find(|m| {
+                m.get("platform")
+                    .and_then(|p| p.get("architecture"))
+                    .and_then(|a| a.as_str())
+                    == Some(arch)
+            })
+            .ok_or_else(|| anyhow!("manifest index has no entry for arch {}", arch))?;
+        let digest = pick
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("manifest index entry has no digest"))?;
+        endpoint.fetch_manifest(digest)?
+    } else {
+        manifest_json
+    };
+    let layers = layers_manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-subtree-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for subtree streaming")?;
+
+    fs::create_dir_all(dst_dir).with_context(|| {
+        format!("failed to create subtree destination {}", dst_dir.display())
+    })?;
+
+    // Iterate oldest → newest so later writes win.
+    for layer in layers.iter() {
+        let digest = layer
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("layer entry has no digest"))?;
+
+        let blob_path = scratch.path().join("layer.blob");
+        endpoint
+            .download_blob(digest, &blob_path)
+            .with_context(|| format!("failed to fetch layer {}", digest))?;
+
+        // tar will silently produce no output if the prefix is absent in this layer.
+        // --strip-components=1 drops the leading directory we asked for so the
+        // contents land directly under dst_dir (we want dst_dir to be the merged
+        // /etc, not dst_dir/etc).
+        let normalized = subtree.trim_end_matches('/');
+        for candidate in [format!("./{}", normalized), normalized.to_string()] {
+            let _ = Command::new("tar")
+                .args([
+                    "-xaf",
+                    blob_path.to_str().ok_or_else(|| anyhow!("invalid blob path"))?,
+                    "-C",
+                    dst_dir.to_str().ok_or_else(|| anyhow!("invalid dst path"))?,
+                    "--overwrite",
+                    "--no-same-owner",
+                    "--strip-components=1",
+                    &candidate,
+                ])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = fs::remove_file(&blob_path);
     }
     Ok(())
 }
@@ -1430,6 +1726,7 @@ fn register_systemd_boot_nvram(esp_path: &str) {
 
 /// Build an OSTree fallback BLS entry placed on the ESP (systemd-boot path).
 /// Copies the running OSTree deployment's kernel/initrd to <esp>/EFI/Linux/ostree-fallback/.
+#[allow(dead_code)]
 fn build_ostree_fallback_on_esp(esp_path: &Path) -> Result<bootloader::BlsEntry> {
     let (deploy_root, _checksum) = find_ostree_deployment()?;
 
@@ -1631,5 +1928,86 @@ mod tests {
         // If findmnt returns empty, parsing should return None.
         // The function returns None if the source string is empty.
         // This is exercised by get_esp_disk_and_part's early return on empty source.
+    }
+
+    // ── Slice 1: origin file schema tests ──
+
+    #[test]
+    fn origin_content_roundtrips_through_tini() {
+        let verity = VerityDigest::from_hex(
+            "9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd",
+        );
+        let content = build_origin_content(
+            "ghcr.io/projectbluefin/dakota:stable",
+            &verity,
+            "sha256:abc123",
+        );
+        // Must parse back successfully
+        let parsed = tini::Ini::from_string(&content).expect("origin content must be valid INI");
+        assert_eq!(
+            parsed.get::<String>("origin", "container-image-reference").as_deref(),
+            Some("ostree-unverified-image:docker://ghcr.io/projectbluefin/dakota:stable")
+        );
+        assert_eq!(parsed.get::<String>("boot", "boot_type").as_deref(), Some("bls"));
+        assert_eq!(
+            parsed.get::<String>("boot", "boot_digest").as_deref(),
+            Some("9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd")
+        );
+        assert_eq!(parsed.get::<String>("boot", "manifest_digest").as_deref(), Some("sha256:abc123"));
+    }
+
+    #[test]
+    fn origin_content_is_stable_across_rebuilds() {
+        let verity = VerityDigest::from_hex(
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+        let a = build_origin_content("img:latest", &verity, "sha256:foo");
+        let b = build_origin_content("img:latest", &verity, "sha256:foo");
+        assert_eq!(a, b, "origin content must be deterministic");
+    }
+
+    #[test]
+    fn patch_boot_digest_replaces_placeholder() {
+        let verity = VerityDigest::from_hex(
+            "9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd",
+        );
+        let original = build_origin_content("img:latest", &verity, "sha256:disc");
+        let patched =
+            patch_boot_digest_in_content(&original, "abcdef1234567890").unwrap();
+
+        let parsed = tini::Ini::from_string(&patched).unwrap();
+        assert_eq!(
+            parsed.get::<String>("boot", "boot_digest").as_deref(),
+            Some("abcdef1234567890"),
+            "boot_digest must be replaced with real sha256"
+        );
+    }
+
+    #[test]
+    fn patch_boot_digest_preserves_all_other_keys() {
+        let verity = VerityDigest::from_hex(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let original = build_origin_content(
+            "ghcr.io/example/target:v1",
+            &verity,
+            "sha256:manifest123",
+        );
+        let patched = patch_boot_digest_in_content(&original, "newdigest111").unwrap();
+
+        let parsed = tini::Ini::from_string(&patched).unwrap();
+        assert_eq!(
+            parsed.get::<String>("origin", "container-image-reference").as_deref(),
+            Some("ostree-unverified-image:docker://ghcr.io/example/target:v1")
+        );
+        assert_eq!(parsed.get::<String>("boot", "boot_type").as_deref(), Some("bls"));
+        assert_eq!(parsed.get::<String>("boot", "manifest_digest").as_deref(), Some("sha256:manifest123"));
+        assert_eq!(parsed.get::<String>("boot", "boot_digest").as_deref(), Some("newdigest111"));
+    }
+
+    #[test]
+    fn patch_boot_digest_fails_on_garbage_input() {
+        let result = patch_boot_digest_in_content("not a valid INI file\n[garbage", "foo");
+        assert!(result.is_err(), "must reject malformed INI");
     }
 }
