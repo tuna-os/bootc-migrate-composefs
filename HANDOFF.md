@@ -4,7 +4,7 @@
 **Goal:** In-place migration from OSTree-booted Bluefin:stable to ComposeFS-booted Dakota:stable via systemd-boot  
 **Agent:** pi (picked up from Claude Code session)  
 **Approach:** TDD vertical slices (5 slices)  
-**Last updated:** 2026-06-15 10:11 IST — root-cause of post-reboot SSH auth failure identified: `phase4_var_migration` was synthesizing an `/etc/fstab` entry mounting btrfs subvolid=5 (the root subvol) at `/var`, shadowing the initramfs bind-mount of `state/os/default/var` and hiding `/var/roothome/.ssh/authorized_keys`. Fix: dropped fstab synthesis entirely; `/var` data is now unconditionally copied from `/sysroot/ostree/deploy/default/var` to `/sysroot/state/os/default/var` so the bootc initramfs bind-mount exposes user data. E2E run #2 in Phase 4 now.
+**Last updated:** 2026-06-15 11:38 IST — **E2E PASSES**. Local run 7 went green end-to-end: migration → composefs boot → SSH at 76s → all 13 persistence/identity assertions pass → bootc status reports composefs deployment correctly. The blocker chain was four bugs in series: (1) `/var` fstab synth mounted the wrong subvol over /var, (2) `copy_dir_all_with_xattrs` didn't preserve dir mode so `.ssh` ended up 755 (broke StrictModes), (3) the 3-way merge dropped symlink→file type changes and so deleted Dakota's PAM/NSS files, and (4) the `.origin` schema put `manifest_digest` under `[boot]` instead of `[image]` and `digest` under the wrong key name. All four fixed, all on `main`.
 
 ---
 
@@ -71,7 +71,23 @@ A Bluefin:stable user runs the migration binary once and ends up booted on Dakot
 | E2E injection writing to ESP (vfat) instead of btrfs root | Fixed to find btrfs partition via blkid | `fc0c3a5` |
 | sshd_config.d/90-e2e.conf not created (missing mkdir -p) | Fixed mkdir -p for sshd_config.d directory | `b7d8cc3` |
 
-## Current Blocker: E2E SSH validation only — migration itself works
+## Status: E2E green; remaining work is polish + open issues
+
+E2E run 7 (commit `aedd0c7`) passes all 13 post-migration assertions:
+- 8 /var persistence (containers, dotfiles, nested dirs, SSH key files, system state, symlinks, hidden dirs, multi-user)
+- 4 /etc persistence (custom config, nested files, in-place edits, symlinks)
+- /home/<user> resolution
+- User account preservation from /etc/passwd
+- `bootc status` reports composefs deployment with correct verity/boot_digest/manifest_digest
+
+Open improvement issues, in priority order:
+- **#22** — E2E rollback test + README Recovery section (verify OSTree fallback boot path)
+- **#18** — Derive Dakota with SSH baked in for E2E; drop `ensure_e2e_ssh_socket` from production code
+- **#19/#20/#21** — Already fixed; close when CI confirms.
+- **#17** — `commit` subcommand: drop OSTree-era /var paths (rpm-ostree, sysimage)
+- **#16** — Non-btrfs (xfs) support
+
+## Historical (kept for context): SSH validation only — migration itself works
 
 E2E runs 2-5 all complete the migration cleanly: Phases 0-5 succeed, Dakota composefs boots via systemd-boot with the correct `composefs=<verity>` kernel cmdline, and **all key services reach Started** post-pivot per serial console: dbus, polkit, logind, systemd-resolved, gdm, podman-restart, podman-auto-update, tailscaled.
 
