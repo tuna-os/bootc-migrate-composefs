@@ -151,13 +151,33 @@ RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
     ln -sf /usr/lib/systemd/system/sshd.service \
            /usr/lib/systemd/system/multi-user.target.wants/sshd.service
 # NOTE: e2e-sshd.socket, PermitRootLogin, and other user-specific /etc
-# customizations are NOT baked into the base image here. They are injected
-# into the live /etc after the OSTree install so they appear only in `cur`
-# (not in `old`/OSTree factory). This ensures the ComposeFS 3-way merge
-# treats them as user-created files ("cur only, no old") and preserves them
-# across the Bluefin→Dakota migration, while correctly dropping source-
-# specific system files (like sshd_config.d/40-redhat-*) that don't exist
-# in the target image.
+# customizations are baked into the base image here for Bluefin's first boot.
+# The ComposeFS 3-way merge will drop these (old==cur, new absent), but
+# Phase 4's `ensure_e2e_ssh_socket` recreates them in the deploy /etc so
+# they're present on the Dakota composefs boot too.
+RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
+    echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
+# e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
+RUN mkdir -p /etc/systemd/system && \
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=E2E SSH TCP Socket (port 22)' \
+        '[Socket]' \
+        'ListenStream=22' \
+        'Accept=yes' \
+        '[Install]' \
+        'WantedBy=sockets.target' \
+        > /etc/systemd/system/e2e-sshd.socket && \
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=E2E SSH per-connection service' \
+        '[Service]' \
+        'ExecStart=-/usr/bin/sshd -i' \
+        'StandardInput=socket' \
+        > /etc/systemd/system/e2e-sshd@.service && \
+    mkdir -p /etc/systemd/system/sockets.target.wants && \
+    ln -sf /etc/systemd/system/e2e-sshd.socket \
+           /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
 DOCKERFILE
 
 # Substitute the base image

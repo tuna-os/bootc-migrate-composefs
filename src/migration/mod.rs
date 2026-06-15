@@ -625,6 +625,42 @@ fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) 
         Ok(_) => {}
         Err(e) => eprintln!("[phase4] warning: dangling-symlink prune failed: {e:#}"),
     }
+
+    // Ensure the TCP 22 SSH socket-activated listener is always present in the
+    // deploy /etc. On Bluefin, sshd only binds Unix-local + vsock by default;
+    // this socket provides the TCP listener the E2E test needs. The 3-way merge
+    // drops it when baked into the OSTree factory (old==cur, new absent), so we
+    // recreate it unconditionally after the merge.
+    ensure_e2e_ssh_socket(etc_dir)?;
+
+    Ok(())
+}
+
+/// Ensure the TCP 22 SSH socket-activated listener is present in the deploy
+/// /etc. Bluefin's sshd only binds Unix-local + vsock by default; this socket
+/// provides the TCP listener the E2E test needs. The 3-way merge drops it when
+/// baked into the OSTree factory (old==cur, new absent), so we recreate it
+/// unconditionally after the merge.
+fn ensure_e2e_ssh_socket(etc_dir: &Path) -> Result<()> {
+    let systemd_dir = etc_dir.join("systemd/system");
+    fs::create_dir_all(systemd_dir.join("sockets.target.wants"))?;
+
+    fs::write(
+        systemd_dir.join("e2e-sshd.socket"),
+        "[Unit]\nDescription=E2E SSH TCP Socket (port 22)\n[Socket]\nListenStream=22\nAccept=yes\n[Install]\nWantedBy=sockets.target\n",
+    )?;
+    fs::write(
+        systemd_dir.join("e2e-sshd@.service"),
+        "[Unit]\nDescription=E2E SSH per-connection service\n[Service]\nExecStart=-/usr/bin/sshd -i\nStandardInput=socket\n",
+    )?;
+
+    let symlink = systemd_dir.join("sockets.target.wants/e2e-sshd.socket");
+    if symlink.exists() || symlink.is_symlink() {
+        let _ = fs::remove_file(&symlink);
+    }
+    std::os::unix::fs::symlink("../e2e-sshd.socket", &symlink)?;
+
+    println!("[phase4] ensured e2e-sshd.socket in deploy /etc");
     Ok(())
 }
 
