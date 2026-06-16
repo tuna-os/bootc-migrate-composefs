@@ -24,6 +24,10 @@ jobs:
           - name: bluefin -> dakota (systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:stable
             target: ghcr.io/projectbluefin/dakota:stable
+          - name: bluefin LTS -> dakota (systemd-boot + composefs)
+            base: ghcr.io/projectbluefin/bluefin:lts
+            target: ghcr.io/projectbluefin/dakota:stable
+            filesystem: ext4
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
@@ -104,6 +108,7 @@ jobs:
           sudo podman push --tls-verify=false "$target_local"
           echo "BASE_IMAGE=${{ matrix.scenario.base }}" >> "$GITHUB_ENV"
           echo "TARGET_IMAGE=${{ matrix.scenario.target }}" >> "$GITHUB_ENV"
+          echo "FILESYSTEM=${{ matrix.scenario.filesystem || 'btrfs' }}" >> "$GITHUB_ENV"
 
       - name: Disk space before E2E
         run: df -h /
