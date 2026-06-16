@@ -212,10 +212,16 @@ if [ -f "$CHECKPOINT" ]; then
     CKPT_LOOP=$(sudo losetup --show -f -P disk.raw)
     # Find the root partition (p2 is the ESP on bootc-installed disks).
     CKPT_ROOT=""
-    for p in "${CKPT_LOOP}"p*; do
-        if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx "$FILESYSTEM"; then
-            CKPT_ROOT="$p"; break
-        fi
+    # udev / partition scanning can be asynchronous; retry with partprobe + settle
+    for i in $(seq 1 10); do
+        sudo partprobe "$CKPT_LOOP" 2>/dev/null || true
+        sudo udevadm settle 2>/dev/null || true
+        for p in "${CKPT_LOOP}"p*; do
+            if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx "$FILESYSTEM"; then
+                CKPT_ROOT="$p"; break 2
+            fi
+        done
+        sleep 1
     done
     if [ -z "$CKPT_ROOT" ]; then
         echo "ERROR: could not find $FILESYSTEM root partition on $CKPT_LOOP" >&2
@@ -289,10 +295,16 @@ echo "Re-attached loop device: $LOOP_DEV"
 step "=== Injecting SSH credentials to disk image ==="
 # Find the root partition (not the ESP/vfat).
 ROOT_PART=""
-for p in "${LOOP_DEV}"p*; do
-    if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx "$FILESYSTEM"; then
-        ROOT_PART="$p"; break
-    fi
+# udev / partition scanning can be asynchronous; retry with partprobe + settle
+for i in $(seq 1 10); do
+    sudo partprobe "$LOOP_DEV" 2>/dev/null || true
+    sudo udevadm settle 2>/dev/null || true
+    for p in "${LOOP_DEV}"p*; do
+        if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx "$FILESYSTEM"; then
+            ROOT_PART="$p"; break 2
+        fi
+    done
+    sleep 1
 done
 if [ -z "$ROOT_PART" ]; then
     echo "ERROR: could not find $FILESYSTEM root partition on $LOOP_DEV" >&2
