@@ -65,6 +65,16 @@ done
 
 # Cleanup artifacts from previous runs
 rm -f "$WORKSPACE_DIR"/disk.raw "$WORKSPACE_DIR"/qemu.log "$WORKSPACE_DIR"/test_key "$WORKSPACE_DIR"/test_key.pub
+# Clean stale mounts from aborted runs (prevents mount stacking)
+sudo umount /tmp/mnt-e2e-esp-scan 2>/dev/null || true
+sudo umount /tmp/mnt-e2e-root-scan 2>/dev/null || true
+sudo umount /tmp/mnt-e2e-disk 2>/dev/null || true
+sudo umount /tmp/mnt-e2e-boot 2>/dev/null || true
+sudo umount /tmp/mnt-e2e-ckpt 2>/dev/null || true
+# Detach leftover loop devices
+for ld in $(sudo losetup -j "$WORKSPACE_DIR/disk.raw" 2>/dev/null | cut -d: -f1); do
+    sudo losetup -d "$ld" 2>/dev/null || true
+done
 
 step "=== E2E Test Configuration ==="
 echo "Base Image (OSTree):   $BASE_IMAGE"
