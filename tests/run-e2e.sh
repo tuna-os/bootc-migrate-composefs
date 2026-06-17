@@ -200,8 +200,13 @@ INSTALL_IMAGE="$MODIFIED_IMAGE"
 echo "Using install image: $INSTALL_IMAGE"
 
 # 5. Create and initialize disk image (or restore checkpoint)
-CHECKPOINT="$WORKSPACE_DIR/disk.raw.pre-migration"
-if [ -f "$CHECKPOINT" ]; then
+POST_CKPT="$WORKSPACE_DIR/disk.raw.post-migration"
+if [ -f "$POST_CKPT" ]; then
+    step "=== Restoring post-migration checkpoint (skip to host-side scan) ==="
+    cp "$POST_CKPT" disk.raw
+    SKIP_SETUP=post-migration
+elif [ -f "$WORKSPACE_DIR/disk.raw.pre-migration" ]; then
+    CHECKPOINT="$WORKSPACE_DIR/disk.raw.pre-migration"
     step "=== Restoring pre-migration checkpoint ==="
     cp "$CHECKPOINT" disk.raw
     SKIP_SETUP=true
@@ -768,8 +773,9 @@ if [ ! -f "$HOST_ESP_MNT/EFI/systemd/systemd-bootx64.efi" ]; then
 fi
 echo "OK: systemd-bootx64.efi present"
 
-# Test 4: .origin file exists and references the target image.
-ORIGIN=$(find "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1)
+# Test 4: .origin file exists. On raw disk /sysroot is just / — the deploy
+# dir may be at /state/deploy or /sysroot/state/deploy.
+ORIGIN=$(find "$HOST_ROOT_MNT/state/deploy" "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1)
 if [ -z "$ORIGIN" ]; then
     echo "FAIL: no .origin file in deploy dir" >&2
     sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
@@ -780,6 +786,10 @@ echo "OK: .origin file present"
 sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
 sudo losetup -d "$HOST_LOOP"
 echo "OK: All host-side disk checks passed."
+
+# Save post-migration checkpoint so subsequent runs can skip to the
+# host-side scan and reboot tests with SKIP_SETUP=post-migration.
+cp disk.raw disk.raw.post-migration
 
 # Now check the migration result. Host-side scan runs regardless — it
 # catches disk-level bugs the migrator might miss (0-byte initrd, etc.).
