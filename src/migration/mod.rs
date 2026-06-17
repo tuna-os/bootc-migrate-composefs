@@ -83,6 +83,12 @@ pub fn run_migration(
     bootloader: &str,
     force: bool,
 ) -> Result<()> {
+    // Stamp the disk with the build version for post-mortem diagnostics.
+    let version = env!("BUILD_GIT_HASH");
+    if let Err(e) = fs::write("/e2e-disk-label.txt", format!("bootc-migrate-composefs {}\n", version))
+    {
+        eprintln!("Warning: could not write disk version label: {e:#}");
+    }
     // Acquire exclusive lock (Fix 8).
     let _lock = if !dry_run {
         Some(acquire_lock()?)

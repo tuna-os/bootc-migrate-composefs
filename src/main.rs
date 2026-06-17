@@ -17,6 +17,7 @@ pub use types::VerityDigest;
 #[derive(Parser, Debug)]
 #[command(name = "bootc-migrate-composefs")]
 #[command(about = "In-place migration utility from OSTree backend to ComposeFS backend", long_about = None)]
+#[command(version = env!("BUILD_GIT_HASH"))]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -181,7 +182,8 @@ fn main() {
         process::exit(1);
     }
 
-    println!("=== OSTree to ComposeFS Migration Utility ===");
+    let version = env!("BUILD_GIT_HASH");
+    println!("=== OSTree to ComposeFS Migration Utility v{} ===", version);
     if args.dry_run {
         println!("*** DRY RUN MODE — no changes will be made ***");
     }
