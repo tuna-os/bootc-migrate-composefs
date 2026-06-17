@@ -632,11 +632,8 @@ ssh $SSH_OPTS root@localhost "MIG_TARGET='$VM_TARGET_IMAGE' bash -s" <<'MIGSCRIP
 MIGSCRIPT
 MIGRATE_RC=$?
 step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=$MIGRATE_RC)"
-if [ "$MIGRATE_RC" != "0" ]; then
-    echo "ERROR: migration binary exited with rc=$MIGRATE_RC" >&2
-    exit "$MIGRATE_RC"
-fi
 
+# Run in-VM diagnostics before shutdown (best-effort, not a hard gate).
 step "=== Verifying migration artifacts before reboot ==="
 ssh $SSH_OPTS root@localhost bash <<'DIAG'
 set +e
@@ -795,6 +792,13 @@ echo "OK: .origin file present"
 sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
 sudo losetup -d "$HOST_LOOP"
 echo "OK: All host-side disk checks passed."
+
+# Now check the migration result. Host-side scan runs regardless — it
+# catches disk-level bugs the migrator might miss (0-byte initrd, etc.).
+if [ "$MIGRATE_RC" != "0" ]; then
+    echo "ERROR: migration binary exited with rc=$MIGRATE_RC" >&2
+    exit "$MIGRATE_RC"
+fi
 
 # Re-launch QEMU with the mutated disk for the post-reboot checks.
 step "=== Re-launching VM ==="
