@@ -1,5 +1,5 @@
+use anyhow::{Context, Result};
 use std::fs;
-use anyhow::{Result, Context};
 
 /// Build kernel command-line options for the ComposeFS boot entry.
 ///
@@ -14,8 +14,7 @@ use anyhow::{Result, Context};
 /// - `rootflags=*` — often specific to the OSTree btrfs subvol
 /// - `rd.systemd.unit=*` — stay out of initrd overrides
 pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
-    let cmdline = fs::read_to_string("/proc/cmdline")
-        .context("failed to read /proc/cmdline")?;
+    let cmdline = fs::read_to_string("/proc/cmdline").context("failed to read /proc/cmdline")?;
     let mut options: Vec<String> = Vec::new();
     for word in cmdline.split_whitespace() {
         if should_filter(word) {
@@ -116,10 +115,7 @@ mod tests {
     #[test]
     fn preserves_root_arg() {
         // Fix 7: root= is needed alongside composefs= per SPECIFICATION.md §4.2.
-        let result = build_options(
-            "root=UUID=aaaa-bbbb quiet rw",
-            "ab01cd23ef45",
-        );
+        let result = build_options("root=UUID=aaaa-bbbb quiet rw", "ab01cd23ef45");
         assert!(result.contains("root=UUID=aaaa-bbbb"));
         assert!(result.contains("quiet"));
     }
@@ -127,10 +123,7 @@ mod tests {
     #[test]
     fn filters_rootflags_subvol() {
         // rootflags containing subvol= (btrfs-specific) are filtered.
-        let result = build_options(
-            "rootflags=subvol=root quiet rw",
-            "ab01cd23ef45",
-        );
+        let result = build_options("rootflags=subvol=root quiet rw", "ab01cd23ef45");
         assert!(!result.contains("rootflags="));
         assert!(result.contains("quiet"));
     }
@@ -138,10 +131,7 @@ mod tests {
     #[test]
     fn preserves_rootflags_without_subvol() {
         // rootflags without subvol= (e.g. XFS, ext4 mount options) are kept.
-        let result = build_options(
-            "rootflags=defaults quiet rw",
-            "ab01cd23ef45",
-        );
+        let result = build_options("rootflags=defaults quiet rw", "ab01cd23ef45");
         assert!(result.contains("rootflags=defaults"));
         assert!(result.contains("quiet"));
     }
@@ -158,20 +148,14 @@ mod tests {
 
     #[test]
     fn filters_ostree_dot_prefix_args() {
-        let result = build_options(
-            "ostree.booted=1 ostree.composefs=0 quiet",
-            "ab01cd23ef45",
-        );
+        let result = build_options("ostree.booted=1 ostree.composefs=0 quiet", "ab01cd23ef45");
         assert!(!result.contains("ostree."));
         assert!(result.contains("quiet"));
     }
 
     #[test]
     fn preserves_console_args() {
-        let result = build_options(
-            "console=ttyS0,115200n8 console=tty0 quiet",
-            "ab01cd23ef45",
-        );
+        let result = build_options("console=ttyS0,115200n8 console=tty0 quiet", "ab01cd23ef45");
         assert!(result.contains("console=ttyS0,115200n8"));
         assert!(result.contains("console=tty0"));
     }

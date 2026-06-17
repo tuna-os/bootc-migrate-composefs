@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
-use anyhow::{Result, Context};
 
 /// Copy a file preserving all extended attributes (SELinux, capabilities, user.*).
 /// On Btrfs, prefers FICLONE reflink first (via the caller), then copies xattrs.
@@ -23,7 +23,8 @@ pub fn copy_file_with_xattrs(src: &Path, dst: &Path) -> Result<()> {
     }
 
     // Copy extended attributes from src to dst
-    let src_path = src.to_str()
+    let src_path = src
+        .to_str()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid src path"))?;
 
     copy_xattrs(src_path, dst)?;
@@ -47,9 +48,7 @@ fn copy_xattrs(src_path: &str, dst: &Path) -> Result<()> {
     let dst_c = std::ffi::CString::new(dst.to_str().unwrap_or(""))?;
 
     // Get the size of the xattr list.
-    let list_size = unsafe {
-        libc::listxattr(src_c.as_ptr(), std::ptr::null_mut(), 0)
-    };
+    let list_size = unsafe { libc::listxattr(src_c.as_ptr(), std::ptr::null_mut(), 0) };
 
     if list_size <= 0 {
         // No xattrs, or error, either way nothing to copy.
@@ -58,7 +57,11 @@ fn copy_xattrs(src_path: &str, dst: &Path) -> Result<()> {
 
     let mut list_buf = vec![0u8; list_size as usize];
     let list_size = unsafe {
-        libc::listxattr(src_c.as_ptr(), list_buf.as_mut_ptr() as *mut libc::c_char, list_buf.len())
+        libc::listxattr(
+            src_c.as_ptr(),
+            list_buf.as_mut_ptr() as *mut libc::c_char,
+            list_buf.len(),
+        )
     };
 
     if list_size <= 0 {
@@ -74,9 +77,8 @@ fn copy_xattrs(src_path: &str, dst: &Path) -> Result<()> {
         let name = std::ffi::CString::new(name_bytes)?;
 
         // Get value size.
-        let val_size = unsafe {
-            libc::getxattr(src_c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0)
-        };
+        let val_size =
+            unsafe { libc::getxattr(src_c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
 
         if val_size < 0 {
             continue; // Skip if we can't read
@@ -112,7 +114,12 @@ fn copy_xattrs(src_path: &str, dst: &Path) -> Result<()> {
             // ENOTSUP is expected on filesystems without xattr support (FAT32 ESP).
             if e.raw_os_error() != Some(libc::ENOTSUP) {
                 if let Ok(name_str) = std::str::from_utf8(name_bytes) {
-                    eprintln!("Warning: failed to set xattr '{}' on {}: {}", name_str, dst.display(), e);
+                    eprintln!(
+                        "Warning: failed to set xattr '{}' on {}: {}",
+                        name_str,
+                        dst.display(),
+                        e
+                    );
                 }
             }
         }
@@ -247,8 +254,16 @@ mod tests {
 
         copy_dir_all_with_xattrs(&src_dir, &dst_dir).unwrap();
 
-        let dst_ssh_mode = fs::metadata(dst_dir.join(".ssh")).unwrap().permissions().mode();
-        assert_eq!(dst_ssh_mode & 0o777, 0o700, "dst .ssh must stay 700, got {:o}", dst_ssh_mode & 0o777);
+        let dst_ssh_mode = fs::metadata(dst_dir.join(".ssh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            dst_ssh_mode & 0o777,
+            0o700,
+            "dst .ssh must stay 700, got {:o}",
+            dst_ssh_mode & 0o777
+        );
     }
 
     #[test]

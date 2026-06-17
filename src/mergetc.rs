@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
-use anyhow::{Result, Context};
 
 /// Result of reading a file for 3-way merge. None means the file does not exist
 /// in that version.
@@ -42,7 +42,8 @@ pub fn merge_etc_files(
     let cur_entries = collect_relative_entries(current_dir)?;
     let new_entries = collect_relative_entries(new_default_dir)?;
 
-    let mut all_paths: Vec<String> = old_entries.keys()
+    let mut all_paths: Vec<String> = old_entries
+        .keys()
         .chain(cur_entries.keys())
         .chain(new_entries.keys())
         .cloned()
@@ -65,18 +66,14 @@ pub fn merge_etc_files(
                 read_file_at(old_default_dir, rel_path) != read_file_at(current_dir, rel_path)
             }
             (Some(DirEntry::Symlink(o)), Some(DirEntry::Symlink(c))) => o != c,
-            (None, Some(_)) => true,       // user added
-            (Some(_), None) => true,       // user deleted
-            (Some(_), Some(_)) => true,    // type change (file↔symlink) by user
+            (None, Some(_)) => true,    // user added
+            (Some(_), None) => true,    // user deleted
+            (Some(_), Some(_)) => true, // type change (file↔symlink) by user
             (None, None) => false,
         };
 
         // Pick the entry we're materializing: cur if user modified, else new.
-        let chosen_entry: Option<&DirEntry> = if user_modified {
-            cur_entry
-        } else {
-            new_entry
-        };
+        let chosen_entry: Option<&DirEntry> = if user_modified { cur_entry } else { new_entry };
 
         match (chosen_entry, cur_entry, new_entry) {
             (Some(DirEntry::Symlink(target)), _, _) => {
@@ -125,8 +122,9 @@ pub fn merge_etc_files(
                     if let Some(parent) = dest.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    fs::write(&dest, &content)
-                        .with_context(|| format!("failed to write merged file: {}", dest.display()))?;
+                    fs::write(&dest, &content).with_context(|| {
+                        format!("failed to write merged file: {}", dest.display())
+                    })?;
 
                     // Preserve xattrs and permissions from the best available source.
                     // Prefer current, then new_default, then old_default.
@@ -155,9 +153,15 @@ pub fn merge_etc_files(
 /// `current` lines come first (verbatim, preserving order and state); any line
 /// from `new` whose first field isn't already represented gets appended.
 /// machine-id is opaque — return current as-is.
-fn merge_identity_db(rel_path: &str, current: Option<&[u8]>, new: Option<&[u8]>) -> Option<Vec<u8>> {
+fn merge_identity_db(
+    rel_path: &str,
+    current: Option<&[u8]>,
+    new: Option<&[u8]>,
+) -> Option<Vec<u8>> {
     if rel_path == "machine-id" {
-        return current.map(|s| s.to_vec()).or_else(|| new.map(|s| s.to_vec()));
+        return current
+            .map(|s| s.to_vec())
+            .or_else(|| new.map(|s| s.to_vec()));
     }
     let cur_text = match current {
         Some(c) => std::str::from_utf8(c).ok()?,
@@ -240,7 +244,12 @@ pub fn prune_dangling_usr_symlinks(etc_dir: &Path, target_root: &Path) -> Result
     prune_dangling_symlinks(etc_dir, target_root)
 }
 
-fn prune_recursive(dir: &Path, etc_root: &Path, target_root: &Path, removed: &mut usize) -> Result<()> {
+fn prune_recursive(
+    dir: &Path,
+    etc_root: &Path,
+    target_root: &Path,
+    removed: &mut usize,
+) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -294,7 +303,8 @@ fn copy_file_metadata(src: &Path, dst: &Path) -> Result<()> {
         let _ = fs::set_permissions(dst, perms);
     }
     // Copy xattrs
-    let src_str = src.to_str()
+    let src_str = src
+        .to_str()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid src path"))?;
     copy_xattrs_to_file(src_str, dst)?;
     Ok(())
@@ -313,7 +323,11 @@ fn copy_xattrs_to_file(src_path: &str, dst: &Path) -> Result<()> {
 
     let mut list_buf = vec![0u8; list_size as usize];
     let actual = unsafe {
-        libc::listxattr(src_c.as_ptr(), list_buf.as_mut_ptr() as *mut libc::c_char, list_buf.len())
+        libc::listxattr(
+            src_c.as_ptr(),
+            list_buf.as_mut_ptr() as *mut libc::c_char,
+            list_buf.len(),
+        )
     };
     if actual <= 0 {
         return Ok(());
@@ -327,7 +341,8 @@ fn copy_xattrs_to_file(src_path: &str, dst: &Path) -> Result<()> {
         let name = std::ffi::CString::new(name_bytes)?;
 
         // Get value size.
-        let val_size = unsafe { libc::getxattr(src_c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+        let val_size =
+            unsafe { libc::getxattr(src_c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
         if val_size < 0 {
             continue;
         }
@@ -360,7 +375,12 @@ fn copy_xattrs_to_file(src_path: &str, dst: &Path) -> Result<()> {
             let e = std::io::Error::last_os_error();
             if e.raw_os_error() != Some(libc::ENOTSUP) {
                 if let Ok(name_str) = std::str::from_utf8(name_bytes) {
-                    eprintln!("Warning: failed to set xattr '{}' on {}: {}", name_str, dst.display(), e);
+                    eprintln!(
+                        "Warning: failed to set xattr '{}' on {}: {}",
+                        name_str,
+                        dst.display(),
+                        e
+                    );
                 }
             }
         }
@@ -448,7 +468,8 @@ fn collect_entries_recursive(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let rel = path.strip_prefix(root)
+        let rel = path
+            .strip_prefix(root)
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
@@ -457,9 +478,7 @@ fn collect_entries_recursive(
         if ft.is_dir() {
             collect_entries_recursive(&path, root, entries)?;
         } else if ft.is_symlink() {
-            let target = fs::read_link(&path)?
-                .to_string_lossy()
-                .to_string();
+            let target = fs::read_link(&path)?.to_string_lossy().to_string();
             entries.insert(rel, DirEntry::Symlink(target));
         } else if ft.is_file() {
             entries.insert(rel, DirEntry::File);
@@ -488,14 +507,24 @@ mod tests {
         let bluefin = "root:x:0:0::/root:/bin/bash\npolkitd:x:973:973::/:/usr/sbin/nologin\nsshd:x:74:74::/usr/share/empty.sshd:/sbin/nologin\n";
         fs::write(old.path().join("passwd"), bluefin).unwrap();
         fs::write(cur.path().join("passwd"), bluefin).unwrap();
-        let dakota = "root:x:0:0::/root:/bin/bash\nmessagebus:x:81:81::/run/dbus:/usr/sbin/nologin\n";
+        let dakota =
+            "root:x:0:0::/root:/bin/bash\nmessagebus:x:81:81::/run/dbus:/usr/sbin/nologin\n";
         fs::write(new.path().join("passwd"), dakota).unwrap();
 
         merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
         let merged = fs::read_to_string(out.path().join("passwd")).unwrap();
-        assert!(merged.contains("messagebus:"), "messagebus must be added from target: {merged}");
-        assert!(merged.contains("polkitd:"), "polkitd from current must survive: {merged}");
-        assert!(merged.contains("sshd:"), "sshd from current must survive: {merged}");
+        assert!(
+            merged.contains("messagebus:"),
+            "messagebus must be added from target: {merged}"
+        );
+        assert!(
+            merged.contains("polkitd:"),
+            "polkitd from current must survive: {merged}"
+        );
+        assert!(
+            merged.contains("sshd:"),
+            "sshd from current must survive: {merged}"
+        );
         // Current entries appear before any new-only additions.
         let msg_idx = merged.find("messagebus:").unwrap();
         let polk_idx = merged.find("polkitd:").unwrap();
@@ -513,17 +542,36 @@ mod tests {
         let cur = tempdir().unwrap();
         let new = tempdir().unwrap();
         let out = tempdir().unwrap();
-        std::os::unix::fs::symlink("/etc/authselect/password-auth", old.path().join("password-auth")).unwrap();
-        std::os::unix::fs::symlink("/etc/authselect/password-auth", cur.path().join("password-auth")).unwrap();
-        fs::write(new.path().join("password-auth"), b"auth  required  pam_unix.so\n").unwrap();
+        std::os::unix::fs::symlink(
+            "/etc/authselect/password-auth",
+            old.path().join("password-auth"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "/etc/authselect/password-auth",
+            cur.path().join("password-auth"),
+        )
+        .unwrap();
+        fs::write(
+            new.path().join("password-auth"),
+            b"auth  required  pam_unix.so\n",
+        )
+        .unwrap();
 
         merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
 
         let dest = out.path().join("password-auth");
         let meta = fs::symlink_metadata(&dest).unwrap();
-        assert!(meta.is_file(), "result must be a regular file, not a symlink");
+        assert!(
+            meta.is_file(),
+            "result must be a regular file, not a symlink"
+        );
         let content = fs::read(&dest).unwrap();
-        assert!(content.starts_with(b"auth"), "content must come from new image: {:?}", content);
+        assert!(
+            content.starts_with(b"auth"),
+            "content must come from new image: {:?}",
+            content
+        );
     }
 
     #[test]
@@ -536,7 +584,8 @@ mod tests {
         let out = tempdir().unwrap();
         fs::write(old.path().join("nsswitch.conf"), b"factory\n").unwrap();
         fs::write(cur.path().join("nsswitch.conf"), b"factory\n").unwrap();
-        std::os::unix::fs::symlink("/usr/etc/nsswitch.conf", new.path().join("nsswitch.conf")).unwrap();
+        std::os::unix::fs::symlink("/usr/etc/nsswitch.conf", new.path().join("nsswitch.conf"))
+            .unwrap();
 
         merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
 
@@ -556,14 +605,21 @@ mod tests {
         let new = tempdir().unwrap();
         let out = tempdir().unwrap();
         fs::write(old.path().join("resolv.conf"), b"factory\n").unwrap();
-        std::os::unix::fs::symlink("/run/NetworkManager/resolv.conf", cur.path().join("resolv.conf")).unwrap();
+        std::os::unix::fs::symlink(
+            "/run/NetworkManager/resolv.conf",
+            cur.path().join("resolv.conf"),
+        )
+        .unwrap();
         fs::write(new.path().join("resolv.conf"), b"factory\n").unwrap();
 
         merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
 
         let dest = out.path().join("resolv.conf");
         let meta = fs::symlink_metadata(&dest).unwrap();
-        assert!(meta.file_type().is_symlink(), "user's symlink modification must survive");
+        assert!(
+            meta.file_type().is_symlink(),
+            "user's symlink modification must survive"
+        );
         assert_eq!(
             fs::read_link(&dest).unwrap().to_string_lossy(),
             "/run/NetworkManager/resolv.conf"
@@ -580,7 +636,10 @@ mod tests {
         fs::write(cur.path().join("machine-id"), "CUR\n").unwrap();
         fs::write(new.path().join("machine-id"), "NEW\n").unwrap();
         merge_etc_files(old.path(), cur.path(), new.path(), out.path()).unwrap();
-        assert_eq!(fs::read_to_string(out.path().join("machine-id")).unwrap(), "CUR\n");
+        assert_eq!(
+            fs::read_to_string(out.path().join("machine-id")).unwrap(),
+            "CUR\n"
+        );
     }
 
     #[test]
@@ -594,20 +653,28 @@ mod tests {
         unix_fs::symlink(
             "/usr/lib/systemd/system/dbus-broker.service",
             etc.path().join("systemd/system/dbus.service"),
-        ).unwrap();
+        )
+        .unwrap();
         // Sibling symlink whose target DOES exist — must be preserved.
         unix_fs::symlink(
             "/usr/lib/systemd/system/getty@.service",
             etc.path().join("systemd/system/autovt@.service"),
-        ).unwrap();
+        )
+        .unwrap();
 
         fs::create_dir_all(target.path().join("usr/lib/systemd/system")).unwrap();
-        fs::write(target.path().join("usr/lib/systemd/system/getty@.service"), "").unwrap();
+        fs::write(
+            target.path().join("usr/lib/systemd/system/getty@.service"),
+            "",
+        )
+        .unwrap();
 
         let removed = prune_dangling_usr_symlinks(etc.path(), target.path()).unwrap();
         assert_eq!(removed, 1);
-        assert!(!etc.path().join("systemd/system/dbus.service").exists()
-                && fs::symlink_metadata(etc.path().join("systemd/system/dbus.service")).is_err());
+        assert!(
+            !etc.path().join("systemd/system/dbus.service").exists()
+                && fs::symlink_metadata(etc.path().join("systemd/system/dbus.service")).is_err()
+        );
         assert!(fs::symlink_metadata(etc.path().join("systemd/system/autovt@.service")).is_ok());
     }
 
@@ -623,7 +690,8 @@ mod tests {
         unix_fs::symlink(
             "/etc/authselect/password-auth",
             etc.path().join("pam.d/password-auth"),
-        ).unwrap();
+        )
+        .unwrap();
 
         let removed = prune_dangling_symlinks(etc.path(), target.path()).unwrap();
         assert_eq!(removed, 1);
@@ -793,9 +861,14 @@ mod tests {
 
         // The symlink should be preserved
         let link_meta = fs::symlink_metadata(out.join("link.txt")).unwrap();
-        assert!(link_meta.file_type().is_symlink(), "symlink should be preserved");
+        assert!(
+            link_meta.file_type().is_symlink(),
+            "symlink should be preserved"
+        );
         assert_eq!(
-            fs::read_link(out.join("link.txt")).unwrap().to_string_lossy(),
+            fs::read_link(out.join("link.txt"))
+                .unwrap()
+                .to_string_lossy(),
             "target.txt",
             "unchanged symlink target should carry forward"
         );
@@ -821,8 +894,11 @@ mod tests {
         merge_etc_files(&old, &cur, &new, &out).unwrap();
 
         let link_target = fs::read_link(out.join("my.link")).unwrap();
-        assert_eq!(link_target.to_string_lossy(), "my-custom-target",
-            "user-changed symlink target should be kept");
+        assert_eq!(
+            link_target.to_string_lossy(),
+            "my-custom-target",
+            "user-changed symlink target should be kept"
+        );
     }
 
     #[test]
@@ -859,8 +935,11 @@ mod tests {
         assert!(result.is_ok(), "merge should succeed: {:?}", result.err());
 
         let link_target = fs::read_link(out.join("custom.link")).unwrap();
-        assert_eq!(link_target.to_string_lossy(), "target-file",
-            "user-added symlink should be preserved");
+        assert_eq!(
+            link_target.to_string_lossy(),
+            "target-file",
+            "user-added symlink should be preserved"
+        );
     }
 
     #[test]
@@ -896,11 +975,22 @@ mod tests {
 
         merge_etc_files(&old, &cur, &new, &out).unwrap();
 
-        assert_eq!(fs::read_to_string(out.join("unchanged.cfg")).unwrap(), "new-upstream");
-        assert_eq!(fs::read_to_string(out.join("modified.cfg")).unwrap(), "my-changes");
-        assert_eq!(fs::read_to_string(out.join("sub/new-upstream.cfg")).unwrap(), "brand-new");
-        assert!(!out.join("sub/removed.cfg").exists(),
-            "source-only system file with no user changes should be dropped");
+        assert_eq!(
+            fs::read_to_string(out.join("unchanged.cfg")).unwrap(),
+            "new-upstream"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("modified.cfg")).unwrap(),
+            "my-changes"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("sub/new-upstream.cfg")).unwrap(),
+            "brand-new"
+        );
+        assert!(
+            !out.join("sub/removed.cfg").exists(),
+            "source-only system file with no user changes should be dropped"
+        );
     }
 
     #[test]

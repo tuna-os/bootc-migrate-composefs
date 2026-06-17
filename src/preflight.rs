@@ -1,10 +1,10 @@
+use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
 use std::ffi::CString;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::path::Path;
 use std::process::Command;
-use anyhow::{anyhow, Result, Context};
-use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +55,10 @@ pub struct PreflightReport {
 }
 
 pub fn get_free_space<P: AsRef<Path>>(path: P) -> Result<u64> {
-    let path_str = path.as_ref().to_str().ok_or_else(|| anyhow!("invalid path"))?;
+    let path_str = path
+        .as_ref()
+        .to_str()
+        .ok_or_else(|| anyhow!("invalid path"))?;
     let c_path = CString::new(path_str)?;
     let mut stats = MaybeUninit::<libc::statvfs>::uninit();
     let res = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
@@ -63,7 +66,11 @@ pub fn get_free_space<P: AsRef<Path>>(path: P) -> Result<u64> {
         return Err(std::io::Error::last_os_error()).context("statvfs failed");
     }
     let stats = unsafe { stats.assume_init() };
-    let block_size = if stats.f_frsize > 0 { stats.f_frsize } else { stats.f_bsize };
+    let block_size = if stats.f_frsize > 0 {
+        stats.f_frsize
+    } else {
+        stats.f_bsize
+    };
     Ok(block_size as u64 * stats.f_bavail as u64)
 }
 
@@ -90,7 +97,9 @@ fn get_ostree_repo_size() -> u64 {
     match Command::new("du").args(["-sb", ostree_repo]).output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.split_whitespace().next()
+            stdout
+                .split_whitespace()
+                .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0)
         }
@@ -105,8 +114,8 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
         .output()
         .context("failed to run bootc status")?;
     let is_bootc_ostree = if output.status.success() {
-        let status: BootcStatus = serde_json::from_slice(&output.stdout)
-            .context("failed to parse bootc status json")?;
+        let status: BootcStatus =
+            serde_json::from_slice(&output.stdout).context("failed to parse bootc status json")?;
         status.status.booted.and_then(|b| b.ostree).is_some()
     } else {
         false
@@ -127,7 +136,8 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
             if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
                 for line in mounts.lines() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 && parts[1] == path
+                    if parts.len() >= 3
+                        && parts[1] == path
                         && (parts[2] == "vfat" || parts[2] == "msdos")
                     {
                         esp_path = Some(path.to_string());
@@ -211,17 +221,20 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
     let sysroot_was_ro = if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
         mounts.lines().any(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.len() >= 4 && parts[1] == sysroot
-                && parts[3].split(',').any(|o| o == "ro")
+            parts.len() >= 4 && parts[1] == sysroot && parts[3].split(',').any(|o| o == "ro")
         })
     } else {
         false
     };
 
     let supports_reflink = if sysroot_was_ro {
-        let _ = Command::new("mount").args(["-o", "remount,rw", sysroot]).status();
+        let _ = Command::new("mount")
+            .args(["-o", "remount,rw", sysroot])
+            .status();
         let ok = check_reflink_support(sysroot);
-        let _ = Command::new("mount").args(["-o", "remount,ro", sysroot]).status();
+        let _ = Command::new("mount")
+            .args(["-o", "remount,ro", sysroot])
+            .status();
         ok
     } else {
         check_reflink_support(sysroot)

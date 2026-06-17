@@ -1,12 +1,16 @@
+use anyhow::{Context, Result};
+use sha2::{Digest, Sha512};
 use std::fs;
-use std::io::{Read, BufReader};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use sha2::{Sha512, Digest};
-use anyhow::{Result, Context};
 
 pub fn compute_sha512<P: AsRef<Path>>(path: P) -> Result<String> {
-    let file = fs::File::open(&path)
-        .with_context(|| format!("failed to open file for hashing: {}", path.as_ref().display()))?;
+    let file = fs::File::open(&path).with_context(|| {
+        format!(
+            "failed to open file for hashing: {}",
+            path.as_ref().display()
+        )
+    })?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha512::new();
     let mut buffer = [0; 65536];
@@ -47,7 +51,8 @@ pub fn scan_ostree_file_objects<P: AsRef<Path>>(repo_path: P) -> Result<Vec<Ostr
                     let file_entry = file_entry?;
                     let file_path = file_entry.path();
                     if file_path.is_file() {
-                        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let file_name =
+                            file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         // Check if it ends with .file
                         if file_name.ends_with(".file") {
                             let remaining_hex = &file_name[..file_name.len() - 5]; // remove ".file"
@@ -90,6 +95,9 @@ mod tests {
         assert_eq!(list[0].path, file_path);
 
         let hash = compute_sha512(&file_path).unwrap();
-        assert_eq!(hash, "6543084c6981d2d3e44d295d20adee4e5fa3fc1bb2b7d3ac80ca456b0141dfd75657ba40ea5ae398824b3a871c8b7762c8bdbcbc252fa7f358d33d90ee455d86");
+        assert_eq!(
+            hash,
+            "6543084c6981d2d3e44d295d20adee4e5fa3fc1bb2b7d3ac80ca456b0141dfd75657ba40ea5ae398824b3a871c8b7762c8bdbcbc252fa7f358d33d90ee455d86"
+        );
     }
 }

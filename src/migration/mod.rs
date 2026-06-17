@@ -1,27 +1,26 @@
+pub mod bootloader;
 pub mod kernel_options;
 pub mod os_release;
-pub mod bootloader;
 
+use crate::VerityDigest;
+use crate::preflight::PreflightReport;
+use crate::xattr;
+use anyhow::{Context, Result, anyhow};
+use kernel_options::get_kernel_options;
+use os_release::{bls_entry_filename, bls_entry_title, read_os_release};
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::{anyhow, Result, Context};
 use tempfile::TempDir;
-use crate::preflight::PreflightReport;
-use crate::VerityDigest;
-use crate::xattr;
-use kernel_options::get_kernel_options;
-use os_release::{read_os_release, bls_entry_filename, bls_entry_title};
 
 // ---- Lock file (Fix 8: concurrency guard) ----
 
 const LOCK_PATH: &str = "/var/run/bootc-migrate-composefs.lock";
 
 fn acquire_lock() -> Result<File> {
-    let lock = File::create(LOCK_PATH)
-        .context("failed to create lock file")?;
+    let lock = File::create(LOCK_PATH).context("failed to create lock file")?;
     let fd = lock.as_raw_fd();
     // F_OFD_SETLK: non-blocking exclusive lock, released on close/process exit.
     let mut fl: libc::flock = libc::flock {
@@ -55,7 +54,9 @@ struct MountGuard {
 
 impl MountGuard {
     fn new(mount_path: &Path) -> Self {
-        MountGuard { mount_path: mount_path.to_path_buf() }
+        MountGuard {
+            mount_path: mount_path.to_path_buf(),
+        }
     }
 }
 
@@ -169,8 +170,7 @@ fn setup_composefs_loopback_if_needed(report: &PreflightReport) -> Result<Option
         }
 
         // Mount.
-        fs::create_dir_all(target)
-            .context("failed to create /sysroot/composefs")?;
+        fs::create_dir_all(target).context("failed to create /sysroot/composefs")?;
         let status = Command::new("/usr/bin/mount")
             .args(["-o", "loop", img_path, target])
             .status()
@@ -204,7 +204,7 @@ fn detect_lvm() -> bool {
 /// fails to boot (see the warning message for the exact command).
 fn rebuild_initrd_with_lvm_if_needed(
     kver: &str,
-    mount_path: &Path,
+    _mount_path: &Path,
     initrd_dst: &Path,
     target_image: &str,
 ) -> Result<Option<String>> {
@@ -215,79 +215,104 @@ fn rebuild_initrd_with_lvm_if_needed(
     }
 
     let mods: Vec<&str> = if needs_lvm { vec!["lvm", "dm"] } else { vec![] };
-    let label = if needs_lvm && needs_xfs { "LVM+XFS" }
-                else if needs_lvm { "LVM" }
-                else { "XFS loopback" };
-    println!("[phase5] Rebuilding initrd with {} support via dracut...", label);
+    let label = if needs_lvm && needs_xfs {
+        "LVM+XFS"
+    } else if needs_lvm {
+        "LVM"
+    } else {
+        "XFS loopback"
+    };
+    println!(
+        "[phase5] Rebuilding initrd with {} support via dracut...",
+        label
+    );
 
     let dracut_path = ["/usr/bin/dracut", "/usr/sbin/dracut", "dracut"]
         .iter()
         .find(|&&p| Path::new(p).exists())
         .copied()
-        .ok_or_else(|| anyhow!(
-            "dracut not found; cannot rebuild initrd for {}.\n\
+        .ok_or_else(|| {
+            anyhow!(
+                "dracut not found; cannot rebuild initrd for {}.\n\
              Manual fix after booting OSTree fallback:\n\
              dracut --kver {} --add '{}' --force {}",
-            label, kver, mods.join(" "), initrd_dst.display()
-        ))?;
+                label,
+                kver,
+                mods.join(" "),
+                initrd_dst.display()
+            )
+        })?;
 
-    // Try to get kernel modules from the EROFS mount first (fast, no download).
-    // Kernel modules are small files (<1 MB) — well within the EROFS inline
-    // data threshold. Only fall back to registry extraction if the mount
-    // returns zero-filled content (detectable via a magic check).
-    let modules_src = mount_path.join("usr/lib/modules").join(kver);
-    let mut use_kmoddir = false;
-    let mut kmoddir_arg = modules_src.clone();
-    if modules_src.join("kernel").exists() {
-        // Spot-check: read the first 4 bytes of a known .ko to ensure it's
-        // not all zeros (EROFS fallback for large files past inline limit).
-        let test_ko = modules_src.join("kernel/fs/xfs/xfs.ko");
-        if let Ok(data) = fs::read(&test_ko) {
-            if data.len() > 4 && data[..4] != [0u8; 4] {
-                println!("[phase5] using kernel modules from EROFS mount (xfs.ko: {} bytes, non-zero)", data.len());
-                // EROFS mount gives real bytes — use --kmoddir directly.
-                use_kmoddir = true;
-            }
-        }
+    // Extract Dakota kernel modules via podman cp. The EROFS mount is in
+    // bare-EROFS mode (oci-config stream missing), so files beyond the inline
+    // data threshold read as zeros — we can't use the mount path for kmods.
+    // Prefer containers-storage: for locally cached images; otherwise use
+    // docker:// transport to pull from the registry.
+    let containers_ref = format!("containers-storage:{}", target_image);
+    let docker_ref = format!("docker://{}", target_image);
+    let image_ref: &str = if Command::new("podman")
+        .args(["image", "exists", target_image])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        &containers_ref
+    } else {
+        &docker_ref
+    };
+    let kmod_dir = TempDir::new_in("/var/tmp").context("failed to create kmod extract dir")?;
+    let container_src = format!("/usr/lib/modules/{}", kver);
+    println!(
+        "[phase5] extracting Dakota kernel modules via podman cp (ref: {})...",
+        image_ref
+    );
+    let kmod_target = kmod_dir.path().join("lib/modules");
+    fs::create_dir_all(&kmod_target)?;
+    let extract = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cid=$(podman create {}) && podman cp \"$cid:{}\" {} && podman rm \"$cid\"",
+            image_ref,
+            container_src,
+            kmod_target.display()
+        ))
+        .status()
+        .context("failed to extract kernel modules from podman")?;
+    if !extract.success() {
+        anyhow::bail!("podman cp for kernel modules failed");
     }
-    if !use_kmoddir {
-        // EROFS mount returns zeros for these files (they exceed inline
-        // threshold). Extract via podman cp — use containers-storage if
-        // the image is locally cached, otherwise pull from registry.
-        let containers_ref = format!("containers-storage:{}", target_image);
-        let has_local = Command::new("podman")
-            .args(["image", "exists", target_image])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        let image_ref = if has_local { &containers_ref } else { target_image };
-        let kmod_dir = TempDir::new_in("/var/tmp")
-            .context("failed to create kmod extract dir")?;
-        let container_src = format!("/usr/lib/modules/{}", kver);
-        println!("[phase5] extracting Dakota kernel modules via podman cp (ref: {})...", image_ref);
-        let kmod_target = kmod_dir.path().join("lib/modules");
-        fs::create_dir_all(&kmod_target)?;
-        let extract = Command::new("sh").arg("-c")
-            .arg(format!(
-                "cid=$(podman create {}) && podman cp \"$cid:{}\" {} && podman rm \"$cid\"",
-                image_ref, container_src, kmod_target.display()))
-            .status()
-            .context("failed to extract kernel modules from podman")?;
-        if !extract.success() {
-            anyhow::bail!("podman cp for kernel modules failed");
-        }
-        kmoddir_arg = kmod_target.join(kver);
-        if !kmoddir_arg.join("kernel").exists() {
-            anyhow::bail!("podman cp did not produce kernel modules at {}", kmoddir_arg.display());
-        }
-        println!("[phase5] extracted {} kernel modules via podman", kmoddir_arg.display());
+    let kmoddir_arg = kmod_target.join(kver);
+    if !kmoddir_arg.join("kernel").exists() {
+        anyhow::bail!(
+            "podman cp did not produce kernel modules at {}",
+            kmoddir_arg.display()
+        );
+    }
+    println!(
+        "[phase5] extracted {} kernel modules via podman",
+        kmoddir_arg.display()
+    );
+
+    // Run depmod so dracut can find all module dependencies.
+    if Command::new("depmod")
+        .args(["-b", kmod_dir.path().to_str().unwrap_or(""), kver])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        println!("[phase5] ran depmod on extracted kernel modules");
+    } else {
+        eprintln!("[phase5] Warning: depmod failed — dracut may not find all modules");
     }
 
-    // Rebuild with dracut for LVM/DM modules.
+    // Rebuild with dracut.
     let mods_str = mods.join(" ");
     let mut cmd = Command::new(dracut_path);
-    cmd.arg("--kver").arg(kver).arg("--force")
-       .arg("--kmoddir").arg(kmoddir_arg.to_str().unwrap_or(""));
+    cmd.arg("--kver")
+        .arg(kver)
+        .arg("--force")
+        .arg("--kmoddir")
+        .arg(kmoddir_arg.to_str().unwrap_or(""));
     cmd.env("DRACUT_KMODDIR_OVERRIDE", "1");
     if !mods.is_empty() {
         cmd.arg("--add").arg(&mods_str);
@@ -301,32 +326,55 @@ fn rebuild_initrd_with_lvm_if_needed(
     let mut extra_initrd: Option<String> = None;
     if needs_xfs {
         let xfs_cpio_dst = initrd_dst.with_file_name("xfs-mount.cpio");
-        let xfs_src = modules_src.join("kernel/fs/xfs/xfs.ko");
+        let xfs_src = kmoddir_arg.join("kernel/fs/xfs/xfs.ko");
         if xfs_src.exists() {
             let tmp = TempDir::new_in("/var/tmp")?;
-            let mod_dir = tmp.path().join("usr/lib/modules").join(kver).join("kernel/fs/xfs");
+            let mod_dir = tmp
+                .path()
+                .join("usr/lib/modules")
+                .join(kver)
+                .join("kernel/fs/xfs");
             fs::create_dir_all(&mod_dir)?;
             fs::copy(&xfs_src, mod_dir.join("xfs.ko"))?;
             let unit_dir = tmp.path().join("etc/systemd/system");
             fs::create_dir_all(&unit_dir)?;
-            fs::write(unit_dir.join("sysroot-composefs.mount"),
-                "[Unit]\nDescription=ComposeFS Loopback Mount\nAfter=sysroot.mount\nBefore=initrd-root-fs.target bootc-root-setup.service\nDefaultDependencies=no\n\n[Mount]\nWhat=/sysroot/composefs-loopback.ext4\nWhere=/sysroot/composefs\nType=ext4\nOptions=loop,ro\n\n[Install]\nWantedBy=initrd-root-fs.target\n")?;
-            if !Command::new("sh").arg("-c")
-                .arg(format!("cd {} && find . -mindepth 1 | cpio -o -H newc -R 0:0 > {}",
-                            tmp.path().display(), xfs_cpio_dst.display()))
-                .status()?.success() { return Err(anyhow!("cpio for xfs+mount")); }
-            println!("[phase5] wrote xfs.ko + mount unit to separate cpio: {}", xfs_cpio_dst.display());
-            // Return the initrd path relative to the boot dir for the BLS entry.
-            // Caller will add this as a second initrd= line.
-            extra_initrd = Some(xfs_cpio_dst.file_name()
-                .unwrap_or(std::ffi::OsStr::new("xfs-mount.cpio"))
-                .to_string_lossy().to_string());
+            fs::write(
+                unit_dir.join("sysroot-composefs.mount"),
+                "[Unit]\nDescription=ComposeFS Loopback Mount\nAfter=sysroot.mount\nBefore=initrd-root-fs.target bootc-root-setup.service\nDefaultDependencies=no\n\n[Mount]\nWhat=/sysroot/composefs-loopback.ext4\nWhere=/sysroot/composefs\nType=ext4\nOptions=loop,ro\n\n[Install]\nWantedBy=initrd-root-fs.target\n",
+            )?;
+            if !Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "cd {} && find . -mindepth 1 | cpio -o -H newc -R 0:0 > {}",
+                    tmp.path().display(),
+                    xfs_cpio_dst.display()
+                ))
+                .status()?
+                .success()
+            {
+                return Err(anyhow!("cpio for xfs+mount"));
+            }
+            println!(
+                "[phase5] wrote xfs.ko + mount unit to separate cpio: {}",
+                xfs_cpio_dst.display()
+            );
+            extra_initrd = Some(
+                xfs_cpio_dst
+                    .file_name()
+                    .unwrap_or(std::ffi::OsStr::new("xfs-mount.cpio"))
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
 
     match dracut_status {
         Ok(s) if s.success() => {
-            println!("[phase5] {}-enabled initrd staged at {}.", label, initrd_dst.display());
+            println!(
+                "[phase5] {}-enabled initrd staged at {}.",
+                label,
+                initrd_dst.display()
+            );
             Ok(extra_initrd)
         }
         Ok(s) => {
@@ -334,7 +382,11 @@ fn rebuild_initrd_with_lvm_if_needed(
                 "[phase5] Warning: dracut exited {:?} — initrd may lack {} support.\n\
                  If the system fails to boot, select the OSTree fallback entry and run:\n  \
                  dracut --kver {} --add '{}' --force {}",
-                s.code(), label, kver, mods_str, initrd_dst.display()
+                s.code(),
+                label,
+                kver,
+                mods_str,
+                initrd_dst.display()
             );
             Ok(extra_initrd)
         }
@@ -343,7 +395,11 @@ fn rebuild_initrd_with_lvm_if_needed(
                 "[phase5] Warning: dracut failed to run ({}) — initrd may lack {} support.\n\
                  If the system fails to boot, select the OSTree fallback entry and run:\n  \
                  dracut --kver {} --add '{}' --force {}",
-                e, label, kver, mods_str, initrd_dst.display()
+                e,
+                label,
+                kver,
+                mods_str,
+                initrd_dst.display()
             );
             Ok(extra_initrd)
         }
@@ -362,17 +418,15 @@ fn verify_migration(verity: &VerityDigest, report: &PreflightReport) -> Result<(
     if !origin_path.exists() {
         anyhow::bail!("Missing .origin file at {}", origin_path.display());
     }
-    let origin_text = fs::read_to_string(&origin_path)
-        .context("failed to read .origin file")?;
+    let origin_text = fs::read_to_string(&origin_path).context("failed to read .origin file")?;
     let _parsed = tini::Ini::from_string(&origin_text)
         .map_err(|e| anyhow!(".origin file is not valid INI: {e}"))?;
     println!("  ✓ .origin file is valid INI");
 
     // 2. Verify kernel (vmlinuz) is a valid bzImage, not zeros.
-    let esp_linux = Path::new("/boot/efi/EFI/Linux")
-        .join(format!("bootc_composefs-{}", verity.as_hex()));
-    let grub_boot = Path::new("/boot")
-        .join(format!("bootc_composefs-{}", verity.as_hex()));
+    let esp_linux =
+        Path::new("/boot/efi/EFI/Linux").join(format!("bootc_composefs-{}", verity.as_hex()));
+    let grub_boot = Path::new("/boot").join(format!("bootc_composefs-{}", verity.as_hex()));
     let vmlinuz = if esp_linux.join("vmlinuz").exists() {
         esp_linux.join("vmlinuz")
     } else if grub_boot.join("vmlinuz").exists() {
@@ -380,8 +434,8 @@ fn verify_migration(verity: &VerityDigest, report: &PreflightReport) -> Result<(
     } else {
         anyhow::bail!("vmlinuz not found in ESP or /boot");
     };
-    let magic = fs::read(&vmlinuz)
-        .with_context(|| format!("failed to read {}", vmlinuz.display()))?;
+    let magic =
+        fs::read(&vmlinuz).with_context(|| format!("failed to read {}", vmlinuz.display()))?;
     if magic.len() < 4 || &magic[..2] != b"MZ" {
         anyhow::bail!(
             "vmlinuz at {} is not a valid kernel (no MZ magic: {:02x?})",
@@ -424,7 +478,11 @@ fn verify_migration(verity: &VerityDigest, report: &PreflightReport) -> Result<(
 
     // 4. Verify BLS entry exists and references real files.
     let esp_entries = Path::new("/boot/efi/loader/entries");
-    let entries_dir: &Path = if esp_entries.exists() { esp_entries } else { Path::new("/boot/loader/entries") };
+    let entries_dir: &Path = if esp_entries.exists() {
+        esp_entries
+    } else {
+        Path::new("/boot/loader/entries")
+    };
     let mut found_bls = false;
     if let Ok(rd) = fs::read_dir(&entries_dir) {
         for entry in rd.flatten() {
@@ -475,14 +533,18 @@ pub fn run_migration(
             .status()
             .context("failed to execute mount remount,rw /sysroot")?;
         if !sysroot_status.success() {
-            return Err(anyhow!("failed to remount /sysroot read-write — cannot proceed with migration"));
+            return Err(anyhow!(
+                "failed to remount /sysroot read-write — cannot proceed with migration"
+            ));
         }
         let boot_status = Command::new("/usr/bin/mount")
             .args(["-o", "remount,rw", "/boot"])
             .status()
             .context("failed to execute mount remount,rw /boot")?;
         if !boot_status.success() {
-            return Err(anyhow!("failed to remount /boot read-write — cannot proceed with migration"));
+            return Err(anyhow!(
+                "failed to remount /boot read-write — cannot proceed with migration"
+            ));
         }
     } else {
         println!("[DRY RUN] Would remount /sysroot and /boot read-write.");
@@ -535,7 +597,13 @@ pub fn run_migration(
     let verity = phase3_create_image(&config_digest, dry_run)?;
 
     // ---- Phase 4: Stage deployment state ----
-    let _deploy_dir = phase4_stage_deploy(&verity, target_image, &_manifest_digest, &config_digest, dry_run)?;
+    let _deploy_dir = phase4_stage_deploy(
+        &verity,
+        target_image,
+        &_manifest_digest,
+        &config_digest,
+        dry_run,
+    )?;
 
     // ---- Phase 5: Setup bootloader ----
     phase5_setup_bootloader(report, &verity, target_image, dry_run, bootloader, force)?;
@@ -554,7 +622,9 @@ pub fn run_migration(
         println!("Primary bootloader: GRUB2 (BLS Type 1)");
     }
     println!("Please reboot the system to finalize the transition.");
-    println!("After successful boot, run 'bootc-migrate-composefs commit' to make composefs permanent.");
+    println!(
+        "After successful boot, run 'bootc-migrate-composefs commit' to make composefs permanent."
+    );
     Ok(())
 }
 
@@ -574,7 +644,10 @@ fn phase1_import_objects(report: &PreflightReport, dry_run: bool) -> Result<()> 
     println!("Found {} file objects to import.", total_objects);
 
     if dry_run {
-        println!("[DRY RUN] Would import {} objects into composefs store.", total_objects);
+        println!(
+            "[DRY RUN] Would import {} objects into composefs store.",
+            total_objects
+        );
         return Ok(());
     }
 
@@ -647,7 +720,10 @@ fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, Strin
         .unwrap_or(false);
 
     if has_local {
-        println!("Local podman cache found for {} — pulling from containers-storage...", target_image);
+        println!(
+            "Local podman cache found for {} — pulling from containers-storage...",
+            target_image
+        );
         // bootc supports `containers-storage:` transport which reads directly
         // from podman's local image store (~30s vs 10+ min from ghcr.io).
         let local_ref = format!("containers-storage:{}", target_image);
@@ -667,13 +743,16 @@ fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, Strin
             config_digest = pull_output.lines().next().unwrap_or("").trim().to_string();
         }
         let manifest_digest = config_digest.clone();
-        println!("Target image pulled from local cache. Config: {}", config_digest);
+        println!(
+            "Target image pulled from local cache. Config: {}",
+            config_digest
+        );
         return Ok((manifest_digest, config_digest));
     }
 
     println!("Pulling target image: {}...", target_image);
-    let pull_output = crate::composefs::pull_image(target_image)
-        .context("failed to pull OCI image")?;
+    let pull_output =
+        crate::composefs::pull_image(target_image).context("failed to pull OCI image")?;
 
     let mut manifest_digest = String::new();
     let mut config_digest = String::new();
@@ -692,7 +771,10 @@ fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, Strin
     if config_digest.is_empty() {
         config_digest = manifest_digest.clone();
     }
-    println!("Target image pulled. Manifest: {}, Config: {}", manifest_digest, config_digest);
+    println!(
+        "Target image pulled. Manifest: {}, Config: {}",
+        manifest_digest, config_digest
+    );
     Ok((manifest_digest, config_digest))
 }
 
@@ -702,8 +784,13 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<VerityDiges
     println!("=== Phase 3: Creating ComposeFS EROFS Image ===");
 
     if dry_run {
-        println!("[DRY RUN] Would create and seal composefs image for config: {}", config_digest);
-        return Ok(VerityDigest::from_hex("dryrun0000000000000000000000000000000000000000000000000000000000"));
+        println!(
+            "[DRY RUN] Would create and seal composefs image for config: {}",
+            config_digest
+        );
+        return Ok(VerityDigest::from_hex(
+            "dryrun0000000000000000000000000000000000000000000000000000000000",
+        ));
     }
 
     // Fix 10: real idempotency — check if the image already exists AND is sealed.
@@ -713,7 +800,10 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<VerityDiges
         .context("failed to create composefs image")?;
 
     let verity = VerityDigest::from_prefixed_or_hex(&sha512_verity_str);
-    println!("ComposeFS EROFS image created. Verity digest: {}", verity.as_hex());
+    println!(
+        "ComposeFS EROFS image created. Verity digest: {}",
+        verity.as_hex()
+    );
 
     // The `bootc internals cfs seal` command creates the `oci-config-<verity>`
     // stream in the composefs object store, which the initramfs needs for
@@ -722,8 +812,7 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<VerityDiges
     // causing missing unit files like dbus.service and cascading boot failures).
     // Always seal — idempotency is handled inside bootc.
     println!("Sealing composefs image...");
-    crate::composefs::seal_image(config_digest)
-        .context("failed to seal composefs image")?;
+    crate::composefs::seal_image(config_digest).context("failed to seal composefs image")?;
     println!("Image sealed successfully.");
 
     Ok(verity)
@@ -733,7 +822,11 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<VerityDiges
 
 /// Build the `.origin` file content that bootc parses to identify a composefs
 /// deployment. Uses `tini::Ini` for byte-compatible output with bootc's parser.
-fn build_origin_content(target_image: &str, verity: &VerityDigest, manifest_digest: &str) -> String {
+fn build_origin_content(
+    target_image: &str,
+    verity: &VerityDigest,
+    manifest_digest: &str,
+) -> String {
     // Schema must match bootc's canonical layout (crates/lib/src/composefs_consts.rs):
     //   [origin] container-image-reference = ...
     //   [boot]   boot_type = bls
@@ -778,7 +871,10 @@ fn phase4_stage_deploy(
     let deploy_dir = Path::new("/sysroot/state/deploy").join(verity.as_hex());
 
     if dry_run {
-        println!("[DRY RUN] Would stage deployment at: {}", deploy_dir.display());
+        println!(
+            "[DRY RUN] Would stage deployment at: {}",
+            deploy_dir.display()
+        );
         return Ok(deploy_dir);
     }
 
@@ -789,7 +885,10 @@ fn phase4_stage_deploy(
     // post-reboot validation.
     let origin_path = deploy_dir.join(format!("{}.origin", verity.as_hex()));
     if deploy_dir.exists() && origin_path.exists() {
-        println!("Deployment already staged at {}. Skipping Phase 4.", deploy_dir.display());
+        println!(
+            "Deployment already staged at {}. Skipping Phase 4.",
+            deploy_dir.display()
+        );
         return Ok(deploy_dir);
     }
 
@@ -801,7 +900,10 @@ fn phase4_stage_deploy(
     // 3-way /etc merge (#4)
     println!("Performing 3-way /etc merge...");
     if let Err(e) = perform_etc_merge(verity, target_image, &etc_dir) {
-        eprintln!("3-way /etc merge failed ({}), falling back to flat /etc copy.", e);
+        eprintln!(
+            "3-way /etc merge failed ({}), falling back to flat /etc copy.",
+            e
+        );
         xattr::copy_dir_all_with_xattrs("/etc", &etc_dir)
             .context("failed to copy /etc (fallback)")?;
     }
@@ -826,15 +928,18 @@ fn phase4_stage_deploy(
     //   the registry without a separate .imginfo file (`bootc internals cfs oci
     //   inspect` is unreliable in our flow, see [HANDOFF.md]).
     let origin_content = build_origin_content(target_image, verity, manifest_digest);
-    fs::write(&origin_path, &origin_content)
-        .context("failed to write .origin file")?;
+    fs::write(&origin_path, &origin_content).context("failed to write .origin file")?;
 
     // Write .imginfo file
     println!("Writing .imginfo file...");
     if let Ok(config_json) = crate::migration::inspect_image(config_digest) {
         let imginfo_path = deploy_dir.join(format!("{}.imginfo", verity.as_hex()));
         if let Err(e) = fs::write(&imginfo_path, &config_json) {
-            eprintln!("Warning: failed to write .imginfo file ({}): {}", imginfo_path.display(), e);
+            eprintln!(
+                "Warning: failed to write .imginfo file ({}): {}",
+                imginfo_path.display(),
+                e
+            );
         }
     }
 
@@ -850,11 +955,12 @@ fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()> {
 
     // Check if /var is already populated (idempotency)
     if target_var.exists() {
-        let count = fs::read_dir(target_var)
-            .map(|d| d.count())
-            .unwrap_or(0);
+        let count = fs::read_dir(target_var).map(|d| d.count()).unwrap_or(0);
         if count > 0 {
-            println!("/var already populated at {}. Skipping var migration.", target_var.display());
+            println!(
+                "/var already populated at {}. Skipping var migration.",
+                target_var.display()
+            );
             return Ok(());
         }
     }
@@ -877,7 +983,10 @@ fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()> {
         "/var"
     };
 
-    println!("Migrating /var data from {} to ComposeFS state...", source_var);
+    println!(
+        "Migrating /var data from {} to ComposeFS state...",
+        source_var
+    );
     xattr::copy_dir_all_with_xattrs(source_var, &target_var)
         .context("failed to migrate /var data to ComposeFS state")?;
     println!("/var data migrated successfully.");
@@ -930,16 +1039,15 @@ fn resolve_device_uuid(device: &str) -> Option<String> {
 
 /// Perform 3-way /etc merge: old OSTree default, current live /etc, new ComposeFS default.
 fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) -> Result<()> {
-    let temp_mount = TempDir::new_in("/var/tmp")
-        .context("failed to create temp mount directory")?;
+    let temp_mount =
+        TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
     let mount_path = temp_mount.path().to_path_buf();
 
     // Mount the new EROFS image — we still need it to validate the prune
     // step's /usr/* symlink targets. EROFS mount lists directory contents
     // correctly (it's the file *content* past the inline threshold that
     // reads as zeros), so symlink-target existence checks work fine here.
-    mount_image(verity.as_hex(), &mount_path)
-        .context("failed to mount EROFS for etc merge")?;
+    mount_image(verity.as_hex(), &mount_path).context("failed to mount EROFS for etc merge")?;
     let _guard = MountGuard::new(&mount_path);
 
     let old_default_etc = find_ostree_etc_default()?;
@@ -956,7 +1064,10 @@ fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) 
     let etc_entry_count = fs::read_dir(&new_default_etc)
         .map(|d| d.count())
         .unwrap_or(0);
-    println!("[phase4] using EROFS /etc for merge source ({} entries)", etc_entry_count);
+    println!(
+        "[phase4] using EROFS /etc for merge source ({} entries)",
+        etc_entry_count
+    );
 
     crate::mergetc::merge_etc_files(&old_default_etc, current_etc, &new_default_etc, etc_dir)
         .context("3-way /etc merge failed")?;
@@ -1059,7 +1170,9 @@ fn ensure_e2e_ssh_socket(etc_dir: &Path) -> Result<()> {
     let remount_enable = systemd_dir.join("local-fs.target.wants/ostree-remount.service");
     if remount_enable.exists() || remount_enable.is_symlink() {
         fs::remove_file(&remount_enable)?;
-        println!("[phase4] removed ostree-remount.service enablement (composefs doesn't need OSTree bind mounts)");
+        println!(
+            "[phase4] removed ostree-remount.service enablement (composefs doesn't need OSTree bind mounts)"
+        );
     }
 
     println!("[phase4] ensured e2e-sshd.socket in deploy /etc");
@@ -1071,8 +1184,8 @@ fn ensure_e2e_ssh_socket(etc_dir: &Path) -> Result<()> {
 /// subtree extract subsumes it.
 #[allow(dead_code)]
 fn supplement_identity_dbs_from_registry(target_image: &str, etc_dir: &Path) -> Result<()> {
-    let scratch = TempDir::new_in("/var/tmp")
-        .context("failed to create temp dir for identity-DB extract")?;
+    let scratch =
+        TempDir::new_in("/var/tmp").context("failed to create temp dir for identity-DB extract")?;
     let scratch_etc = scratch.path().join("etc");
     fs::create_dir_all(&scratch_etc).context("failed to create scratch etc dir")?;
 
@@ -1193,7 +1306,9 @@ pub fn inspect_image(image_id: &str) -> Result<String> {
 }
 
 pub fn mount_image(image_id: &str, mount_path: &Path) -> Result<()> {
-    let mount_str = mount_path.to_str().ok_or_else(|| anyhow!("invalid mount path"))?;
+    let mount_str = mount_path
+        .to_str()
+        .ok_or_else(|| anyhow!("invalid mount path"))?;
 
     // Always prefer the bootc composefs overlay mount: it stacks the EROFS
     // metadata layer on top of the content-addressed object tree at
@@ -1202,7 +1317,15 @@ pub fn mount_image(image_id: &str, mount_path: &Path) -> Result<()> {
     // file contents are zero-filled), which silently corrupts every artifact
     // Phase 5 copies out of the mount (kernel, initrd, systemd-bootx64.efi…).
     let output = Command::new("bootc")
-        .args(["internals", "cfs", "--system", "oci", "mount", image_id, mount_str])
+        .args([
+            "internals",
+            "cfs",
+            "--system",
+            "oci",
+            "mount",
+            image_id,
+            mount_str,
+        ])
         .output()
         .context("failed to execute bootc internals cfs oci mount")?;
     if output.status.success() {
@@ -1216,8 +1339,14 @@ pub fn mount_image(image_id: &str, mount_path: &Path) -> Result<()> {
     let image_path = Path::new("/sysroot/composefs/images").join(image_id);
     if image_path.exists() {
         let fallback = Command::new("/usr/bin/mount")
-            .args(["-t", "erofs", "-o", "ro,loop",
-                   image_path.to_str().unwrap_or(""), mount_str])
+            .args([
+                "-t",
+                "erofs",
+                "-o",
+                "ro,loop",
+                image_path.to_str().unwrap_or(""),
+                mount_str,
+            ])
             .output()
             .context("failed to mount erofs image (bootc cfs fallback)")?;
         if fallback.status.success() {
@@ -1266,11 +1395,16 @@ fn phase5_setup_bootloader(
     };
     if entries_check.exists() {
         let has_existing = fs::read_dir(&entries_check)
-            .map(|d| d.filter_map(|e| e.ok())
-                 .any(|e| e.file_name().to_string_lossy().starts_with("bootc_")))
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with("bootc_"))
+            })
             .unwrap_or(false);
         if has_existing && !force {
-            println!("BLS entries already present in {}. Skipping Phase 5.", entries_check.display());
+            println!(
+                "BLS entries already present in {}. Skipping Phase 5.",
+                entries_check.display()
+            );
             return Ok(());
         }
         if has_existing && force {
@@ -1286,8 +1420,8 @@ fn phase5_setup_bootloader(
         }
     }
 
-    let temp_mount = TempDir::new_in("/var/tmp")
-        .context("failed to create temp mount directory")?;
+    let temp_mount =
+        TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
     let mount_path = temp_mount.path().to_path_buf();
 
     if dry_run {
@@ -1319,15 +1453,16 @@ fn phase5_setup_bootloader(
     let initrd_src = if mounted_initrd.exists() {
         mounted_initrd
     } else {
-        mount_path.join("boot").join(format!("initramfs-{}.img", kver))
+        mount_path
+            .join("boot")
+            .join(format!("initramfs-{}.img", kver))
     };
 
     // Read target os-release for BLS naming (#6)
-    let target_os = read_os_release(&mount_path)
-        .unwrap_or_else(|_| os_release::OsRelease {
-            id: "linux".into(),
-            version_id: String::new(),
-        });
+    let target_os = read_os_release(&mount_path).unwrap_or_else(|_| os_release::OsRelease {
+        id: "linux".into(),
+        version_id: String::new(),
+    });
 
     let options_str = get_kernel_options(verity.as_hex())?;
 
@@ -1372,17 +1507,27 @@ fn phase5_setup_bootloader(
                 } else {
                     esp_initrd = PathBuf::new();
                 }
-                extract_files_via_registry(target_image, &extract)
-                    .context("failed to extract kernel/initrd from target image via registry stream")?;
+                extract_files_via_registry(target_image, &extract).context(
+                    "failed to extract kernel/initrd from target image via registry stream",
+                )?;
 
                 // Rebuild initrd with LVM support if the source system uses LVM.
                 // Must happen before patch_origin_boot_digest so the hash covers
                 // the LVM-enabled initrd bytes, not the original Dakota initrd.
                 let mut extra_initrd_name: Option<String> = None;
                 if have_initrd {
-                    match rebuild_initrd_with_lvm_if_needed(&kver, &mount_path, &esp_initrd, target_image) {
-                        Ok(extra) => { extra_initrd_name = extra; }
-                        Err(e) => { eprintln!("[phase5] Warning: initrd rebuild failed: {e:#}"); }
+                    match rebuild_initrd_with_lvm_if_needed(
+                        &kver,
+                        &mount_path,
+                        &esp_initrd,
+                        target_image,
+                    ) {
+                        Ok(extra) => {
+                            extra_initrd_name = extra;
+                        }
+                        Err(e) => {
+                            eprintln!("[phase5] Warning: initrd rebuild failed: {e:#}");
+                        }
                     }
                 }
 
@@ -1432,16 +1577,16 @@ fn phase5_setup_bootloader(
                     fs::rename(
                         staged_dir.join(&entry.filename),
                         entries_dir.join(&entry.filename),
-                    ).with_context(|| format!("failed to promote ESP BLS entry: {}", entry.filename))?;
+                    )
+                    .with_context(|| {
+                        format!("failed to promote ESP BLS entry: {}", entry.filename)
+                    })?;
                 }
 
                 // loader.conf: composefs is the default, 3s timeout so the user can pick the
                 // OSTree fallback during the evaluation window.
                 let default_id = composefs_entry.filename.trim_end_matches(".conf");
-                let loader_conf = format!(
-                    "default {}\ntimeout 3\nconsole-mode keep\n",
-                    default_id
-                );
+                let loader_conf = format!("default {}\ntimeout 3\nconsole-mode keep\n", default_id);
                 fs::write(esp_path.join("loader/loader.conf"), loader_conf)
                     .context("failed to write loader.conf")?;
 
@@ -1479,7 +1624,8 @@ fn phase5_setup_bootloader(
             .with_context(|| format!("vmlinuz {:?} not under mount", vmlinuz_src))?;
         let in_container_vmlinuz = Path::new("/").join(rel_vmlinuz);
         let grub_vmlinuz = grub_boot_dir.join("vmlinuz");
-        let mut grub_extract: Vec<(&Path, &Path)> = vec![(in_container_vmlinuz.as_path(), grub_vmlinuz.as_path())];
+        let mut grub_extract: Vec<(&Path, &Path)> =
+            vec![(in_container_vmlinuz.as_path(), grub_vmlinuz.as_path())];
 
         let have_grub_initrd = initrd_src.exists();
         let in_container_initrd;
@@ -1497,15 +1643,21 @@ fn phase5_setup_bootloader(
         if have_grub_initrd {
             grub_extract.push((in_container_initrd.as_path(), grub_initrd_path.as_path()));
         }
-        extract_files_via_registry(target_image, &grub_extract)
-            .context("failed to extract kernel/initrd from target image via registry stream (grub2 path)")?;
+        extract_files_via_registry(target_image, &grub_extract).context(
+            "failed to extract kernel/initrd from target image via registry stream (grub2 path)",
+        )?;
 
         let mut extra_initrd_grub: Option<String> = None;
         if have_grub_initrd {
             let grub_initrd = grub_boot_dir.join("initrd");
-            match rebuild_initrd_with_lvm_if_needed(&kver, &mount_path, &grub_initrd, target_image) {
-                Ok(extra) => { extra_initrd_grub = extra; }
-                Err(e) => { eprintln!("[phase5] Warning: initrd rebuild failed: {e:#}"); }
+            match rebuild_initrd_with_lvm_if_needed(&kver, &mount_path, &grub_initrd, target_image)
+            {
+                Ok(extra) => {
+                    extra_initrd_grub = extra;
+                }
+                Err(e) => {
+                    eprintln!("[phase5] Warning: initrd rebuild failed: {e:#}");
+                }
             }
         }
 
@@ -1597,17 +1749,14 @@ fn phase5_setup_bootloader(
         if !found {
             new_cfg.push_str("GRUB_DEFAULT=saved\n");
         }
-        fs::write(grub_defaults_path, &new_cfg)
-            .context("failed to write /etc/default/grub")?;
+        fs::write(grub_defaults_path, &new_cfg).context("failed to write /etc/default/grub")?;
 
         // Inject set default="${saved_entry}" into grub.cfg (Fix 4: propagate error)
         let grub_cfg_path = "/boot/grub2/grub.cfg";
         if let Ok(cfg) = fs::read_to_string(grub_cfg_path) {
             if !cfg.contains("set default=\"${saved_entry}\"") {
-                let patched = cfg.replace(
-                    "\nblscfg\n",
-                    "\nset default=\"${saved_entry}\"\nblscfg\n",
-                );
+                let patched =
+                    cfg.replace("\nblscfg\n", "\nset default=\"${saved_entry}\"\nblscfg\n");
                 if patched != cfg {
                     fs::write(grub_cfg_path, &patched)
                         .context("failed to write patched grub.cfg")?;
@@ -1658,9 +1807,7 @@ fn try_extract_from_podman(image_ref: &str, files: &[(&Path, &Path)]) -> bool {
         .args(["create", "--name", "migrate-extract", image_ref])
         .output();
     let container_id = match create {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return false,
     };
     if container_id.is_empty() {
@@ -1673,21 +1820,28 @@ fn try_extract_from_podman(image_ref: &str, files: &[(&Path, &Path)]) -> bool {
     let tmp_dir = match TempDir::new_in("/var/tmp") {
         Ok(t) => t,
         Err(_) => {
-            let _ = Command::new("podman").args(["rm", "-f", "migrate-extract"]).status();
+            let _ = Command::new("podman")
+                .args(["rm", "-f", "migrate-extract"])
+                .status();
             return false;
         }
     };
     let mut all_ok = true;
     for (src, dst) in files {
         let src_str = src.to_string_lossy();
-        let basename = src.file_name()
+        let basename = src
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "extracted".into());
         let tmp_dst = tmp_dir.path().join(&basename);
 
         println!("[extract] podman cp {} -> /var/tmp/...", src_str);
         let cp = Command::new("podman")
-            .args(["cp", &format!("{}:{}", container_id, src_str), tmp_dst.to_str().unwrap_or("")])
+            .args([
+                "cp",
+                &format!("{}:{}", container_id, src_str),
+                tmp_dst.to_str().unwrap_or(""),
+            ])
             .status();
         match cp {
             Ok(s) if s.success() => {
@@ -1707,7 +1861,9 @@ fn try_extract_from_podman(image_ref: &str, files: &[(&Path, &Path)]) -> bool {
     }
 
     // Clean up the container.
-    let _ = Command::new("podman").args(["rm", "-f", "migrate-extract"]).status();
+    let _ = Command::new("podman")
+        .args(["rm", "-f", "migrate-extract"])
+        .status();
 
     if all_ok {
         println!("[extract] all files extracted from local podman cache");
@@ -1717,7 +1873,11 @@ fn try_extract_from_podman(image_ref: &str, files: &[(&Path, &Path)]) -> bool {
 
 fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> Result<()> {
     let file_list: Vec<String> = files.iter().map(|(s, _)| s.display().to_string()).collect();
-    println!("[extract] Extracting {} file(s): {}", files.len(), file_list.join(", "));
+    println!(
+        "[extract] Extracting {} file(s): {}",
+        files.len(),
+        file_list.join(", ")
+    );
 
     // Try podman cache first — extracts from local storage in seconds vs
     // downloading 120 layers from ghcr.io.
@@ -1782,7 +1942,10 @@ fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> Resu
             .ok_or_else(|| anyhow!("layer entry has no digest"))?;
         let short_digest = &digest[..digest.len().min(12)];
 
-        println!("[registry] Downloading layer {}/{} ({})...", layer_idx, total_layers, short_digest);
+        println!(
+            "[registry] Downloading layer {}/{} ({})...",
+            layer_idx, total_layers, short_digest
+        );
 
         // Download just this one layer, extract from it, drop it.
         let blob_path = scratch.path().join("layer.blob");
@@ -1791,12 +1954,21 @@ fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> Resu
             .with_context(|| format!("failed to fetch layer {}", digest))?;
 
         let blob_size = fs::metadata(&blob_path).map(|m| m.len()).unwrap_or(0);
-        println!("[registry] Layer {}/{} downloaded ({} MB), extracting...", layer_idx, total_layers, blob_size / 1_048_576);
+        println!(
+            "[registry] Layer {}/{} downloaded ({} MB), extracting...",
+            layer_idx,
+            total_layers,
+            blob_size / 1_048_576
+        );
 
         let mut still_needed: Vec<(&Path, &Path)> = Vec::new();
         for (src, dst) in remaining.into_iter() {
             if extract_one_from_layer(&blob_path, src, dst)? {
-                println!("[registry]   ✓ found {} in layer {}", src.display(), short_digest);
+                println!(
+                    "[registry]   ✓ found {} in layer {}",
+                    src.display(),
+                    short_digest
+                );
             } else {
                 still_needed.push((src, dst));
             }
@@ -1825,10 +1997,8 @@ fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> Resu
 fn patch_origin_boot_digest(verity: &VerityDigest, vmlinuz: &Path, initrd: &Path) -> Result<()> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    let v = fs::read(vmlinuz)
-        .with_context(|| format!("reading vmlinuz {}", vmlinuz.display()))?;
-    let i = fs::read(initrd)
-        .with_context(|| format!("reading initrd {}", initrd.display()))?;
+    let v = fs::read(vmlinuz).with_context(|| format!("reading vmlinuz {}", vmlinuz.display()))?;
+    let i = fs::read(initrd).with_context(|| format!("reading initrd {}", initrd.display()))?;
     hasher.update(&v);
     hasher.update(&i);
     let raw = hasher.finalize();
@@ -1894,12 +2064,14 @@ fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) 
         .tempdir_in("/var/tmp")
         .context("failed to create /var/tmp scratch dir for subtree streaming")?;
 
-    fs::create_dir_all(dst_dir).with_context(|| {
-        format!("failed to create subtree destination {}", dst_dir.display())
-    })?;
+    fs::create_dir_all(dst_dir)
+        .with_context(|| format!("failed to create subtree destination {}", dst_dir.display()))?;
 
     let total_layers = layers.len();
-    println!("[registry] Extracting subtree {} from {} ({} layer(s))...", subtree, image_ref, total_layers);
+    println!(
+        "[registry] Extracting subtree {} from {} ({} layer(s))...",
+        subtree, image_ref, total_layers
+    );
 
     // Iterate oldest → newest so later writes win.
     let mut layer_idx = 0usize;
@@ -1911,7 +2083,10 @@ fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) 
             .ok_or_else(|| anyhow!("layer entry has no digest"))?;
         let short_digest = &digest[..digest.len().min(12)];
 
-        println!("[registry] Downloading subtree layer {}/{} ({})...", layer_idx, total_layers, short_digest);
+        println!(
+            "[registry] Downloading subtree layer {}/{} ({})...",
+            layer_idx, total_layers, short_digest
+        );
 
         let blob_path = scratch.path().join("layer.blob");
         endpoint
@@ -1919,7 +2094,12 @@ fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) 
             .with_context(|| format!("failed to fetch layer {}", digest))?;
 
         let blob_size = fs::metadata(&blob_path).map(|m| m.len()).unwrap_or(0);
-        println!("[registry] Subtree layer {}/{} downloaded ({} MB), extracting...", layer_idx, total_layers, blob_size / 1_048_576);
+        println!(
+            "[registry] Subtree layer {}/{} downloaded ({} MB), extracting...",
+            layer_idx,
+            total_layers,
+            blob_size / 1_048_576
+        );
 
         // tar will silently produce no output if the prefix is absent in this layer.
         // --strip-components=1 drops the leading directory we asked for so the
@@ -1930,9 +2110,13 @@ fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) 
             let _ = Command::new("tar")
                 .args([
                     "-xaf",
-                    blob_path.to_str().ok_or_else(|| anyhow!("invalid blob path"))?,
+                    blob_path
+                        .to_str()
+                        .ok_or_else(|| anyhow!("invalid blob path"))?,
                     "-C",
-                    dst_dir.to_str().ok_or_else(|| anyhow!("invalid dst path"))?,
+                    dst_dir
+                        .to_str()
+                        .ok_or_else(|| anyhow!("invalid dst path"))?,
                     "--overwrite",
                     "--no-same-owner",
                     "--strip-components=1",
@@ -1990,10 +2174,7 @@ impl RegistryEndpoint {
     }
 
     fn fetch_manifest(&self, reference: &str) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/v2/{}/manifests/{}",
-            self.base_url, self.repo, reference
-        );
+        let url = format!("{}/v2/{}/manifests/{}", self.base_url, self.repo, reference);
         let mut args: Vec<String> = vec![
             "-sSL".into(),
             "--fail".into(),
@@ -2107,11 +2288,7 @@ fn probe_v2(base_url: &str, repo: &str) -> Result<Option<String>> {
         let token = fetch_bearer_token(challenge, repo)?;
         return Ok(Some(token));
     }
-    Err(anyhow!(
-        "unexpected status from {}: {}",
-        url,
-        status_code
-    ))
+    Err(anyhow!("unexpected status from {}: {}", url, status_code))
 }
 
 /// Parse a `Www-Authenticate: Bearer realm="...",service="...",scope="..."` line and
@@ -2159,8 +2336,8 @@ fn fetch_bearer_token(challenge: &str, repo: &str) -> Result<String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let body: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .context("token endpoint did not return JSON")?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("token endpoint did not return JSON")?;
     let token = body
         .get("token")
         .or_else(|| body.get("access_token"))
@@ -2221,7 +2398,10 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
     for candidate in &candidates {
         // Stream directly to disk — initrds can be ~200 MB, no reason to buffer.
         let dst_file = fs::File::create(dst).with_context(|| {
-            format!("failed to open destination {} for tar extract", dst.display())
+            format!(
+                "failed to open destination {} for tar extract",
+                dst.display()
+            )
         })?;
         let status = Command::new("tar")
             .args([
@@ -2315,10 +2495,14 @@ fn register_systemd_boot_nvram(esp_path: &str) {
     let status = Command::new("efibootmgr")
         .args([
             "--create",
-            "--disk", &disk,
-            "--part", &part,
-            "--loader", "\\EFI\\systemd\\systemd-bootx64.efi",
-            "--label", "Linux Boot Manager",
+            "--disk",
+            &disk,
+            "--part",
+            &part,
+            "--loader",
+            "\\EFI\\systemd\\systemd-bootx64.efi",
+            "--label",
+            "Linux Boot Manager",
         ])
         .status();
     match status {
@@ -2358,7 +2542,8 @@ fn build_ostree_fallback_on_esp(esp_path: &Path) -> Result<bootloader::BlsEntry>
     }
 
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    let options: Vec<&str> = cmdline.split_whitespace()
+    let options: Vec<&str> = cmdline
+        .split_whitespace()
         .filter(|w| !w.starts_with("composefs="))
         .collect();
 
@@ -2397,7 +2582,8 @@ fn build_ostree_fallback_entry() -> Result<bootloader::BlsEntry> {
     }
 
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    let options: Vec<&str> = cmdline.split_whitespace()
+    let options: Vec<&str> = cmdline
+        .split_whitespace()
         .filter(|w| !w.starts_with("composefs="))
         .collect();
 
@@ -2517,7 +2703,10 @@ fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> {
         }
     }
     // device-mapper, LVM, or other complex paths — skip efibootmgr registration.
-    eprintln!("Warning: cannot parse ESP device path '{}' — skipping efibootmgr registration.", source);
+    eprintln!(
+        "Warning: cannot parse ESP device path '{}' — skipping efibootmgr registration.",
+        source
+    );
     None
 }
 
@@ -2562,10 +2751,15 @@ mod tests {
         // Must parse back successfully
         let parsed = tini::Ini::from_string(&content).expect("origin content must be valid INI");
         assert_eq!(
-            parsed.get::<String>("origin", "container-image-reference").as_deref(),
+            parsed
+                .get::<String>("origin", "container-image-reference")
+                .as_deref(),
             Some("ostree-unverified-image:docker://ghcr.io/projectbluefin/dakota:stable")
         );
-        assert_eq!(parsed.get::<String>("boot", "boot_type").as_deref(), Some("bls"));
+        assert_eq!(
+            parsed.get::<String>("boot", "boot_type").as_deref(),
+            Some("bls")
+        );
         assert_eq!(
             parsed.get::<String>("boot", "digest").as_deref(),
             Some("9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd"),
@@ -2594,8 +2788,7 @@ mod tests {
             "9af734da164df0edb34a200a55bf4a6426afbc80f66e5fb7c73ecfdd17b19dbd",
         );
         let original = build_origin_content("img:latest", &verity, "sha256:disc");
-        let patched =
-            patch_boot_digest_in_content(&original, "abcdef1234567890").unwrap();
+        let patched = patch_boot_digest_in_content(&original, "abcdef1234567890").unwrap();
 
         let parsed = tini::Ini::from_string(&patched).unwrap();
         assert_eq!(
@@ -2610,21 +2803,29 @@ mod tests {
         let verity = VerityDigest::from_hex(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         );
-        let original = build_origin_content(
-            "ghcr.io/example/target:v1",
-            &verity,
-            "sha256:manifest123",
-        );
+        let original =
+            build_origin_content("ghcr.io/example/target:v1", &verity, "sha256:manifest123");
         let patched = patch_boot_digest_in_content(&original, "newdigest111").unwrap();
 
         let parsed = tini::Ini::from_string(&patched).unwrap();
         assert_eq!(
-            parsed.get::<String>("origin", "container-image-reference").as_deref(),
+            parsed
+                .get::<String>("origin", "container-image-reference")
+                .as_deref(),
             Some("ostree-unverified-image:docker://ghcr.io/example/target:v1")
         );
-        assert_eq!(parsed.get::<String>("boot", "boot_type").as_deref(), Some("bls"));
-        assert_eq!(parsed.get::<String>("image", "manifest_digest").as_deref(), Some("sha256:manifest123"));
-        assert_eq!(parsed.get::<String>("boot", "digest").as_deref(), Some("newdigest111"));
+        assert_eq!(
+            parsed.get::<String>("boot", "boot_type").as_deref(),
+            Some("bls")
+        );
+        assert_eq!(
+            parsed.get::<String>("image", "manifest_digest").as_deref(),
+            Some("sha256:manifest123")
+        );
+        assert_eq!(
+            parsed.get::<String>("boot", "digest").as_deref(),
+            Some("newdigest111")
+        );
     }
 
     #[test]

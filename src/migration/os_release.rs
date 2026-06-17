@@ -1,6 +1,6 @@
+use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::Path;
-use anyhow::{Result, anyhow, Context};
 
 /// Represents key fields from /etc/os-release used to construct BLS entry names.
 #[derive(Debug, Clone)]
@@ -96,11 +96,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let etc = dir.path().join("etc");
         fs::create_dir_all(&etc).unwrap();
-        fs::write(
-            etc.join("os-release"),
-            "ID=fedora\nVERSION_ID=41\n",
-        )
-        .unwrap();
+        fs::write(etc.join("os-release"), "ID=fedora\nVERSION_ID=41\n").unwrap();
 
         let os = read_os_release(dir.path()).unwrap();
         assert_eq!(os.id, "fedora");
