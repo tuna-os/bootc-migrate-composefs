@@ -16,20 +16,7 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Check if working tree is dirty
-    let dirty = Command::new("git")
-        .args(["diff-index", "--quiet", "HEAD", "--"])
-        .status()
-        .map(|s| !s.success())
-        .unwrap_or(true);
-
-    let version = if dirty {
-        format!("{}-dirty", git_hash)
-    } else {
-        git_hash
-    };
-
-    println!("cargo:rustc-env=BUILD_GIT_HASH={}", version);
+    println!("cargo:rustc-env=BUILD_GIT_HASH={}", git_hash);
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
 }

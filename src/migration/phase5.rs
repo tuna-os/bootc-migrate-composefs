@@ -114,8 +114,10 @@ pub(crate) fn phase5_setup_bootloader(
 
     // Read target os-release for BLS naming (#6)
     let target_os = read_os_release(&mount_path).unwrap_or_else(|_| os_release::OsRelease {
-        id: "linux".into(),
+        id: "dakota".into(),
         version_id: String::new(),
+        name: String::new(),
+        pretty_name: String::new(),
     });
 
     let options_str = get_kernel_options(verity.as_hex())?;

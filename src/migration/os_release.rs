@@ -7,6 +7,8 @@ use std::path::Path;
 pub struct OsRelease {
     pub id: String,
     pub version_id: String,
+    pub name: String,
+    pub pretty_name: String,
 }
 
 /// Read /etc/os-release from a given root filesystem path (e.g., a mounted EROFS image).
@@ -17,6 +19,8 @@ pub fn read_os_release(root: &Path) -> Result<OsRelease> {
 
     let mut id = String::new();
     let mut version_id = String::new();
+    let mut name = String::new();
+    let mut pretty_name = String::new();
 
     for line in content.lines() {
         let line = line.trim();
@@ -33,13 +37,23 @@ pub fn read_os_release(root: &Path) -> Result<OsRelease> {
                 version_id = val.to_string();
             }
         }
+        if let Some(val) = parse_os_release_value(line, "NAME=") {
+            if name.is_empty() {
+                name = val.to_string();
+            }
+        }
+        if let Some(val) = parse_os_release_value(line, "PRETTY_NAME=") {
+            if pretty_name.is_empty() {
+                pretty_name = val.to_string();
+            }
+        }
     }
 
     if id.is_empty() {
         return Err(anyhow!("ID not found in os-release"));
     }
 
-    Ok(OsRelease { id, version_id })
+    Ok(OsRelease { id, version_id, name, pretty_name })
 }
 
 fn parse_os_release_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -73,16 +87,27 @@ pub fn bls_entry_filename(os: &OsRelease, verity_hash: &str, priority: u32) -> S
     format!("bootc_{id}-{ver}-{priority}.conf")
 }
 
-/// The title displayed in the GRUB menu for this entry.
+/// The title displayed in the boot menu for this entry. Matches bootc's convention:
+/// `<NAME> <VERSION_ID> (<deployment-kind>)` — e.g. "Fedora Linux 42 (ostree:0)"
+/// becomes "Fedora Linux 42 (composefs)" for the migrated target.
+/// Falls back to PRETTY_NAME, then NAME, then the capitalized ID.
 pub fn bls_entry_title(os: &OsRelease, kind: &str) -> String {
-    // Capitalize first letter of ID for a nice title
-    let name = if let Some(first) = os.id.chars().next() {
-        let rest = &os.id[first.len_utf8()..];
-        format!("{}{}", first.to_uppercase(), rest)
+    let display_name = if !os.name.is_empty() && !os.version_id.is_empty() {
+        format!("{} {}", os.name, os.version_id)
+    } else if !os.pretty_name.is_empty() {
+        os.pretty_name.clone()
+    } else if !os.name.is_empty() {
+        os.name.clone()
     } else {
-        os.id.clone()
+        let cap = if let Some(first) = os.id.chars().next() {
+            let rest = &os.id[first.len_utf8()..];
+            format!("{}{}", first.to_uppercase(), rest)
+        } else {
+            os.id.clone()
+        };
+        cap
     };
-    format!("{name} ({kind})")
+    format!("{display_name} ({kind})")
 }
 
 #[cfg(test)]
@@ -135,6 +160,8 @@ mod tests {
         let os = OsRelease {
             id: "fedora".into(),
             version_id: "41.20251125.0".into(),
+            name: String::new(),
+            pretty_name: String::new(),
         };
         let name = bls_entry_filename(&os, "abc123def456", 1);
         assert_eq!(name, "bootc_fedora-41.20251125.0-1.conf");
@@ -145,6 +172,8 @@ mod tests {
         let os = OsRelease {
             id: "bluefin-dakota".into(),
             version_id: "1.0".into(),
+            name: String::new(),
+            pretty_name: String::new(),
         };
         let name = bls_entry_filename(&os, "hash123", 1);
         assert_eq!(name, "bootc_bluefin_dakota-1.0-1.conf");
@@ -155,6 +184,8 @@ mod tests {
         let os = OsRelease {
             id: "fedora".into(),
             version_id: "41".into(),
+            name: String::new(),
+            pretty_name: String::new(),
         };
         let name = bls_entry_filename(&os, "hash", 0);
         assert_eq!(name, "bootc_fedora-41-0.conf");
@@ -165,6 +196,8 @@ mod tests {
         let os = OsRelease {
             id: "dakota".into(),
             version_id: String::new(),
+            name: String::new(),
+            pretty_name: String::new(),
         };
         // When no version, use first 12 chars of hash
         let name = bls_entry_filename(&os, "abc123def4567890abcdef", 1);
@@ -177,6 +210,8 @@ mod tests {
         let os = OsRelease {
             id: "dakota".into(),
             version_id: "42".into(),
+            name: String::new(),
+            pretty_name: String::new(),
         };
         let name = bls_entry_filename(&os, "abc123", 1);
         // The old code used "bootc_bluefin_dakota-{hash}.conf" — make sure the
@@ -186,12 +221,38 @@ mod tests {
     }
 
     #[test]
-    fn bls_entry_title_is_readable() {
+    fn bls_entry_title_uses_name_and_version() {
         let os = OsRelease {
             id: "fedora".into(),
-            version_id: "41".into(),
+            version_id: "42".into(),
+            name: "Fedora Linux".into(),
+            pretty_name: String::new(),
         };
         let title = bls_entry_title(&os, "composefs");
-        assert_eq!(title, "Fedora (composefs)");
+        assert_eq!(title, "Fedora Linux 42 (composefs)");
+    }
+
+    #[test]
+    fn bls_entry_title_falls_back_to_pretty_name() {
+        let os = OsRelease {
+            id: "fedora".into(),
+            version_id: String::new(),
+            name: String::new(),
+            pretty_name: "Fedora Linux 42 (Container Image)".into(),
+        };
+        let title = bls_entry_title(&os, "composefs");
+        assert_eq!(title, "Fedora Linux 42 (Container Image) (composefs)");
+    }
+
+    #[test]
+    fn bls_entry_title_falls_back_to_id() {
+        let os = OsRelease {
+            id: "dakota".into(),
+            version_id: String::new(),
+            name: String::new(),
+            pretty_name: String::new(),
+        };
+        let title = bls_entry_title(&os, "composefs");
+        assert_eq!(title, "Dakota (composefs)");
     }
 }
