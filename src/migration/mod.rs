@@ -1889,7 +1889,7 @@ fn phase5_setup_bootloader(
                     }
                     // Write a BLS entry with /boot-relative paths (GRUB needs these).
                     let grub_bls = format!(
-                        "title Linux (composefs)\nversion 7.0.7\nlinux /{}/vmlinuz\ninitrd /{}/initrd\ninitrd /{}/xfs-mount.cpio\noptions {}\nsort-key bootc-linux-0\n",
+                        "title Linux (composefs)\nversion 7.0.7\nlinux /boot/{}/vmlinuz\ninitrd /boot/{}/initrd\ninitrd /boot/{}/xfs-mount.cpio\noptions {}\nsort-key bootc-linux-0\n",
                         boot_dir_name,
                         boot_dir_name,
                         boot_dir_name,
