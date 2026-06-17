@@ -696,11 +696,121 @@ echo '--- efibootmgr ---'
 efibootmgr -v 2>/dev/null || echo 'no efibootmgr'
 DIAG
 
-step "=== Rebooting VM ==="
-ssh $SSH_OPTS root@localhost "reboot" || true
+# === Host-side .raw disk scan ===
+# Shut down the VM so we can mount the disk image outside QEMU and
+# validate the actual bytes the migration wrote. This catches bugs
+# that in-VM verification misses (e.g. 0-byte initrd, wrong partition).
+step "=== Shutting down VM for host-side disk scan ==="
+ssh $SSH_OPTS root@localhost "poweroff" 2>/dev/null || true
+# Wait for QEMU to exit (max 30s).
+for _ in $(seq 1 15); do
+    if ! sudo kill -0 "$QEMU_PID" 2>/dev/null; then
+        QEMU_PID=""  # prevent cleanup from double-killing
+        echo "QEMU exited cleanly for disk scan."
+        break
+    fi
+    sleep 2
+done
+if [ -n "${QEMU_PID:-}" ]; then
+    echo "ERROR: QEMU did not exit after poweroff" >&2
+    exit 1
+fi
 
-# Wait for VM to shutdown
-sleep 5
+step "=== Host-side disk validation ==="
+HOST_LOOP=$(sudo losetup --show -f -P disk.raw)
+# Locate ESP (vfat) and root (xfs/btrfs) partitions.
+HOST_ESP=""
+HOST_ROOT=""
+for p in "${HOST_LOOP}"p*; do
+    FSTYPE=$(sudo blkid -o value -s TYPE "$p" 2>/dev/null || true)
+    if [ "$FSTYPE" = "vfat" ] && [ -z "$HOST_ESP" ]; then
+        HOST_ESP="$p"
+    elif [ "$FSTYPE" = "$FILESYSTEM" ] && [ -z "$HOST_ROOT" ]; then
+        HOST_ROOT="$p"
+    fi
+done
+if [ -z "$HOST_ESP" ] || [ -z "$HOST_ROOT" ]; then
+    echo "ERROR: could not find ESP ($HOST_ESP) or root ($HOST_ROOT) partition" >&2
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+HOST_ESP_MNT="/tmp/mnt-e2e-esp-scan"
+HOST_ROOT_MNT="/tmp/mnt-e2e-root-scan"
+sudo mkdir -p "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+sudo mount "$HOST_ESP" "$HOST_ESP_MNT"
+sudo mount "$HOST_ROOT" "$HOST_ROOT_MNT"
+
+# Test 1: vmlinuz exists on ESP, has MZ magic, >0 bytes.
+VMLINUZ=$(find "$HOST_ESP_MNT/EFI/Linux" -name vmlinuz 2>/dev/null | head -1)
+if [ -z "$VMLINUZ" ]; then
+    echo "FAIL: vmlinuz not found on ESP" >&2
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+VMLINUZ_SIZE=$(stat -c%s "$VMLINUZ")
+VMLINUZ_MAGIC=$(xxd -l2 -p "$VMLINUZ")
+if [ "$VMLINUZ_SIZE" -eq 0 ]; then
+    echo "FAIL: vmlinuz is 0 bytes" >&2
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+if [ "$VMLINUZ_MAGIC" != "4d5a" ]; then
+    echo "FAIL: vmlinuz has bad MZ magic: $VMLINUZ_MAGIC" >&2
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+echo "OK: vmlinuz valid (${VMLINUZ_SIZE} bytes, MZ magic)"
+
+# Test 2: initrd exists on ESP, >0 bytes (not empty registry extraction).
+INITRD="${VMLINUZ%/vmlinuz}/initrd"
+if [ ! -f "$INITRD" ]; then
+    echo "FAIL: initrd not found at $INITRD" >&2
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+INITRD_SIZE=$(stat -c%s "$INITRD")
+if [ "$INITRD_SIZE" -eq 0 ]; then
+    echo "FAIL: initrd is 0 bytes (registry extraction may have produced empty file)" >&2
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+echo "OK: initrd valid (${INITRD_SIZE} bytes)"
+
+# Test 3: systemd-boot EFI present.
+if [ ! -f "$HOST_ESP_MNT/EFI/systemd/systemd-bootx64.efi" ]; then
+    echo "FAIL: systemd-bootx64.efi missing from ESP" >&2
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+echo "OK: systemd-bootx64.efi present"
+
+# Test 4: .origin file exists and references the target image.
+ORIGIN=$(find "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1)
+if [ -z "$ORIGIN" ]; then
+    echo "FAIL: no .origin file in deploy dir" >&2
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"; exit 1
+fi
+echo "OK: .origin file present"
+
+sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+sudo losetup -d "$HOST_LOOP"
+echo "OK: All host-side disk checks passed."
+
+# Re-launch QEMU with the mutated disk for the post-reboot checks.
+step "=== Re-launching VM ==="
+qemu-system-x86_64 \
+    -machine q35 \
+    -m 4096 \
+    -smp 2 \
+    -nographic \
+    $KVM_FLAG \
+    $CPU_FLAG \
+    -drive if=pflash,format=raw,readonly=on,file="$OVMF_PATH" \
+    -drive if=pflash,format=raw,file="$OVMF_VARS" \
+    -drive file=disk.raw,format=raw,if=virtio \
+    -netdev user,id=n1,hostfwd=tcp::"$SSH_PORT"-:22 \
+    -device virtio-net-pci,netdev=n1 > qemu.log 2>&1 &
+QEMU_PID=$!
 
 # 9. Wait for VM to boot back
 step "Waiting for VM to boot back after migration..."
