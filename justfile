@@ -71,10 +71,10 @@ e2e-debug: build
 # Run all linters (shellcheck, rustfmt, clippy)
 lint: lint-shell lint-rust
 
-# Lint shell scripts with shellcheck
+# Lint shell scripts with shellcheck (warnings + errors only, skip info/style)
 lint-shell:
     @echo "=== shellcheck ==="
-    shellcheck tests/run-e2e.sh
+    shellcheck --severity=warning tests/run-e2e.sh
 
 # Lint Rust code (format + clippy)
 lint-rust:

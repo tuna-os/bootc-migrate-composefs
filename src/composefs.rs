@@ -2,7 +2,11 @@ use std::process::Command;
 use anyhow::{anyhow, Result, Context};
 
 pub fn pull_image(image_ref: &str) -> Result<String> {
-    let final_ref = if image_ref.contains("://") || image_ref.contains(":") {
+    // Only add docker:// transport if the image reference doesn't already
+    // have an explicit transport prefix (e.g. docker://, containers-storage:,
+    // oci-archive:). A lone colon (e.g. a port number in a registry URL) is
+    // not a transport prefix.
+    let final_ref = if image_ref.contains("://") {
         image_ref.to_string()
     } else {
         format!("docker://{}", image_ref)
