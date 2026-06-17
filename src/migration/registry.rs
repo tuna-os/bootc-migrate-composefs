@@ -6,6 +6,16 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
+/// Check if a directory has any files (non-recursive). Used by subtree extraction
+/// to verify that tar actually extracted content.
+fn has_files(dir: &Path) -> bool {
+    if let Ok(mut rd) = fs::read_dir(dir) {
+        rd.any(|e| e.is_ok())
+    } else {
+        false
+    }
+}
+
 fn try_extract_from_podman(image_ref: &str, files: &[(&Path, &Path)]) -> bool {
     // Check if podman has the image.
     let has = Command::new("podman")
@@ -319,10 +329,11 @@ pub(crate) fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_d
         // tar will silently produce no output if the prefix is absent in this layer.
         // --strip-components=1 drops the leading directory we asked for so the
         // contents land directly under dst_dir (we want dst_dir to be the merged
-        // /etc, not dst_dir/etc).
-        let normalized = subtree.trim_end_matches('/');
+        // /etc, not dst_dir/etc). OCI layer tars use either `./etc/...` or `etc/...`
+        // path formats; we try both candidates.
+        let normalized = subtree.trim_end_matches('/').trim_start_matches('/');
         for candidate in [format!("./{}", normalized), normalized.to_string()] {
-            let _ = Command::new("tar")
+            let output = Command::new("tar")
                 .args([
                     "-xaf",
                     blob_path
@@ -337,8 +348,20 @@ pub(crate) fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_d
                     "--strip-components=1",
                     &candidate,
                 ])
-                .stderr(std::process::Stdio::null())
-                .status();
+                .output()
+                .context("failed to execute tar for subtree extraction")?;
+            if output.status.success() && has_files(dst_dir) {
+                break;
+            }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "[registry] tar extract of '{}' from layer {} failed: {}",
+                    candidate,
+                    short_digest,
+                    stderr.trim()
+                );
+            }
         }
         let _ = fs::remove_file(&blob_path);
     }
