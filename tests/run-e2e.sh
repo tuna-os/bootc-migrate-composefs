@@ -635,7 +635,7 @@ step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=$MIGRATE_RC)"
 
 # Run in-VM diagnostics before shutdown (best-effort, not a hard gate).
 step "=== Verifying migration artifacts before reboot ==="
-ssh $SSH_OPTS root@localhost bash <<'DIAG'
+ssh $SSH_OPTS root@localhost bash <<'DIAG' || true
 set +e
 echo '--- Deployments ---'
 ls -la /sysroot/state/deploy/
