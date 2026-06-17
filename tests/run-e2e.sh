@@ -521,7 +521,7 @@ if [ "${E2E_SCAN_ONLY:-false}" = "true" ]; then
     INITRD="${VMLINUZ%/vmlinuz}/initrd"
     echo "initrd: $(stat -c%s "$INITRD" 2>/dev/null || echo 0) bytes"
     [ -f "$HOST_ESP_MNT/EFI/systemd/systemd-bootx64.efi" ] && echo "systemd-boot: present" || echo "systemd-boot: MISSING"
-    find "$HOST_ROOT_MNT/state/deploy" "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1 || echo "WARN: no .origin file"
+    timeout 10 find "$HOST_ROOT_MNT/state/deploy" "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1 || echo "WARN: no .origin file"
     sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
     sudo losetup -d "$HOST_LOOP"
     exit 0
@@ -823,7 +823,7 @@ echo "OK: systemd-bootx64.efi present"
 
 # Test 4: .origin file exists. On raw disk /sysroot is just / — the deploy
 # dir may be at /state/deploy or /sysroot/state/deploy.
-ORIGIN=$(find "$HOST_ROOT_MNT/state/deploy" "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1)
+ORIGIN=$(timeout 10 find "$HOST_ROOT_MNT/state/deploy" "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1)
 if [ -z "$ORIGIN" ]; then
     echo "FAIL: no .origin file in deploy dir" >&2
     sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
