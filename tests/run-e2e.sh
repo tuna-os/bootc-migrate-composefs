@@ -514,18 +514,23 @@ if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     exit 1
 fi
 
-# 8. Verify target image is pullable (fast-fail before VM starts)
-step "=== Verifying target image ==="
-if ! curl -sf http://127.0.0.1:5000/v2/dakota/tags/list 2>/dev/null | grep -q stable; then
-    echo "ERROR: dakota image not in local registry. Run: sudo podman tag ghcr.io/projectbluefin/dakota:stable 127.0.0.1:5000/dakota:stable && sudo podman push --tls-verify=false 127.0.0.1:5000/dakota:stable"
-    exit 1
+# 8. Resolve VM target image reference.
+# Local dev: uses a local registry at 10.0.2.2:5000 to avoid re-downloading
+# the target image inside the VM on every run.
+# CI (SKIP_REGISTRY=true): VM pulls directly from ghcr.io — QEMU user-mode
+# networking provides internet access and CI runners have fast bandwidth.
+if [ "${SKIP_REGISTRY:-false}" = "true" ]; then
+    step "=== Using direct registry pull (SKIP_REGISTRY mode) ==="
+    VM_TARGET_IMAGE="$TARGET_IMAGE"
+else
+    step "=== Verifying local registry ==="
+    if ! curl -sf http://127.0.0.1:5000/v2/dakota/tags/list 2>/dev/null | grep -q stable; then
+        echo "ERROR: dakota image not in local registry. Run: sudo podman tag ghcr.io/projectbluefin/dakota:stable 127.0.0.1:5000/dakota:stable && sudo podman push --tls-verify=false 127.0.0.1:5000/dakota:stable"
+        exit 1
+    fi
+    TARGET_REPO_TAG=$(basename "$TARGET_IMAGE")
+    VM_TARGET_IMAGE="10.0.2.2:5000/${TARGET_REPO_TAG}"
 fi
-# Use local registry (host at 10.0.2.2 from QEMU) for fast VM pulls. Derive the
-# repo:tag from TARGET_IMAGE so CI matrices that test other base/target pairs
-# don't have to patch the script — the local registry already mirrors it by the
-# same path the CI Mirror-images step pushed.
-TARGET_REPO_TAG=$(basename "$TARGET_IMAGE")
-VM_TARGET_IMAGE="10.0.2.2:5000/${TARGET_REPO_TAG}"
 
 step "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/ostree-composefs-rebase root@localhost:/var/tmp/bootc-migrate-composefs
@@ -533,9 +538,11 @@ scp $SCP_OPTS target/debug/ostree-composefs-rebase root@localhost:/var/tmp/bootc
 step "=== Injecting /etc fixtures (live, copied by migration) ==="
 ssh $SSH_OPTS root@localhost bash <<'ETCFIX'
 set -e
-# Allow insecure pulls from the host's local registry.
-mkdir -p /etc/containers/registries.conf.d
-printf '[[registry]]\nlocation = "10.0.2.2:5000"\ninsecure = true\n' > /etc/containers/registries.conf.d/50-local-registry.conf
+# Allow insecure pulls from the host's local registry (local dev only).
+if ! grep -qs '^SKIP_REGISTRY=true' /etc/e2e-env 2>/dev/null; then
+    mkdir -p /etc/containers/registries.conf.d
+    printf '[[registry]]\nlocation = "10.0.2.2:5000"\ninsecure = true\n' > /etc/containers/registries.conf.d/50-local-registry.conf
+fi
 # Custom config file in /etc to verify /etc state is preserved through migration
 mkdir -p /etc/migration-test
 echo "etc-state-value" > /etc/migration-test/marker.conf

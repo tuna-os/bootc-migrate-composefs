@@ -80,30 +80,15 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      # Bring up a local podman registry so the VM can fetch the target image
-      # via the 10.0.2.2:5000 host-loopback alias (hard-coded in the e2e script).
-      # Caching pulled images across runs would be ideal but actions/cache caps
-      # at 10 GB — instead we pull fresh and rely on registry locality for VM speed.
-      - name: Start local image registry
+      # Export matrix-driven env vars. No local registry — CI runners have
+      # fast internet and QEMU user-mode networking gives the VM direct
+      # ghcr.io access. The e2e script pulls images on demand.
+      - name: Export E2E env vars
         run: |
-          sudo podman run -d --name e2e-registry --network=host \
-            docker.io/library/registry:2
-
-      - name: Mirror base + target images into local registry
-        run: |
-          set -eux
-          sudo podman pull "${{ matrix.scenario.base }}"
-          sudo podman pull "${{ matrix.scenario.target }}"
-          # Strip the registry/host portion; keep repo:tag for the local mirror.
-          base_local="127.0.0.1:5000/$(basename '${{ matrix.scenario.base }}')"
-          target_local="127.0.0.1:5000/$(basename '${{ matrix.scenario.target }}')"
-          sudo podman tag "${{ matrix.scenario.base }}" "$base_local"
-          sudo podman tag "${{ matrix.scenario.target }}" "$target_local"
-          sudo podman push --tls-verify=false "$base_local"
-          sudo podman push --tls-verify=false "$target_local"
           echo "BASE_IMAGE=${{ matrix.scenario.base }}" >> "$GITHUB_ENV"
           echo "TARGET_IMAGE=${{ matrix.scenario.target }}" >> "$GITHUB_ENV"
           echo "FILESYSTEM=${{ matrix.scenario.filesystem }}" >> "$GITHUB_ENV"
+          echo "SKIP_REGISTRY=true" >> "$GITHUB_ENV"
 
       - name: Disk space before E2E
         run: df -h /
