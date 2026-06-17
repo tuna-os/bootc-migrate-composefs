@@ -243,66 +243,40 @@ fn rebuild_initrd_with_lvm_if_needed(
             )
         })?;
 
-    // Extract Dakota kernel modules via podman cp. The EROFS mount is in
-    // bare-EROFS mode (oci-config stream missing), so files beyond the inline
-    // data threshold read as zeros — we can't use the mount path for kmods.
-    //
-    // But podman cp may pull the full image (~5 GB) into podman storage.
-    // On XFS with the 14 GB loopback, free space is tight. Skip the rebuild
-    // if there isn't enough room — the loopback initrd is optional for
-    // composefs boot (the loopback is only needed during migration).
+    // Extract Dakota kernel modules via registry streaming (layer-by-layer).
+    // The EROFS mount is in bare-EROFS mode so large files read as zeros.
+    // podman cp pulls the full image (~5 GB) into podman storage — ENOSPC.
+    // Registry streaming downloads one layer at a time, extracts the needed
+    // subtree, and drops the blob before the next. Peak disk: ~500 MB.
     let free = crate::preflight::get_free_space("/var/tmp").unwrap_or(0);
-    if free < 6 * 1024 * 1024 * 1024 {
+    if free < 1_500_000_000 {
         eprintln!(
-            "[phase5] Skipping initrd rebuild: only {} GB free on /var/tmp (need ~6 GB for image pull).",
-            free / 1_073_741_824
+            "[phase5] Skipping initrd rebuild: only {} MB free on /var/tmp (need ~1.5 GB).",
+            free / 1_048_576
         );
         return Ok(None);
     }
-    // Prefer containers-storage: for locally cached images; otherwise use
-    // docker:// transport to pull from the registry.
-    let containers_ref = format!("containers-storage:{}", target_image);
-    let docker_ref = format!("docker://{}", target_image);
-    let image_ref: &str = if Command::new("podman")
-        .args(["image", "exists", target_image])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        &containers_ref
-    } else {
-        &docker_ref
-    };
-    let kmod_dir = TempDir::new_in("/var/tmp").context("failed to create kmod extract dir")?;
-    let container_src = format!("/usr/lib/modules/{}", kver);
+    let kmod_dir =
+        TempDir::new_in("/var/tmp").context("failed to create kmod extract dir")?;
+    let subtree = format!("usr/lib/modules/{}", kver);
     println!(
-        "[phase5] extracting Dakota kernel modules via podman cp (ref: {})...",
-        image_ref
+        "[phase5] extracting kernel modules via registry stream (subtree: {})...",
+        subtree
     );
-    let kmod_target = kmod_dir.path().join("lib/modules");
-    fs::create_dir_all(&kmod_target)?;
-    let extract = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "cid=$(podman create {}) && podman cp \"$cid:{}\" {} && podman rm \"$cid\"",
-            image_ref,
-            container_src,
-            kmod_target.display()
-        ))
-        .status()
-        .context("failed to extract kernel modules from podman")?;
-    if !extract.success() {
-        anyhow::bail!("podman cp for kernel modules failed");
-    }
-    let kmoddir_arg = kmod_target.join(kver);
+    // Extract into kmod_dir/lib/modules/ so the result mirrors podman cp layout.
+    let kmod_dest = kmod_dir.path().join("lib/modules");
+    fs::create_dir_all(&kmod_dest)?;
+    extract_subtree_via_registry(target_image, &subtree, &kmod_dest)
+        .context("failed to extract kernel modules via registry")?;
+    let kmoddir_arg = kmod_dest.join(kver);
     if !kmoddir_arg.join("kernel").exists() {
         anyhow::bail!(
-            "podman cp did not produce kernel modules at {}",
+            "registry stream did not produce kernel modules at {}",
             kmoddir_arg.display()
         );
     }
     println!(
-        "[phase5] extracted {} kernel modules via podman",
+        "[phase5] kernel modules available at {}",
         kmoddir_arg.display()
     );
 
