@@ -612,25 +612,13 @@ step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
 ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
 
-# Run the migration inside the VM, tailing the log file for real-time output.
-# The remote script starts migration in background, streams the log back via
-# ssh stdout, and waits for completion so ssh itself reports the exit code.
+# Run the migration inside the VM. Thanks to the tee-fix in main.rs,
+# stdout/stderr streams both to the log file AND the terminal, so ssh
+# naturally captures all output. No heredoc or background tricks needed.
 MIGRATE_START=$SECONDS
-ssh $SSH_OPTS root@localhost "MIG_TARGET='$VM_TARGET_IMAGE' bash -s" <<'MIGSCRIPT'
-  /var/tmp/bootc-migrate-composefs --target-image "$MIG_TARGET" --force --skip-import \
-    > /var/log/bootc-migrate-composefs.log 2>&1 &
-  MIG_PID=$!
-  trap 'kill $MIG_PID 2>/dev/null; exit 1' EXIT
-  # Stream the log file back to the host, prefixed with [migrate].
-  tail -F -n 0 /var/log/bootc-migrate-composefs.log 2>/dev/null \
-    | awk -v p="migrate" '{ print "[" p "] " $0; fflush() }' &
-  TAIL_PID=$!
-  wait "$MIG_PID"
-  MIG_RC=$?
-  kill "$TAIL_PID" 2>/dev/null || true
-  exit "$MIG_RC"
-MIGSCRIPT
-MIGRATE_RC=$?
+ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs --target-image '$VM_TARGET_IMAGE' --force --skip-import" 2>&1 \
+  | awk '{ print "[migrate] " $0; fflush() }'
+MIGRATE_RC=${PIPESTATUS[0]}
 echo "=== Migration completed in $((SECONDS - MIGRATE_START))s (rc=$MIGRATE_RC) ==="
 
 # Run in-VM diagnostics before shutdown (best-effort, not a hard gate).
