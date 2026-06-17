@@ -246,6 +246,19 @@ fn rebuild_initrd_with_lvm_if_needed(
     // Extract Dakota kernel modules via podman cp. The EROFS mount is in
     // bare-EROFS mode (oci-config stream missing), so files beyond the inline
     // data threshold read as zeros — we can't use the mount path for kmods.
+    //
+    // But podman cp may pull the full image (~5 GB) into podman storage.
+    // On XFS with the 14 GB loopback, free space is tight. Skip the rebuild
+    // if there isn't enough room — the loopback initrd is optional for
+    // composefs boot (the loopback is only needed during migration).
+    let free = crate::preflight::get_free_space("/var/tmp").unwrap_or(0);
+    if free < 6 * 1024 * 1024 * 1024 {
+        eprintln!(
+            "[phase5] Skipping initrd rebuild: only {} GB free on /var/tmp (need ~6 GB for image pull).",
+            free / 1_073_741_824
+        );
+        return Ok(None);
+    }
     // Prefer containers-storage: for locally cached images; otherwise use
     // docker:// transport to pull from the registry.
     let containers_ref = format!("containers-storage:{}", target_image);
