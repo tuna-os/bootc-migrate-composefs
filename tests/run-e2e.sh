@@ -631,7 +631,7 @@ ssh $SSH_OPTS root@localhost "MIG_TARGET='$VM_TARGET_IMAGE' bash -s" <<'MIGSCRIP
   exit "$MIG_RC"
 MIGSCRIPT
 MIGRATE_RC=$?
-step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=$MIGRATE_RC)"
+echo "=== Migration completed in $((SECONDS - MIGRATE_START))s (rc=$MIGRATE_RC) ==="
 
 # Run in-VM diagnostics before shutdown (best-effort, not a hard gate).
 step "=== Verifying migration artifacts before reboot ==="
