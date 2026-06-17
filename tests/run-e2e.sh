@@ -509,7 +509,12 @@ if [ "${E2E_SCAN_ONLY:-false}" = "true" ]; then
     fi
     HOST_ESP_MNT="/tmp/mnt-e2e-esp-scan"; HOST_ROOT_MNT="/tmp/mnt-e2e-root-scan"
     sudo mkdir -p "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
-    sudo mount "$HOST_ESP" "$HOST_ESP_MNT"; sudo mount "$HOST_ROOT" "$HOST_ROOT_MNT"
+    sudo mount "$HOST_ESP" "$HOST_ESP_MNT"
+    if [ "$FILESYSTEM" = "xfs" ]; then
+        sudo mount -o nouuid "$HOST_ROOT" "$HOST_ROOT_MNT"
+    else
+        sudo mount "$HOST_ROOT" "$HOST_ROOT_MNT"
+    fi
     VMLINUZ=$(find "$HOST_ESP_MNT/EFI/Linux" -name vmlinuz 2>/dev/null | head -1)
     if [ -z "$VMLINUZ" ]; then echo "FAIL: vmlinuz not found"; exit 1; fi
     echo "vmlinuz: $(stat -c%s "$VMLINUZ") bytes, magic=$(xxd -l2 -p "$VMLINUZ")"
@@ -764,8 +769,13 @@ fi
 HOST_ESP_MNT="/tmp/mnt-e2e-esp-scan"
 HOST_ROOT_MNT="/tmp/mnt-e2e-root-scan"
 sudo mkdir -p "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
-sudo mount "$HOST_ESP" "$HOST_ESP_MNT"
-sudo mount "$HOST_ROOT" "$HOST_ROOT_MNT"
+sudo mount "$HOST_ESP" "$HOST_ESP_MNT" || { echo "ERROR: ESP mount failed"; sudo losetup -d "$HOST_LOOP"; exit 1; }
+# XFS may have duplicate UUIDs with host — use nouuid to allow mount.
+if [ "$FILESYSTEM" = "xfs" ]; then
+    sudo mount -o nouuid "$HOST_ROOT" "$HOST_ROOT_MNT" || { echo "ERROR: root mount failed"; sudo umount "$HOST_ESP_MNT"; sudo losetup -d "$HOST_LOOP"; exit 1; }
+else
+    sudo mount "$HOST_ROOT" "$HOST_ROOT_MNT" || { echo "ERROR: root mount failed"; sudo umount "$HOST_ESP_MNT"; sudo losetup -d "$HOST_LOOP"; exit 1; }
+fi
 
 # Test 1: vmlinuz exists on ESP, has MZ magic, >0 bytes.
 VMLINUZ=$(find "$HOST_ESP_MNT/EFI/Linux" -name vmlinuz 2>/dev/null | head -1)
