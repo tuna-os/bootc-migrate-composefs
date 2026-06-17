@@ -83,6 +83,48 @@ lint-rust:
     @echo "=== cargo clippy ==="
     cargo clippy -- -D warnings
 
+# === Interactive E2E Steps ===
+# Run individual phases of the E2E test for debugging and iteration.
+
+# Show current E2E state (disk, QEMU, SSH, checkpoint)
+e2e-status:
+    @echo "=== E2E State ==="
+    @echo -n "disk.raw: "; [ -f disk.raw ] && echo "present ($(stat -c%s disk.raw) bytes)" || echo "missing"
+    @echo -n "pre-migration ckpt: "; [ -f disk.raw.pre-migration ] && echo present || echo missing
+    @echo -n "post-migration ckpt: "; [ -f disk.raw.post-migration ] && echo present || echo missing
+    @echo -n "QEMU: "; pgrep -f 'qemu-system.*disk.raw' > /dev/null && echo running || echo stopped
+    @echo -n "SSH (port 2222): "; timeout 3 bash -c 'echo > /dev/tcp/localhost/2222' 2>/dev/null && echo open || echo closed
+
+# Open interactive SSH to the E2E VM
+e2e-ssh:
+    ssh -i test_key -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@localhost
+
+# Tail the QEMU serial console log (filtered high-signal lines)
+e2e-tail:
+    @tail -F -q -n 0 qemu.log 2>/dev/null \
+      | sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+      | grep --line-buffered -E '\[FAILED\]|Failed to start|panic|Out of memory|kernel BUG|Kernel panic|sshd|login:|Welcome to|GRUB|Booting|systemd-boot|composefs|=== Phase|=== MIGRATION|bootc-migrate|Linux Boot Manager|dbus|messagebus|polkit|machine.id|emergency' || true
+
+# Host-side .raw disk scan only (no migration, no boot).
+# Requires: disk.raw (post-migration).
+e2e-scan:
+    @[ -f disk.raw ] || { echo "ERROR: disk.raw not found"; exit 1; }
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      FILESYSTEM="{{env_var_or_default('FILESYSTEM', 'xfs')}}" \
+      E2E_SCAN_ONLY=true \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-scan.log
+
+# Reboot-test: launch QEMU from checkpoint, wait for composefs boot, validate.
+# Requires: disk.raw (post-migration) or disk.raw.post-migration checkpoint.
+e2e-reboot-test:
+    @[ -f disk.raw ] || [ -f disk.raw.post-migration ] || { echo "ERROR: no disk.raw or post-migration checkpoint"; exit 1; }
+    @[ -f disk.raw ] || cp disk.raw.post-migration disk.raw
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      BASE_IMAGE="{{env_var_or_default('BASE_IMAGE', 'ghcr.io/projectbluefin/bluefin:lts')}}" \
+      TARGET_IMAGE="{{env_var_or_default('TARGET_IMAGE', 'ghcr.io/projectbluefin/dakota:stable')}}" \
+      FILESYSTEM="{{env_var_or_default('FILESYSTEM', 'xfs')}}" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-boot-test.log
+
 # === Diagnostics ===
 
 # View the last E2E log

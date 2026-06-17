@@ -492,6 +492,35 @@ ATTEMPT=1
 SSH_OPTS="-i ./test_key -p $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 SCP_OPTS="-i ./test_key -P $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
+# --- Interactive mode: scan-only ---
+if [ "${E2E_SCAN_ONLY:-false}" = "true" ]; then
+    step "=== Scan-only mode: host-side disk validation ==="
+    HOST_LOOP=$(sudo losetup --show -f -P disk.raw)
+    HOST_ESP=""; HOST_ROOT=""
+    for p in "${HOST_LOOP}"p*; do
+        FSTYPE=$(sudo blkid -o value -s TYPE "$p" 2>/dev/null || true)
+        if [ "$FSTYPE" = "vfat" ] && [ -z "$HOST_ESP" ]; then HOST_ESP="$p"
+        elif [ "$FSTYPE" = "$FILESYSTEM" ] && [ -z "$HOST_ROOT" ]; then HOST_ROOT="$p"; fi
+    done
+    if [ -z "$HOST_ESP" ] || [ -z "$HOST_ROOT" ]; then
+        echo "ERROR: cannot find ESP ($HOST_ESP) or root ($HOST_ROOT)" >&2
+        sudo losetup -d "$HOST_LOOP"; exit 1
+    fi
+    HOST_ESP_MNT="/tmp/mnt-e2e-esp-scan"; HOST_ROOT_MNT="/tmp/mnt-e2e-root-scan"
+    sudo mkdir -p "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo mount "$HOST_ESP" "$HOST_ESP_MNT"; sudo mount "$HOST_ROOT" "$HOST_ROOT_MNT"
+    VMLINUZ=$(find "$HOST_ESP_MNT/EFI/Linux" -name vmlinuz 2>/dev/null | head -1)
+    if [ -z "$VMLINUZ" ]; then echo "FAIL: vmlinuz not found"; exit 1; fi
+    echo "vmlinuz: $(stat -c%s "$VMLINUZ") bytes, magic=$(xxd -l2 -p "$VMLINUZ")"
+    INITRD="${VMLINUZ%/vmlinuz}/initrd"
+    echo "initrd: $(stat -c%s "$INITRD" 2>/dev/null || echo 0) bytes"
+    [ -f "$HOST_ESP_MNT/EFI/systemd/systemd-bootx64.efi" ] && echo "systemd-boot: present" || echo "systemd-boot: MISSING"
+    find "$HOST_ROOT_MNT/state/deploy" "$HOST_ROOT_MNT/sysroot/state/deploy" -name '*.origin' 2>/dev/null | head -1 || echo "WARN: no .origin file"
+    sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+    sudo losetup -d "$HOST_LOOP"
+    exit 0
+fi
+
 # Stream high-signal qemu serial output to stdout (full log is on disk in qemu.log).
 vm_tail vm-serial &
 TAIL_PID=$!
@@ -536,6 +565,8 @@ else
     TARGET_REPO_TAG=$(basename "$TARGET_IMAGE")
     VM_TARGET_IMAGE="10.0.2.2:5000/${TARGET_REPO_TAG}"
 fi
+
+if [ "$SKIP_SETUP" != "post-migration" ]; then
 
 step "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/ostree-composefs-rebase root@localhost:/var/tmp/bootc-migrate-composefs
@@ -626,6 +657,10 @@ ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs --target-image '$
 MIGRATE_RC=${PIPESTATUS[0]}
 echo "=== Migration completed in $((SECONDS - MIGRATE_START))s (rc=$MIGRATE_RC) ==="
 
+fi  # end migration-only block (skipped when SKIP_SETUP=post-migration)
+
+if [ "$SKIP_SETUP" != "post-migration" ]; then
+
 # Run in-VM diagnostics before shutdown (best-effort, not a hard gate).
 step "=== Verifying migration artifacts before reboot ==="
 ssh $SSH_OPTS root@localhost bash <<'DIAG' || true
@@ -705,6 +740,8 @@ if [ -n "${QEMU_PID:-}" ]; then
     echo "ERROR: QEMU did not exit after poweroff" >&2
     exit 1
 fi
+
+fi  # end VM-live block (skipped when SKIP_SETUP=post-migration)
 
 step "=== Host-side disk validation ==="
 HOST_LOOP=$(sudo losetup --show -f -P disk.raw)
