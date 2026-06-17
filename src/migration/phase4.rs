@@ -1,7 +1,7 @@
 use crate::VerityDigest;
 use crate::migration::mount_image;
 use crate::migration::phase0::MountGuard;
-use crate::migration::registry::extract_files_via_registry;
+use crate::migration::registry::{extract_files_via_registry, extract_subtree_via_registry};
 use crate::xattr;
 use anyhow::{Context, Result, anyhow};
 use std::fs;
@@ -225,38 +225,50 @@ fn resolve_device_uuid(device: &str) -> Option<String> {
 
 /// Perform 3-way /etc merge: old OSTree default, current live /etc, new ComposeFS default.
 pub(crate) fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) -> Result<()> {
+    // Mount the EROFS image for directory listing / symlink-target validation.
+    // The EROFS mount correctly exposes file NAMES and METADATA (stat, readdir,
+    // readlink) but ALL file CONTENT reads as zeros through the bare EROFS mount.
+    // The bootc overlay mount (bootc cfs mount) would fix this but fails because
+    // the oci-config-* stream is missing from the composefs repo when the image
+    // was sealed by our migration rather than by bootc's own pipeline.
     let temp_mount =
         TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
     let mount_path = temp_mount.path().to_path_buf();
-
-    // Mount the new EROFS image — we still need it to validate the prune
-    // step's /usr/* symlink targets. EROFS mount lists directory contents
-    // correctly (it's the file *content* past the inline threshold that
-    // reads as zeros), so symlink-target existence checks work fine here.
     mount_image(verity.as_hex(), &mount_path).context("failed to mount EROFS for etc merge")?;
     let _guard = MountGuard::new(&mount_path);
 
     let old_default_etc = find_ostree_etc_default()?;
     let current_etc = Path::new("/etc");
 
-    // Use the EROFS mount's /etc directly as the merge source. /etc files
-    // are small config files (a few KB at most) — well within the EROFS
-    // inline data threshold. Only the kernel and initrd (17+ MB) exceed it.
-    // This avoids downloading 120 OCI layers from ghcr.io (~20 min).
-    let new_default_etc = mount_path.join("etc");
-    if !new_default_etc.exists() {
-        anyhow::bail!("no /etc in new composefs image");
+    // Extract the target image's /etc tree from the OCI registry. The EROFS mount
+    // gives zero-filled file content for everything, so we must use registry streaming
+    // for real file content. This downloads ~120 layers but is the only reliable path.
+    let registry_etc =
+        TempDir::new_in("/var/tmp").context("failed to create temp dir for registry etc")?;
+    let registry_etc_path = registry_etc.path().join("etc");
+    println!("[phase4] extracting target /etc from registry...");
+    if let Err(e) = extract_subtree_via_registry(target_image, "/etc", &registry_etc_path) {
+        eprintln!(
+            "[phase4] warning: registry /etc extraction failed: {e:#} — falling back to EROFS"
+        );
+        // Last-resort fallback: EROFS mount for merge source.
+        let new_default_etc = mount_path.join("etc");
+        if !new_default_etc.exists() {
+            anyhow::bail!("no /etc in new composefs image");
+        }
+        crate::mergetc::merge_etc_files(&old_default_etc, current_etc, &new_default_etc, etc_dir)
+            .context("3-way /etc merge failed")?;
+    } else {
+        let entry_count = fs::read_dir(&registry_etc_path)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        println!(
+            "[phase4] using registry-extracted /etc for merge source ({} entries)",
+            entry_count
+        );
+        crate::mergetc::merge_etc_files(&old_default_etc, current_etc, &registry_etc_path, etc_dir)
+            .context("3-way /etc merge failed")?;
     }
-    let etc_entry_count = fs::read_dir(&new_default_etc)
-        .map(|d| d.count())
-        .unwrap_or(0);
-    println!(
-        "[phase4] using EROFS /etc for merge source ({} entries)",
-        etc_entry_count
-    );
-
-    crate::mergetc::merge_etc_files(&old_default_etc, current_etc, &new_default_etc, etc_dir)
-        .context("3-way /etc merge failed")?;
 
     // Drop /etc symlinks whose /usr/* target does not exist in the target image.
     // Bluefin → Dakota: e.g. /etc/systemd/system/dbus.service points to
