@@ -579,30 +579,31 @@ fn verify_migration(verity: &VerityDigest, _report: &PreflightReport) -> Result<
     Ok(())
 }
 
-/// Find the ESP block device (e.g. /dev/vda2) by scanning for the
-/// EFI System Partition type GUID (C12A7328-F81F-11D2-BA4B-00A0C93EC93B).
+/// Find the ESP block device (e.g. /dev/vda2). Uses /dev/disk/by-partlabel
+/// first (bootc labels the ESP "EFI-SYSTEM"), then falls back to lsblk by
+/// partition type GUID.
 fn find_esp_device() -> Option<String> {
-    let output = Command::new("lsblk").args(["-ndo", "NAME,PARTTYPE"]).output().ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2
-            && parts[1].to_lowercase()
-                == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
-        {
-            return Some(format!("/dev/{}", parts[0]));
+    // Try the by-partlabel symlink (works inside VMs without lsblk sudo).
+    let by_label = Path::new("/dev/disk/by-partlabel/EFI-SYSTEM");
+    if by_label.exists() {
+        if let Ok(target) = fs::read_link(by_label) {
+            if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
+                return Some(format!("/dev/{}", name));
+            }
         }
     }
-    // Fallback: try partition label (bootc writes "EFI-SYSTEM").
-    let output = Command::new("lsblk")
-        .args(["-ndo", "NAME,PARTLABEL"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains("EFI-SYSTEM") || line.contains("EFI") {
-            let name = line.split_whitespace().next()?;
-            return Some(format!("/dev/{}", name));
+    // Fallback: scan lsblk by partition type GUID
+    // (C12A7328-F81F-11D2-BA4B-00A0C93EC93B).
+    if let Ok(output) = Command::new("lsblk").args(["-ndo", "NAME,PARTTYPE"]).output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2
+                && parts[1].to_lowercase()
+                    == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+            {
+                return Some(format!("/dev/{}", parts[0]));
+            }
         }
     }
     None
@@ -711,13 +712,8 @@ pub fn run_migration(
     phase5_setup_bootloader(report, &verity, target_image, dry_run, bootloader, force)?;
 
     // ---- Verification: confirm artifacts before claiming success ----
-    // The host-side E2E .raw scan is the authoritative check; in-VM
-    // verification is best-effort (ESP may be unmounted, blocking path
-    // checks). Downgrade failures to warnings.
     if !dry_run {
-        if let Err(e) = verify_migration(&verity, report) {
-            eprintln!("Warning: in-VM verification failed ({e:#}) — host-side .raw scan will catch real issues.");
-        }
+        verify_migration(&verity, report)?;
     }
 
     println!("\n=== MIGRATION COMPLETED ===");
