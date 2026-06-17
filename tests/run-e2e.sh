@@ -238,6 +238,7 @@ elif [ -f "$WORKSPACE_DIR/disk.raw.pre-migration" ]; then
     sudo losetup -d "$CKPT_LOOP"
 else
     SKIP_SETUP=false
+    CHECKPOINT="$WORKSPACE_DIR/disk.raw.pre-migration"
 fi
 
 # Install cleanup trap before any long-lived child processes are spawned, so
@@ -425,7 +426,7 @@ sudo losetup -d "$LOOP_DEV"
 LOOP_DEV=""
 echo "Disk image initialized and customized."
 # Save checkpoint for faster re-runs (skip disk creation + install).
-cp disk.raw "$CHECKPOINT"
+cp disk.raw "${CHECKPOINT:-disk.raw.pre-migration}"
 fi  # SKIP_SETUP
 
 # 6. Launch QEMU VM
