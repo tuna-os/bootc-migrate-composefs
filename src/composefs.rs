@@ -2,7 +2,7 @@ use std::process::Command;
 use anyhow::{anyhow, Result, Context};
 
 pub fn pull_image(image_ref: &str) -> Result<String> {
-    let final_ref = if image_ref.contains("://") {
+    let final_ref = if image_ref.contains("://") || image_ref.contains(":") {
         image_ref.to_string()
     } else {
         format!("docker://{}", image_ref)

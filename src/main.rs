@@ -62,6 +62,22 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Undo a partial or failed migration — remove composefs boot artifacts
+    /// and staged deployments while preserving the composefs object store.
+    ///
+    /// Removes staged deployments, boot artifacts, BLS entries from ESP.
+    /// Does NOT touch the composefs object store or loopback image — those
+    /// are expensive to rebuild and survive across retries. Use --full for
+    /// complete cleanup including the object store.
+    #[command(name = "undo")]
+    Undo {
+        /// Preview what would be removed; touch nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Full cleanup: also remove composefs object store and loopback image.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 fn check_root_privilege() -> Result<()> {
@@ -75,9 +91,50 @@ fn check_root_privilege() -> Result<()> {
 fn main() {
     let args = Args::parse();
 
+    // Open persistent log file — all migration output is tee'd here so the
+    // user can inspect results even if the terminal session is lost.
+    let log_path = "/var/log/bootc-migrate-composefs.log";
+    let log_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        Ok(f) => {
+            eprintln!("Logging migration output to {}", log_path);
+            Some(f)
+        }
+        Err(e) => {
+            eprintln!("Warning: could not open log file {}: {}", log_path, e);
+            None
+        }
+    };
+
+    // Redirect stdout+stderr to log file so no output is lost even if the
+    // terminal session drops. The log can be tailed with `tail -f`.
+    if let Some(f) = log_file {
+        use std::os::unix::io::AsRawFd;
+        let fd = f.as_raw_fd();
+        unsafe {
+            libc::dup2(fd, libc::STDOUT_FILENO);
+            libc::dup2(fd, libc::STDERR_FILENO);
+        }
+        // The File handle is leaked intentionally — its fd was duplicated
+        // into stdout/stderr and must survive for the process lifetime.
+        std::mem::forget(f);
+    }
+
     // Handle --commit subcommand (#8)
     if let Some(Command::Commit { dry_run }) = args.command {
         if let Err(e) = run_commit(dry_run) {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
+        return;
+    }
+
+    // Handle --undo subcommand
+    if let Some(Command::Undo { dry_run, full }) = args.command {
+        if let Err(e) = run_undo(dry_run, full) {
             eprintln!("Error: {}", e);
             process::exit(1);
         }
@@ -437,6 +494,21 @@ fn run_commit(dry_run: bool) -> Result<()> {
         }
     }
 
+    // 4. Drop ostree-remount.service enablement. On a composefs-booted
+    //    system OSTree bind mounts are irrelevant; the symlink may be
+    //    re-created during boot by the target image's presets even though
+    //    Phase 4 removed it from the deploy /etc.
+    let remount_link = Path::new("/etc/systemd/system/local-fs.target.wants/ostree-remount.service");
+    if remount_link.exists() || remount_link.is_symlink() {
+        if dry_run {
+            println!("[DRY RUN] Would remove ostree-remount.service enablement (composefs doesn't need OSTree bind mounts).");
+        } else {
+            std::fs::remove_file(remount_link)
+                .with_context(|| format!("failed to remove {}", remount_link.display()))?;
+            println!("Removed ostree-remount.service enablement (composefs doesn't need OSTree bind mounts).");
+        }
+    }
+
     let human = format_bytes(total_freed);
     if dry_run {
         println!("\nWould reclaim: {} ({} bytes)", human, total_freed);
@@ -565,6 +637,200 @@ fn mount_sysroot_btrfs_at(target: &Path) -> Result<()> {
         .context("failed to execute mount for alt-root cleanup")?;
     if !status.success() {
         anyhow::bail!("mount {} → {} failed", device, target.display());
+    }
+    Ok(())
+}
+
+/// Undo a partial or failed migration. Removes all composefs artifacts
+/// (staged deployments, boot artifacts, BLS entries, loopback images,
+/// composefs object store) while leaving the OSTree deployment intact.
+fn run_undo(dry_run: bool, full: bool) -> Result<()> {
+    check_root_privilege()?;
+
+    // Always release the migration lock so a subsequent run doesn't fail
+    // with "already running". The lock guard drops automatically at process
+    // exit, but if the previous run crashed mid-phase the lock can linger.
+    let lock_path = "/var/run/bootc-migrate-composefs.lock";
+    if !dry_run {
+        let _ = std::fs::remove_file(lock_path);
+    }
+
+    println!("=== Undoing composefs migration ===");
+    if dry_run {
+        println!("*** DRY RUN — no changes will be made ***");
+    }
+
+    let mut removed = 0usize;
+    let mut skipped = 0usize;
+
+    // 1. Remove staged composefs deployments.
+    let deploy_dir = Path::new("/sysroot/state/deploy");
+    if deploy_dir.exists() {
+        if let Ok(rd) = std::fs::read_dir(deploy_dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // Skip the OSTree deploy dir (numeric or short names).
+                // Composefs deploy dirs are long hex strings (64+ chars).
+                if name.len() < 40 {
+                    continue;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    println!("Removing staged deployment: {}", path.display());
+                    if !dry_run {
+                        std::fs::remove_dir_all(&path)
+                            .with_context(|| format!("failed to remove {}", path.display()))?;
+                    }
+                    removed += 1;
+                }
+            }
+        }
+    }
+    if removed == 0 {
+        println!("No composefs deployments found in /sysroot/state/deploy/.");
+    }
+
+    // 2. Remove composefs boot artifacts.
+    let boot_dir = Path::new("/boot");
+    if let Ok(rd) = std::fs::read_dir(boot_dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("bootc_composefs-") {
+                let path = entry.path();
+                println!("Removing boot artifacts: {}", path.display());
+                if !dry_run {
+                    std::fs::remove_dir_all(&path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                }
+                removed += 1;
+            }
+        }
+    }
+
+    // 3. Remove composefs BLS entries from /boot/loader/entries.
+    let bls_dir = Path::new("/boot/loader/entries");
+    if bls_dir.exists() {
+        if let Ok(rd) = std::fs::read_dir(bls_dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("bootc_") || name.starts_with("ostree-fallback-") {
+                    let path = entry.path();
+                    println!("Removing BLS entry: {}", path.display());
+                    if !dry_run {
+                        std::fs::remove_file(&path)
+                            .with_context(|| format!("failed to remove {}", path.display()))?;
+                    }
+                    removed += 1;
+                }
+            }
+        }
+    }
+
+    // 4. Remove composefs BLS entries from ESP.
+    for esp in &["/boot/efi", "/efi"] {
+        let esp_entries = Path::new(esp).join("loader/entries");
+        if esp_entries.exists() {
+            if let Ok(rd) = std::fs::read_dir(&esp_entries) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with("bootc_") || name.starts_with("ostree-fallback-") {
+                        let path = entry.path();
+                        println!("Removing ESP BLS entry: {}", path.display());
+                        if !dry_run {
+                            std::fs::remove_file(&path)
+                                .with_context(|| format!("failed to remove {}", path.display()))?;
+                        }
+                        removed += 1;
+                    }
+                }
+            }
+            // Remove loader.conf if we wrote one.
+            let loader_conf = Path::new(esp).join("loader/loader.conf");
+            if loader_conf.exists() {
+                println!("Removing ESP loader.conf: {}", loader_conf.display());
+                if !dry_run {
+                    std::fs::remove_file(&loader_conf)?;
+                    removed += 1;
+                }
+            }
+        }
+        // Remove systemd-boot from ESP.
+        let sd_dir = Path::new(esp).join("EFI/systemd");
+        if sd_dir.exists() {
+            println!("Removing systemd-boot from ESP: {}", sd_dir.display());
+            if !dry_run {
+                std::fs::remove_dir_all(&sd_dir)?;
+                removed += 1;
+            }
+        }
+        let esp_linux = Path::new(esp).join("EFI/Linux");
+        if esp_linux.exists() {
+            if let Ok(rd) = std::fs::read_dir(&esp_linux) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with("bootc_composefs-") {
+                        let path = entry.path();
+                        println!("Removing ESP EFI/Linux entry: {}", path.display());
+                        if !dry_run {
+                            std::fs::remove_dir_all(&path)
+                                .with_context(|| format!("failed to remove {}", path.display()))?;
+                        }
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Remove composefs loopback image (only with --full).
+    if full {
+        let loopback = Path::new("/sysroot/composefs-loopback.ext4");
+        if loopback.exists() {
+            println!("Removing composefs loopback image: {}", loopback.display());
+            if !dry_run {
+                std::fs::remove_file(loopback)?;
+                removed += 1;
+            }
+        }
+
+        // 6. Remove composefs object store (only with --full).
+        let composefs_dir = Path::new("/sysroot/composefs");
+        if composefs_dir.exists() {
+            let has_objects = composefs_dir.join("objects").exists();
+            let has_images = composefs_dir.join("images").exists();
+            if has_objects || has_images {
+                println!("Removing composefs object store: {}", composefs_dir.display());
+                if !dry_run {
+                    for sub in &["objects", "images", "streams", "tmp"] {
+                        let p = composefs_dir.join(sub);
+                        if p.exists() {
+                            std::fs::remove_dir_all(&p)
+                                .with_context(|| format!("failed to remove {}", p.display()))?;
+                        }
+                    }
+                    removed += 1;
+                }
+            } else {
+                println!("Composefs directory exists but is empty (no objects/images).");
+                skipped += 1;
+            }
+        }
+    } else {
+        println!("Composefs object store and loopback preserved (re-run --full to clean).");
+    }
+
+    // 7. Optionally warn about NVRAM entries (can't clean those from userspace easily).
+    println!();
+    if dry_run {
+        println!("Would remove {} artifact(s).", removed);
+        println!("Re-run without --dry-run to apply.");
+    } else {
+        println!("Removed {} composefs artifact(s).", removed);
+        if skipped > 0 {
+            println!("{} path(s) skipped (empty or already clean).", skipped);
+        }
+        println!("The system is now in its pre-migration OSTree state.");
+        println!("Run 'bootc-migrate-composefs --target-image <image>' to try again.");
     }
     Ok(())
 }

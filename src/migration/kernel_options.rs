@@ -21,12 +21,20 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
         if should_filter(word) {
             continue;
         }
+        // Strip quiet/rhgb so emergency-mode console output is visible.
+        if word == "quiet" || word == "rhgb" {
+            continue;
+        }
         options.push(word.to_string());
     }
     // composefs= gets the bare hex digest (no sha512: prefix).
     // SPECIFICATION.md §3.4 and §4.2 examples use the bare hex form.
     let bare_hex = crate::VerityDigest::from_prefixed_or_hex(composefs_digest);
     options.push(format!("composefs={}", bare_hex.as_hex()));
+    // Temporary: forward journal to console for debugging emergency mode.
+    options.push("systemd.log_level=debug".into());
+    options.push("systemd.log_target=console".into());
+    options.push("systemd.journald.forward_to_console=1".into());
     Ok(options.join(" "))
 }
 
@@ -34,9 +42,14 @@ fn should_filter(word: &str) -> bool {
     if word.starts_with("ostree=")
         || word.starts_with("BOOT_IMAGE=")
         || word.starts_with("initrd=")
-        || word.starts_with("rootflags=")
         || word.starts_with("rd.systemd.unit=")
     {
+        return true;
+    }
+    // Only filter rootflags that contain subvol= — btrfs-specific subvolume
+    // assignments are meaningless on composefs. Non-subvol rootflags (e.g.
+    // XFS mount options passed by the initramfs) are preserved.
+    if word.starts_with("rootflags=") && word.contains("subvol=") {
         return true;
     }
     // Also filter anything starting with "ostree." — belt and suspenders.
@@ -112,12 +125,24 @@ mod tests {
     }
 
     #[test]
-    fn filters_rootflags_arg() {
+    fn filters_rootflags_subvol() {
+        // rootflags containing subvol= (btrfs-specific) are filtered.
         let result = build_options(
             "rootflags=subvol=root quiet rw",
             "ab01cd23ef45",
         );
         assert!(!result.contains("rootflags="));
+        assert!(result.contains("quiet"));
+    }
+
+    #[test]
+    fn preserves_rootflags_without_subvol() {
+        // rootflags without subvol= (e.g. XFS, ext4 mount options) are kept.
+        let result = build_options(
+            "rootflags=defaults quiet rw",
+            "ab01cd23ef45",
+        );
+        assert!(result.contains("rootflags=defaults"));
         assert!(result.contains("quiet"));
     }
 

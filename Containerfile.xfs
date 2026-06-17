@@ -1,0 +1,22 @@
+FROM ghcr.io/projectbluefin/dakota:stable
+
+# Install dracut (modules already present, just need the binary)
+RUN rpm-ostree install --apply-live --allow-inactive dracut
+
+# Add LVM + DM + XFS modules
+RUN echo 'add_dracutmodules+=" lvm dm "' > /etc/dracut.conf.d/50-migration.conf
+
+# Add xfs driver if it's a loadable module
+RUN if [ -f /usr/lib/modules/*/kernel/fs/xfs/xfs.ko ]; then \
+      echo 'add_drivers+=" xfs "' >> /etc/dracut.conf.d/50-migration.conf; \
+    fi
+
+# Install loopback mount unit for composefs store on XFS
+RUN mkdir -p /etc/systemd/system && \
+    printf '[Unit]\nDescription=ComposeFS Loopback Mount\nAfter=sysroot.mount\nBefore=initrd-root-fs.target bootc-root-setup.service\nDefaultDependencies=no\n\n[Mount]\nWhat=/sysroot/composefs-loopback.ext4\nWhere=/sysroot/composefs\nType=ext4\nOptions=loop,ro\n\n[Install]\nWantedBy=initrd-root-fs.target\n' \
+      > /etc/systemd/system/sysroot-composefs.mount && \
+    echo 'install_items+=" /etc/systemd/system/sysroot-composefs.mount "' \
+      >> /etc/dracut.conf.d/50-migration.conf
+
+# Rebuild initrd with all modules baked in
+RUN dracut --regenerate-all --force
