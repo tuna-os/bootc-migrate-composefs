@@ -1178,7 +1178,7 @@ podman run --rm "$TARGET_IMAGE" find /etc /usr -type f -o -type l 2>/dev/null | 
 # Diff: show paths in post-commit that are NOT in the fresh factory image.
 # These should be user-introduced files only.
 echo "=== Files present post-commit but absent from fresh Dakota (user state) ===" >> e2e-run.log
-comm -23 /tmp/e2e-post-commit-files.txt /tmp/e2e-fresh-dakota-files.txt 2>/dev/null | head -100 | tee -a e2e-run.log
+comm -23 /tmp/e2e-post-commit-files.txt /tmp/e2e-fresh-dakota-files.txt 2>/dev/null | head -100 | tee -a e2e-run.log || true
 echo "=== End diff ===" >> e2e-run.log
 
 # Count lines for summary.
