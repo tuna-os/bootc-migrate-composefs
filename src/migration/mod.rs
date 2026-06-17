@@ -263,12 +263,14 @@ fn rebuild_initrd_with_lvm_if_needed(
         "[phase5] extracting kernel modules via registry stream (subtree: {})...",
         subtree
     );
-    // Extract into kmod_dir/lib/modules/ so the result mirrors podman cp layout.
-    let kmod_dest = kmod_dir.path().join("lib/modules");
+    // Extract subtree to kmod_dir root. The subtree is
+    // "usr/lib/modules/<kver>" and tar strips the leading component
+    // (usr/), so files land at kmod_dir/lib/modules/<kver>/kernel/...
+    let kmod_dest = kmod_dir.path().to_path_buf();
     fs::create_dir_all(&kmod_dest)?;
     extract_subtree_via_registry(target_image, &subtree, &kmod_dest)
         .context("failed to extract kernel modules via registry")?;
-    let kmoddir_arg = kmod_dest.join(kver);
+    let kmoddir_arg = kmod_dest.join("lib/modules").join(kver);
     if !kmoddir_arg.join("kernel").exists() {
         anyhow::bail!(
             "registry stream did not produce kernel modules at {}",
