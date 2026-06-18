@@ -303,7 +303,20 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     sudo cryptsetup open "$ROOT_PART" e2e-root --key-file="$LUKS_KEYFILE"
 
     # Create XFS filesystem inside LUKS.
-    sudo mkfs.xfs -f /dev/mapper/e2e-root
+    # Use full path: on some systems (e.g. ostree-based) mkfs.xfs may not be
+    # in sudo's PATH even when installed to /var/usrlocal/bin.
+    MKFS_XFS=""
+    for p in mkfs.xfs /var/usrlocal/bin/mkfs.xfs /usr/sbin/mkfs.xfs; do
+        if [ -x "$p" ] || (command -v "$p" &>/dev/null); then
+            MKFS_XFS="$p"
+            break
+        fi
+    done
+    if [ -z "$MKFS_XFS" ]; then
+        echo "ERROR: mkfs.xfs not found — install xfsprogs" >&2
+        exit 1
+    fi
+    sudo "$MKFS_XFS" -f /dev/mapper/e2e-root
     sudo mkdir -p /tmp/mnt-e2e-luks-root
     sudo mount /dev/mapper/e2e-root /tmp/mnt-e2e-luks-root
 
