@@ -387,7 +387,10 @@ sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
 LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
 echo "Re-attached loop device: $LOOP_DEV"
 
-# 5. Inject SSH keys and configuration
+# 5. Inject SSH keys and configuration (skip for LUKS — root is encrypted)
+if [ "$FILESYSTEM" = "xfs+crypt" ]; then
+    echo "LUKS mode: SSH key already injected by bootc install, skipping host-side injection"
+else
 step "=== Injecting SSH credentials to disk image ==="
 # Find the root partition (not the ESP/vfat).
 ROOT_PART=""
@@ -508,6 +511,8 @@ echo "Test fixtures written."
 # Inject console=ttyS0 into BLS entries so the kernel logs to serial (visible
 # in qemu.log). Without this, desktop-flavored images like Bluefin send kernel
 # output only to the graphical console and we have zero visibility post-GRUB.
+fi
+
 step "=== Patching BLS entries for serial console visibility ==="
 sudo umount "$MNT_DIR" || true
 BOOT_MNT="/tmp/mnt-e2e-boot"
