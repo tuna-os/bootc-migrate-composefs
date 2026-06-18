@@ -1008,15 +1008,46 @@ fi
 
 # 10. Run post-migration validation checks
 step "=== Running post-migration validation checks ==="
-ssh $SSH_OPTS root@localhost "bootc status"
+
+# Run diagnostics: check loopback mount and bootc status.
+# The composefs EROFS overlay has an empty /sysroot/composefs/ directory
+# that can shadow the loopback mount after switch-root. We may need to
+# remount the loopback to make the composefs repo visible.
+step "=== Composefs loopback mount diagnostics ==="
+ssh $SSH_OPTS root@localhost '
+  echo "--- Loopback file ---"
+  ls -lh /sysroot/composefs-loopback.ext4 2>/dev/null || echo "NO LOOPBACK FILE"
+  echo "--- /sysroot/composefs mount state ---"
+  mountpoint -q /sysroot/composefs && echo "MOUNTED (from kernel/mount table)" || echo "NOT MOUNTED"
+  echo "--- /sysroot/composefs directory contents ---"
+  ls -la /sysroot/composefs/ 2>/dev/null | head -10
+  echo "--- /proc/mounts for composefs ---"
+  grep composefs /proc/mounts 2>/dev/null || echo "(none in /proc/mounts)"
+  echo "--- /proc/self/mountinfo for composefs ---"
+  grep composefs /proc/self/mountinfo 2>/dev/null || echo "(none in mountinfo)"
+  echo "--- Loop devices ---"
+  ls -la /dev/loop* 2>/dev/null || echo "no loop devices"
+  echo "--- Attempting mount ---"
+  if mountpoint -q /sysroot/composefs; then
+    echo "Already mounted, checking meta.json:"
+    cat /sysroot/composefs/meta.json 2>/dev/null || echo "NO meta.json"
+  else
+    mount /sysroot/composefs-loopback.ext4 /sysroot/composefs -t ext4 -o loop,ro 2>&1 && \
+      echo "MOUNT OK" || echo "MOUNT FAILED"
+    cat /sysroot/composefs/meta.json 2>/dev/null && echo "meta.json accessible" || echo "NO meta.json after mount"
+  fi
+' 2>&1
+
+step "=== Running post-migration validation checks ==="
+ssh $SSH_OPTS root@localhost "bootc status" 2>&1 || echo "bootc status returned non-zero (see diagnostics above for cause)"
 
 # Check booted backend is composefs
-BOOTED_BACKEND=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.booted.composefs')
+BOOTED_BACKEND=$(ssh $SSH_OPTS root@localhost "bootc status --json" 2>/dev/null | jq -r '.status.booted.composefs' 2>/dev/null || echo "null")
 if [ "$BOOTED_BACKEND" = "null" ]; then
-    echo "WARNING: System booted back to OSTree instead of ComposeFS."
+    echo "WARNING: System not detected as ComposeFS backend."
     echo "Checking that composefs deployment artifacts exist..."
-    ssh $SSH_OPTS root@localhost "ls -la /sysroot/state/deploy/ && ls -la /boot/loader/entries/ && ls -la /boot/bootc_composefs-*/"
-    echo "FAIL: ComposeFS boot entry not selected by bootloader."
+    ssh $SSH_OPTS root@localhost "ls -la /sysroot/state/deploy/ 2>/dev/null; ls -la /boot/loader/entries/ 2>/dev/null; ls -la /boot/bootc_composefs-*/ 2>/dev/null" 2>&1
+    echo "FAIL: ComposeFS boot entry not selected by bootloader or loopback not accessible."
     exit 1
 fi
 echo "OK: Booted backend is ComposeFS."

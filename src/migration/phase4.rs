@@ -342,9 +342,20 @@ pub(crate) fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_d
     // remains an empty mount point and bootc can't find meta.json.
     let loopback_path = Path::new("/sysroot/composefs-loopback.ext4");
     if loopback_path.exists() {
+        // --- sysroot-composefs.mount: loopback mount unit ---
+        // This mount unit ensures the ext4 loopback (composefs object store)
+        // is mounted at /sysroot/composefs. During initrd, xfs-mount.cpio
+        // handles this. The deploy /etc copy ensures it persists after
+        // switch-root. However, the composefs EROFS overlay HAS a
+        // /sysroot/composefs/ directory (empty) which SHADOWS the loopback
+        // mount after switch-root. To work around this, we create a bind-mount
+        // service that runs after switch-root and makes the loopback visible
+        // through the overlay.
+        let unit_dir = etc_dir.join("systemd/system");
+        fs::create_dir_all(&unit_dir)?;
         let mount_unit = format!(
             r#"[Unit]
-Description=ComposeFS Loopback Mount (persistent)
+Description=ComposeFS Loopback Mount
 After=sysroot.mount
 Before=initrd-root-fs.target bootc-root-setup.service
 DefaultDependencies=no
@@ -359,20 +370,53 @@ Options=loop,ro
 WantedBy=initrd-root-fs.target
 "#
         );
-        let unit_dir = etc_dir.join("systemd/system");
-        fs::create_dir_all(&unit_dir)?;
         let unit_path = unit_dir.join("sysroot-composefs.mount");
         if !unit_path.exists() {
             fs::write(&unit_path, mount_unit.as_bytes())
                 .context("failed to write sysroot-composefs.mount")?;
-            // Enable via .wants symlink in initrd-root-fs.target
-            let wants_dir = etc_dir.join("systemd/system/initrd-root-fs.target.wants");
-            fs::create_dir_all(&wants_dir)?;
-            let wants_link = wants_dir.join("sysroot-composefs.mount");
-            if !wants_link.exists() {
-                std::os::unix::fs::symlink("../sysroot-composefs.mount", &wants_link)?;
+            let irf_wants = etc_dir.join("systemd/system/initrd-root-fs.target.wants");
+            fs::create_dir_all(&irf_wants)?;
+            let link = irf_wants.join("sysroot-composefs.mount");
+            if !link.exists() {
+                std::os::unix::fs::symlink("../sysroot-composefs.mount", &link)?;
             }
             println!("[phase4] wrote sysroot-composefs.mount to deploy /etc");
+        }
+
+        // --- bootc-composefs-rebind.service: re-bind loopback after composefs switch-root ---
+        // After switch-root to the composefs EROFS, the /sysroot/composefs
+        // directory in the EROFS image shadows the actual loopback mount.
+        // This oneshot service bind-mounts the ext4 loopback ON TOP of the
+        // EROFS directory so /sysroot/composefs/meta.json is accessible.
+        // Runs after sysroot.mount and before services that need the repo.
+        let rebind_unit = format!(
+            r#"[Unit]
+Description=Rebind composefs loopback through EROFS overlay
+DefaultDependencies=no
+After=sysroot.mount
+Before=local-fs.target
+Requires=sysroot.mount
+
+[Service]
+Type=oneshot
+ExecStart=/bin/mount /sysroot/composefs-loopback.ext4 /sysroot/composefs -t ext4 -o loop,ro
+RemainAfterExit=yes
+
+[Install]
+WantedBy=local-fs.target
+"#
+        );
+        let rebind_path = unit_dir.join("bootc-composefs-rebind.service");
+        if !rebind_path.exists() {
+            fs::write(&rebind_path, rebind_unit.as_bytes())
+                .context("failed to write bootc-composefs-rebind.service")?;
+            let lf_wants = etc_dir.join("systemd/system/local-fs.target.wants");
+            fs::create_dir_all(&lf_wants)?;
+            let rebind_link = lf_wants.join("bootc-composefs-rebind.service");
+            if !rebind_link.exists() {
+                std::os::unix::fs::symlink("../bootc-composefs-rebind.service", &rebind_link)?;
+            }
+            println!("[phase4] wrote bootc-composefs-rebind.service to deploy /etc");
         }
     }
 
