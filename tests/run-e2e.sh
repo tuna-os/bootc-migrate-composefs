@@ -57,6 +57,11 @@ step "Reaping stray processes from prior runs..."
         sudo kill -9 $reap_pids 2>/dev/null || true
     fi
 } || true
+# Nuke stale LUKS dm mapper from prior runs (kernel holds dm devices open even after loop cleanup).
+if [ -L /dev/mapper/e2e-root ]; then
+    sudo dmsetup remove -f e2e-root 2>/dev/null || \
+        (sudo dmsetup message e2e-root 0 "key wipe" 2>/dev/null; sleep 1; sudo dmsetup remove -f e2e-root 2>/dev/null) || true
+fi
 # Wait until the port is free so QEMU can bind it.
 for _ in $(seq 1 10); do
     if ! sudo ss -lntH "sport = :${SSH_PORT}" 2>/dev/null | grep -q .; then break; fi
@@ -296,8 +301,21 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     ROOT_PART="${LOOP_DEV}p2"
     ESP_PART="${LOOP_DEV}p1"
 
-    # Close stale mapper from previous run, create keyfile, format LUKS
-    sudo cryptsetup close e2e-root 2>/dev/null || true
+    # Nuke any stale e2e-root mapper from previous runs (they survive
+    # loop device detach because the kernel holds the dm device open).
+    # Use dmsetup to force-remove the stale device-mapper entry.
+    if [ -L /dev/mapper/e2e-root ]; then
+        sudo dmsetup remove -f e2e-root 2>/dev/null || \
+            (sudo dmsetup message e2e-root 0 "key wipe" 2>/dev/null; \
+             sudo dmsetup remove -f e2e-root 2>/dev/null) || true
+        sleep 1
+    fi
+    # Also clear the LUKS header on the partition if it exists
+    if sudo blkid "$ROOT_PART" 2>/dev/null | grep -q 'crypto_LUKS'; then
+        sudo dd if=/dev/zero of="$ROOT_PART" bs=1M count=4 status=none 2>/dev/null || true
+        sudo partprobe "$LOOP_DEV" 2>/dev/null || true
+        sleep 1
+    fi
     LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
     dd if=/dev/urandom bs=64 count=1 of="$LUKS_KEYFILE" 2>/dev/null
     sudo cryptsetup luksFormat "$ROOT_PART" --key-file="$LUKS_KEYFILE" --batch-mode 2>&1
