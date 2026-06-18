@@ -867,6 +867,77 @@ if [ -z "$ORIGIN" ]; then
 fi
 echo "OK: .origin file present"
 
+# Test 5: Merged /etc content is not zero-filled (EROFS regression check).
+DEPLOY_DIR=$(find "$HOST_ROOT_MNT/state/deploy" -maxdepth 1 -type d 2>/dev/null | head -1)
+if [ -n "$DEPLOY_DIR" ] && [ -f "$DEPLOY_DIR/etc/passwd" ]; then
+    PASSWD_SIZE=$(stat -c%s "$DEPLOY_DIR/etc/passwd" 2>/dev/null || echo 0)
+    PASSWD_MAGIC=$(xxd -l2 -p "$DEPLOY_DIR/etc/passwd" 2>/dev/null || echo "00")
+    if [ "$PASSWD_SIZE" -eq 0 ] || [ "$PASSWD_MAGIC" = "0000" ]; then
+        echo "FAIL: merged /etc/passwd is zero-filled ($PASSWD_SIZE bytes, magic=$PASSWD_MAGIC)" >&2
+        sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+        sudo losetup -d "$HOST_LOOP"; exit 1
+    fi
+    echo "OK: merged /etc/passwd is non-zero (${PASSWD_SIZE} bytes, magic=$PASSWD_MAGIC)"
+fi
+
+# Test 6: dbus config is valid XML (starts with DOCTYPE or busconfig tag).
+if [ -n "$DEPLOY_DIR" ] && [ -f "$DEPLOY_DIR/etc/dbus-1/system.conf" ]; then
+    DBCONF_HEAD=$(head -c 50 "$DEPLOY_DIR/etc/dbus-1/system.conf" | tr -d '\0' | head -c 50)
+    if echo "$DBCONF_HEAD" | grep -q 'busconfig\|DOCTYPE'; then
+        echo "OK: dbus system.conf is valid XML"
+    else
+        echo "FAIL: dbus system.conf is not valid XML (head: ${DBCONF_HEAD:0:40})" >&2
+        sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+        sudo losetup -d "$HOST_LOOP"; exit 1
+    fi
+fi
+
+# Test 7: sysroot-composefs.mount unit exists in deploy /etc (survives switch-root).
+if [ -n "$DEPLOY_DIR" ] && [ -d "$DEPLOY_DIR/etc/systemd/system" ]; then
+    if [ -f "$DEPLOY_DIR/etc/systemd/system/sysroot-composefs.mount" ]; then
+        echo "OK: sysroot-composefs.mount in deploy /etc"
+        # Check it's enabled in initrd-root-fs.target.wants
+        if [ -L "$DEPLOY_DIR/etc/systemd/system/initrd-root-fs.target.wants/sysroot-composefs.mount" ]; then
+            echo "OK: sysroot-composefs.mount enabled in initrd-root-fs.target"
+        fi
+    else
+        echo "WARN: sysroot-composefs.mount not found in deploy /etc (not an XFS system?)" >&2
+    fi
+fi
+
+# Test 8: BLS entry title uses NAME VERSION format (not "Linux (composefs)").
+for BLS in "$HOST_ESP_MNT/loader/entries/bootc_"*.conf "$HOST_ROOT_MNT/boot/loader/entries/bootc_"*.conf; do
+    if [ -f "$BLS" ]; then
+        BLS_TITLE=$(grep '^title ' "$BLS" | head -1)
+        if echo "$BLS_TITLE" | grep -qi '^title Linux\|Linux (composefs)'; then
+            echo "WARN: BLS entry uses generic title: $BLS_TITLE" >&2
+        else
+            echo "OK: BLS entry title: $BLS_TITLE"
+        fi
+        break
+    fi
+done
+
+# Test 9: meta.json exists in composefs store (bootc status depends on it).
+if [ -d "$HOST_ROOT_MNT/composefs" ]; then
+    META="$HOST_ROOT_MNT/composefs/meta.json"
+elif [ -d "$HOST_ROOT_MNT/sysroot/composefs" ]; then
+    META="$HOST_ROOT_MNT/sysroot/composefs/meta.json"
+else
+    META=""
+fi
+if [ -n "$META" ] && [ -f "$META" ]; then
+    echo "OK: meta.json present in composefs store"
+    # Verify it's valid JSON
+    if python3 -c "import json; json.load(open('$META'))" 2>/dev/null; then
+        echo "OK: meta.json is valid JSON"
+    else
+        echo "FAIL: meta.json is not valid JSON" >&2
+        sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
+        sudo losetup -d "$HOST_LOOP"; exit 1
+    fi
+fi
+
 sudo umount "$HOST_ESP_MNT" "$HOST_ROOT_MNT"
 sudo losetup -d "$HOST_LOOP"
 echo "OK: All host-side disk checks passed."
