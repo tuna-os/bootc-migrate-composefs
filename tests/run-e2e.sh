@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+# Unique LUKS mapper name per run to avoid stale dm device conflicts
+UUID_SUFFIX=$(date +%s)_$$  # timestamp + PID should be unique enough
+LUKS_MAPPER="e2e-root_${UUID_SUFFIX}"
+
 # Configurable parameters
 BASE_IMAGE="${BASE_IMAGE:-ghcr.io/projectbluefin/bluefin:stable}"
 TARGET_IMAGE="${TARGET_IMAGE:-ghcr.io/projectbluefin/dakota:stable}"
@@ -58,9 +62,9 @@ step "Reaping stray processes from prior runs..."
     fi
 } || true
 # Nuke stale LUKS dm mapper from prior runs (kernel holds dm devices open even after loop cleanup).
-if [ -L /dev/mapper/e2e-root ]; then
-    sudo dmsetup remove -f e2e-root 2>/dev/null || \
-        (sudo dmsetup message e2e-root 0 "key wipe" 2>/dev/null; sleep 1; sudo dmsetup remove -f e2e-root 2>/dev/null) || true
+if [ -L /dev/mapper/"$LUKS_MAPPER" ]; then
+    sudo dmsetup remove -f "$LUKS_MAPPER" 2>/dev/null || \
+        (sudo dmsetup message "$LUKS_MAPPER" 0 "key wipe" 2>/dev/null; sleep 1; sudo dmsetup remove -f "$LUKS_MAPPER" 2>/dev/null) || true
 fi
 # Wait until the port is free so QEMU can bind it.
 for _ in $(seq 1 10); do
@@ -270,7 +274,7 @@ cleanup() {
     if [ -n "${LOOP_DEV:-}" ]; then
         step "Detaching loopback device $LOOP_DEV..."
         sudo umount /tmp/mnt-e2e-disk 2>/dev/null || true
-        sudo cryptsetup close e2e-root 2>/dev/null || true
+        sudo cryptsetup close "$LUKS_MAPPER" 2>/dev/null || true
         sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
     fi
     rm -f ./test_key ./test_key.pub
@@ -301,13 +305,13 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     ROOT_PART="${LOOP_DEV}p2"
     ESP_PART="${LOOP_DEV}p1"
 
-    # Nuke any stale e2e-root mapper from previous runs (they survive
+    # Nuke any stale "$LUKS_MAPPER" mapper from previous runs (they survive
     # loop device detach because the kernel holds the dm device open).
     # Use dmsetup to force-remove the stale device-mapper entry.
-    if [ -L /dev/mapper/e2e-root ]; then
-        sudo dmsetup remove -f e2e-root 2>/dev/null || \
-            (sudo dmsetup message e2e-root 0 "key wipe" 2>/dev/null; \
-             sudo dmsetup remove -f e2e-root 2>/dev/null) || true
+    if [ -L /dev/mapper/"$LUKS_MAPPER" ]; then
+        sudo dmsetup remove -f "$LUKS_MAPPER" 2>/dev/null || \
+            (sudo dmsetup message "$LUKS_MAPPER" 0 "key wipe" 2>/dev/null; \
+             sudo dmsetup remove -f "$LUKS_MAPPER" 2>/dev/null) || true
         sleep 1
     fi
     # Also clear the LUKS header on the partition if it exists
@@ -319,7 +323,7 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
     dd if=/dev/urandom bs=64 count=1 of="$LUKS_KEYFILE" 2>/dev/null
     sudo cryptsetup luksFormat "$ROOT_PART" --key-file="$LUKS_KEYFILE" --batch-mode 2>&1
-    sudo cryptsetup open "$ROOT_PART" e2e-root --key-file="$LUKS_KEYFILE"
+    sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE"
 
     # Create XFS filesystem inside LUKS.
     # Use full path: on some systems (e.g. ostree-based) mkfs.xfs may not be
@@ -335,9 +339,9 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
         echo "ERROR: mkfs.xfs not found — install xfsprogs" >&2
         exit 1
     fi
-    sudo "$MKFS_XFS" -f /dev/mapper/e2e-root
+    sudo "$MKFS_XFS" -f /dev/mapper/"$LUKS_MAPPER"
     sudo mkdir -p /tmp/mnt-e2e-luks-root
-    sudo mount /dev/mapper/e2e-root /tmp/mnt-e2e-luks-root
+    sudo mount /dev/mapper/"$LUKS_MAPPER" /tmp/mnt-e2e-luks-root
 
     # Format ESP
     sudo mkfs.vfat -F 32 -n EFI-SYSTEM "$ESP_PART"
@@ -363,7 +367,7 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
 
     # Add crypttab entry and keyfile path to the installed system
     ESCAPED_UUID=$(sudo cryptsetup luksUUID "$ROOT_PART")
-    echo "e2e-root UUID=$ESCAPED_UUID /keys/luks.key luks" | \
+    echo "$LUKS_MAPPER UUID=$ESCAPED_UUID /keys/luks.key luks" | \
         sudo tee /tmp/mnt-e2e-luks-root/etc/crypttab
 
     # Copy keyfile into initramfs-accessible location on root
@@ -375,7 +379,7 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
         [ -f "$bls" ] || continue
         if ! grep -q 'rd.luks' "$bls"; then
             sudo sed -i \
-                's|^options \(.*\)|options \1 rd.luks.key=/keys/luks.key rd.luks.name=e2e-root rd.luks.options=discard|' \
+                "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" \
                 "$bls"
             echo "[luks] added LUKS kernel args to $bls"
         fi
@@ -385,7 +389,7 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     # and the LUKS dracut module. The crypttab entry + keyfile are sufficient.
 
     sudo umount /tmp/mnt-e2e-luks-root
-    sudo cryptsetup close e2e-root
+    sudo cryptsetup close "$LUKS_MAPPER"
     sudo losetup -d "$LOOP_DEV"
     echo "LUKS disk setup complete"
 else
@@ -425,9 +429,9 @@ for i in $(seq 1 10); do
             if [ "$local_fstype" = "crypto_LUKS" ]; then
                 ROOT_PART="$p"
                 LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
-                sudo cryptsetup open "$ROOT_PART" e2e-root --key-file="$LUKS_KEYFILE" 2>/dev/null || true
+                sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE" 2>/dev/null || true
                 # Now the mapper device is available
-                ROOT_MAPPER="/dev/mapper/e2e-root"
+                ROOT_MAPPER="/dev/mapper/"$LUKS_MAPPER""
                 break 2
             fi
         elif [ "$local_fstype" = "$FILESYSTEM" ]; then
@@ -442,8 +446,8 @@ if [ -z "$ROOT_PART" ]; then
 fi
 MNT_DIR="/tmp/mnt-e2e-disk"
 sudo mkdir -p "$MNT_DIR"
-if [ "$FILESYSTEM" = "xfs+crypt" ] && [ -b "/dev/mapper/e2e-root" ]; then
-    sudo mount "/dev/mapper/e2e-root" "$MNT_DIR"
+if [ "$FILESYSTEM" = "xfs+crypt" ] && [ -b "/dev/mapper/"$LUKS_MAPPER"" ]; then
+    sudo mount "/dev/mapper/"$LUKS_MAPPER"" "$MNT_DIR"
 else
     sudo mount "$ROOT_PART" "$MNT_DIR"
 fi
