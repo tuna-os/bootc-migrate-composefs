@@ -1,0 +1,51 @@
+# Publish release binaries when a v* tag is pushed.
+#
+#   git tag -a v0.1.0 -m 'Release 0.1.0' && git push origin v0.1.0
+#
+# Builds an optimized binary per target and attaches it (plus a SHA-256
+# checksum) to the GitHub Release for the tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  upload-binaries:
+    name: Build + upload (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build.rs reads the git SHA; a full checkout keeps that meaningful.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # Builds in release mode, names the archive, generates a checksum, and
+      # uploads it to the Release for the tag. Cross-compiles the non-native
+      # target via `cross` automatically. On workflow_dispatch (no tag) it
+      # builds but skips the upload.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: bootc-migrate-composefs
+          target: ${{ matrix.target }}
+          archive: $bin-$tag-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

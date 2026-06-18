@@ -1,5 +1,8 @@
 name: E2E Migration Tests
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main ]
@@ -67,6 +70,9 @@ jobs:
             netcat-openbsd \
             cryptsetup \
             xfsprogs \
+            dosfstools \
+            swtpm \
+            swtpm-tools \
 
       # GitHub-hosted Linux runners expose /dev/kvm but the runner user isn't in
       # the kvm group by default. Make it world-accessible for this job so QEMU
