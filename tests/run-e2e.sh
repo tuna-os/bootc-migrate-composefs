@@ -323,7 +323,8 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
 
     # swtpm must persist for VM boot to unlock LUKS via TPM2
     # SWTPM_PID is kept running; QEMU connects via SWTPM_QEMU_ARGS
-    SWTPM_QEMU_ARGS="-tpmdev passthrough,id=tpm0,path=/tmp/swtpm-sock -device tpm-tis,tpmdev=tpm0"
+    # QEMU TPM2 via swtpm socket: chardev + tpmdev emulator, not passthrough
+    SWTPM_QEMU_ARGS="-chardev socket,id=chrtpm,path=/tmp/swtpm-sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0"
     export SWTPM_QEMU_ARGS
     # Skip SSH injection + fixtures: bootc install already injected the
     # SSH key, and the LUKS-encrypted root is inaccessible from the host.
