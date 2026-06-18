@@ -345,10 +345,17 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     DEPLOY_ROOT=$(sudo podman run --rm -v /tmp/mnt-e2e-luks-root:/target \
         "$INSTALL_IMAGE" ostree admin --sysroot=/target --print-current-dir 2>/dev/null || true)
     if [ -z "$DEPLOY_ROOT" ]; then
-        DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 5 -name 'etc' -type d 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
+        # Find the deploy dir (a directory ending in .0 with etc/ and var/ subdirs)
+        DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 5 -type d -name '*.0' 2>/dev/null | while read d; do
+            if [ -d "$d/etc" ] && [ -d "$d/var" ]; then echo "$d"; break; fi
+        done)
     fi
     if [ -z "$DEPLOY_ROOT" ]; then echo "ERROR: no deploy root"; exit 1; fi
-    DEPLOY_ROOT="/tmp/mnt-e2e-luks-root/${DEPLOY_ROOT#/}"
+    # ostree admin returns path relative to sysroot; prepend if not already absolute
+    case "$DEPLOY_ROOT" in
+      /tmp/mnt-e2e-luks-root/*) ;;
+      *) DEPLOY_ROOT="/tmp/mnt-e2e-luks-root/${DEPLOY_ROOT#/}" ;;
+    esac
     echo "[luks] deploy root: $DEPLOY_ROOT"
 
     # crypttab + keyfile on the installed system

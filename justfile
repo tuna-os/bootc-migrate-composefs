@@ -142,10 +142,12 @@ e2e-log:
 
 # Watch the latest E2E log with auto-exit on errors
 watch log="":
-	@LOG="{{log}}"; if [ -z "$LOG" ]; then \
-	  LOG=$$(ls -t e2e-*.log 2>/dev/null | head -1); fi; \
-	if [ -z "$LOG" ]; then echo "No E2E log found"; exit 1; fi; \
-	echo "Watching: $LOG"; ./watcher.sh "$LOG" 30 300
+	@LOG="{{log}}"; \
+	if [ -z "$LOG" ]; then \
+	  LOG=$(ls -t *.log 2>/dev/null | head -1); \
+	  if [ -z "$$LOG" ]; then echo "No log found"; exit 1; fi; \
+	fi; \
+	echo "Watching: $LOG"; exec ./watcher.sh "$LOG" 30 300
 
 # Grep E2E log for failures
 e2e-failures:
