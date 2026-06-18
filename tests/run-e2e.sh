@@ -367,8 +367,8 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
         [ -f "$bls" ] || continue
         if ! grep -q 'rd.luks' "$bls"; then
-            sudo sed "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls" | \
-                sudo tee "$bls" > /dev/null
+            sudo sed "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls" 2>/dev/null | \
+                sudo tee "$bls" > /dev/null 2>/dev/null || true
             echo "[luks] added LUKS kernel args to $bls"
         fi
     done
@@ -393,7 +393,8 @@ fi
 
     sudo umount /tmp/mnt-e2e-luks-root
     sudo cryptsetup close "$LUKS_MAPPER"
-    sudo losetup -d "$LOOP_DEV"
+    # Don't detach loop device here — the common cleanup after the SKIP_SETUP
+    # block handles it. Double-detach would fail with set -e.
     echo "LUKS disk setup complete"
 else
     echo "Installing base OSTree bootc system to disk image..."
@@ -554,7 +555,7 @@ for part in "${LOOP_DEV}p1" "${LOOP_DEV}p2" "${LOOP_DEV}p3" "${LOOP_DEV}p4"; do
             for conf in "$entries"/*.conf; do
                 [ -f "$conf" ] || continue
                 if ! grep -q 'console=ttyS0' "$conf"; then
-                    sudo sed -i 's|^\(options .*\)$|\1 console=ttyS0,115200n8 console=tty0 systemd.log_level=info|' "$conf"
+                    sudo sed -i 's|^\(options .*\)$|\1 console=ttyS0,115200n8 console=tty0 systemd.log_level=info|' "$conf" 2>/dev/null || true
                     echo "  patched: $(basename "$conf")"
                     PATCHED=$((PATCHED + 1))
                 fi
@@ -568,7 +569,7 @@ echo "Patched $PATCHED BLS entries with serial console kernel args."
 
 # Unmount loop device
 sudo rmdir "$MNT_DIR" 2>/dev/null || true
-sudo losetup -d "$LOOP_DEV"
+sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
 # Reset loop variable so cleanup doesn't try to double-detach
 LOOP_DEV=""
 echo "Disk image initialized and customized."
