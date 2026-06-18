@@ -296,65 +296,25 @@ LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
 echo "Mounted loopback device: $LOOP_DEV"
 
 if [[ "$FILESYSTEM" == xfs+crypt ]]; then
-    echo "LUKS encryption enabled — installing plain disk first, then encrypting..."
-    # Use bootc install to-disk for proper ESP + bootloader setup.
+    echo "LUKS encryption enabled — using Dakota bootc with tpm2-luks..."
+    # Use the TARGET image (Dakota) as installer: it has bootc with
+    # --block-setup tpm2-luks support for proper LUKS + /boot partition.
+    # This creates a separate unencrypted /boot partition with GRUB and
+    # BLS entries, then LUKS-encrypts the root. SSH key is injected by bootc.
     sudo podman run --privileged --pid=host --rm \
         -v /dev:/dev \
         -v /var/tmp:/var/tmp \
         -v /tmp:/tmp \
         -v "$WORKSPACE_DIR":/workspace \
-        "$INSTALL_IMAGE" \
+        "$TARGET_IMAGE" \
         bootc install to-disk \
         --generic-image \
         --filesystem xfs \
+        --block-setup tpm2-luks \
         --root-ssh-authorized-keys /workspace/test_key.pub \
         "$LOOP_DEV"
-
-    # Find root partition (XFS) and ESP
-    ROOT_PART=""; ESP_PART=""
-    for p in "${LOOP_DEV}"p*; do
-        fstype=$(sudo blkid -o value -s TYPE "$p" 2>/dev/null || true)
-        if [ "$fstype" = "vfat" ]; then ESP_PART="$p"
-        elif [ "$fstype" = "xfs" ]; then ROOT_PART="$p"; fi
-    done
-    if [ -z "$ROOT_PART" ] || [ -z "$ESP_PART" ]; then
-        echo "ERROR: could not find root or ESP partition"; exit 1
-    fi
-
-    # Mount ESP, store LUKS keyfile
-    LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
-    dd if=/dev/urandom bs=64 count=1 of="$LUKS_KEYFILE" 2>/dev/null
-    sudo mkdir -p /tmp/mnt-e2e-luks-esp
-    sudo mount "$ESP_PART" /tmp/mnt-e2e-luks-esp
-    sudo mkdir -p /tmp/mnt-e2e-luks-esp/keys
-    sudo cp "$LUKS_KEYFILE" /tmp/mnt-e2e-luks-esp/keys/luks.key
-    sudo umount /tmp/mnt-e2e-luks-esp
-
-    # Convert root XFS to LUKS in-place
-    echo "[luks] encrypting root partition..."
-    sudo cryptsetup reencrypt \
-        --encrypt --type luks2 \
-        --key-file="$LUKS_KEYFILE" \
-        --reduce-device-size 32M \
-        --resilience=checksum --batch-mode \
-        "$ROOT_PART" 2>&1 || echo "[luks] WARN: reencrypt failed"
-
-    # Open LUKS, update BLS entries with rd.luks kernel args (on ESP)
-    if sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE" 2>/dev/null; then
-        # Mount the ESP and patch BLS entries there (avoids XFS mount issues after reencrypt)
-        sudo mount "$ESP_PART" /tmp/mnt-e2e-luks-esp 2>/dev/null
-        for bls in /tmp/mnt-e2e-luks-esp/loader/entries/ostree-*.conf /tmp/mnt-e2e-luks-esp/boot/loader/entries/ostree-*.conf; do
-            [ -f "$bls" ] || continue
-            if ! grep -q 'rd.luks' "$bls"; then
-                sudo sed -i "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls" 2>/dev/null || true
-                echo "[luks] added LUKS kernel args to $bls"
-            fi
-        done
-        sudo umount /tmp/mnt-e2e-luks-esp
-        sudo cryptsetup close "$LUKS_MAPPER"
-    fi
     SKIP_SETUP=true
-    echo "LUKS disk setup complete"
+    echo "LUKS disk setup complete (tpm2-luks via Dakota bootc)"
 fi
 else
     echo "Installing base OSTree bootc system to disk image..."
