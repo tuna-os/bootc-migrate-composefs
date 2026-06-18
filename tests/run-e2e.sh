@@ -326,11 +326,10 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE"
 
     # Create XFS filesystem inside LUKS.
-    # Use full path: on some systems (e.g. ostree-based) mkfs.xfs may not be
-    # in sudo's PATH even when installed to /var/usrlocal/bin.
+    # Try candidates in order: full-path binaries first (works with sudo), then PATH lookup.
     MKFS_XFS=""
-    for p in mkfs.xfs /var/usrlocal/bin/mkfs.xfs /usr/sbin/mkfs.xfs; do
-        if [ -x "$p" ] || (command -v "$p" &>/dev/null); then
+    for p in /var/usrlocal/bin/mkfs.xfs /usr/sbin/mkfs.xfs mkfs.xfs; do
+        if [ -x "$p" ] || (command -v "$p" &>/dev/null && sudo "$p" -V &>/dev/null 2>&1); then
             MKFS_XFS="$p"
             break
         fi
