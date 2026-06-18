@@ -38,17 +38,17 @@ while true; do
     CURRENT_SIZE=$(stat -c%s "$LOG" 2>/dev/null || echo 0)
 
     if [ "$CURRENT_SIZE" != "$LAST_SIZE" ]; then
-        # Print new lines since last check
+        # Print new lines since last check (strip null bytes from binary content)
         if [ "$LAST_SIZE" -gt 0 ] 2>/dev/null; then
-            tail -c +$((LAST_SIZE + 1)) "$LOG" 2>/dev/null
+            tail -c +$((LAST_SIZE + 1)) "$LOG" 2>/dev/null | tr -d '\0'
         else
-            cat "$LOG" 2>/dev/null
+            tr -d '\0' < "$LOG" 2>/dev/null
         fi
         LAST_SIZE=$CURRENT_SIZE
         IDLE_SECONDS=0
 
         # Check for un-whitelisted error words in tail of log
-        NEW_TAIL=$(tail -c 8192 "$LOG" 2>/dev/null)
+        NEW_TAIL=$(tail -c 8192 "$LOG" 2>/dev/null | tr -d '\0')
         CLEAN=$(echo "$NEW_TAIL" | grep -vE "$WHITELIST" 2>/dev/null || true)
         if echo "$CLEAN" | grep -qE "$ERROR_WORDS" 2>/dev/null; then
             echo ""
