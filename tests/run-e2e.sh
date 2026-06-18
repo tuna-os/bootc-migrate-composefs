@@ -332,26 +332,19 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     sudo mkdir -p /tmp/mnt-e2e-luks-root/keys
     sudo cp "$LUKS_KEYFILE" /tmp/mnt-e2e-luks-root/keys/luks.key
 
-    # Add rd.luks.key kernel arg to the BLS entry
+    # Add rd.luks.key + rd.luks.name + rd.luks.options kernel args to BLS entries
     for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
         [ -f "$bls" ] || continue
-        if ! grep -q 'rd.luks.key' "$bls"; then
-            sudo sed -i 's|^options \(.*\)|options \1 rd.luks.key=/keys/luks.key|' "$bls"
+        if ! grep -q 'rd.luks' "$bls"; then
+            sudo sed -i \
+                's|^options \(.*\)|options \1 rd.luks.key=/keys/luks.key rd.luks.name=e2e-root rd.luks.options=discard|' \
+                "$bls"
+            echo "[luks] added LUKS kernel args to $bls"
         fi
     done
 
-    # Rebuild initrd to include cryptsetup
-    # Use the podman container to run dracut with crypt module
-    sudo podman run --privileged --pid=host --rm \
-        -v /dev:/dev \
-        -v /tmp/mnt-e2e-luks-root:/target \
-        --entrypoint /bin/bash \
-        "$INSTALL_IMAGE" \
-        -c "\
-            dracut --kver \$(ls /target/usr/lib/modules) \
-                --add crypt \
-                --force /target/boot/ostree/*/initramfs-*.img \
-        " 2>&1 || echo "WARN: dracut rebuild for LUKS failed"
+    # No initrd rebuild needed: Fedora's stock initrds include systemd-cryptsetup
+    # and the LUKS dracut module. The crypttab entry + keyfile are sufficient.
 
     sudo umount /tmp/mnt-e2e-luks-root
     sudo cryptsetup close e2e-root
