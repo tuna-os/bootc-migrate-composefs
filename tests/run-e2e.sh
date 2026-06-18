@@ -339,19 +339,18 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
         --resilience=checksum --batch-mode \
         "$ROOT_PART" 2>&1 || echo "[luks] WARN: reencrypt failed"
 
-    # Open LUKS, update BLS entries with rd.luks kernel args
+    # Open LUKS, update BLS entries with rd.luks kernel args (on ESP)
     if sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE" 2>/dev/null; then
-        sudo mkdir -p /tmp/mnt-e2e-luks-root
-        sudo mount "/dev/mapper/$LUKS_MAPPER" /tmp/mnt-e2e-luks-root
-        for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
+        # Mount the ESP and patch BLS entries there (avoids XFS mount issues after reencrypt)
+        sudo mount "$ESP_PART" /tmp/mnt-e2e-luks-esp 2>/dev/null
+        for bls in /tmp/mnt-e2e-luks-esp/loader/entries/ostree-*.conf /tmp/mnt-e2e-luks-esp/boot/loader/entries/ostree-*.conf; do
             [ -f "$bls" ] || continue
             if ! grep -q 'rd.luks' "$bls"; then
-                sudo sed "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls" 2>/dev/null | \
-                    sudo tee "$bls" > /dev/null 2>/dev/null || true
+                sudo sed -i "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls" 2>/dev/null || true
                 echo "[luks] added LUKS kernel args to $bls"
             fi
         done
-        sudo umount /tmp/mnt-e2e-luks-root
+        sudo umount /tmp/mnt-e2e-luks-esp
         sudo cryptsetup close "$LUKS_MAPPER"
     fi
     SKIP_SETUP=true
