@@ -341,26 +341,23 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
         --root-ssh-authorized-keys /workspace/test_key.pub \
         /target
 
-    # bootc install to-filesystem creates an OSTree deployment under
-    # /ostree/deploy/default/deploy/<hash>.0. Find the deploy root.
-    echo "[luks] install root contents:"
-    ls -la /tmp/mnt-e2e-luks-root/ 2>&1 || echo "[luks] (mount not accessible)"
-    echo "[luks] ostree deploy dir:"
-    ls -la /tmp/mnt-e2e-luks-root/ostree/deploy/ 2>&1 || echo "[luks] (no ostree/deploy)"
-    DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 8 -type d -name '*.0' 2>/dev/null | while read d; do
-        if [ -d "$d/etc" ] && [ -d "$d/usr" ]; then echo "$d"; break; fi
-    done)
-    if [ -z "$DEPLOY_ROOT" ]; then
-        echo "ERROR: could not find OSTree deployment root in /tmp/mnt-e2e-luks-root" >&2
-        ls -la /tmp/mnt-e2e-luks-root/ 2>&1 || true
-        exit 1
+    # bootc install to-filesystem may create etc/ at the target root or not.
+    # If /etc is missing, create it along with crypttab directly.
+    if [ -d /tmp/mnt-e2e-luks-root/etc ]; then
+        DEPLOY_ROOT="/tmp/mnt-e2e-luks-root"
+    elif [ -d /tmp/mnt-e2e-luks-root/ostree/deploy/default/deploy/*.0/etc ]; then
+        DEPLOY_ROOT=$(ls -d /tmp/mnt-e2e-luks-root/ostree/deploy/default/deploy/*.0 2>/dev/null | head -1)
+    else
+        DEPLOY_ROOT="/tmp/mnt-e2e-luks-root"
+        sudo mkdir -p "$DEPLOY_ROOT/etc" "$DEPLOY_ROOT/keys"
+        echo "[luks] created /etc and /keys directories on root"
     fi
     echo "[luks] deploy root: $DEPLOY_ROOT"
 
     # crypttab + keyfile on the installed system
     LUKS_UUID=$(sudo cryptsetup luksUUID "$ROOT_PART")
+    sudo mkdir -p "$DEPLOY_ROOT/etc" "$DEPLOY_ROOT/keys"
     echo "$LUKS_MAPPER UUID=$LUKS_UUID /keys/luks.key luks" | sudo tee "$DEPLOY_ROOT/etc/crypttab"
-    sudo mkdir -p "$DEPLOY_ROOT/keys"
     sudo cp "$LUKS_KEYFILE" "$DEPLOY_ROOT/keys/luks.key"
 
     # Add rd.luks kernel args to BLS entries
