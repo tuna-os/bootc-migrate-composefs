@@ -6,7 +6,7 @@ LOG="$1"
 POLL="${2:-30}"
 IDLE_LIMIT="${3:-300}"
 ERROR_WORDS="${4:-error|ERROR|FAIL:|FAILED|Timeout|timed out|could not|No such|Permission denied|not found|exit code|exited with|blocked by}"
-WHITELIST="${5:-WARN:|Warning:|warn:|WARNING|Timeout: 0 seconds|Read-only file system}"
+WHITELIST="${5:-WARN:|Warning:|warn:|WARNING|Timeout: 0 seconds|Read-only file system|mkdir: Read-only}"
 
 if [ -z "$LOG" ]; then
     echo "Usage: $0 <logfile> [poll_secs=30] [idle_limit_secs=120] [error_words] [whitelist_words]"
