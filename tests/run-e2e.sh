@@ -277,6 +277,11 @@ cleanup() {
         sudo cryptsetup close "$LUKS_MAPPER" 2>/dev/null || true
         sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
     fi
+    # Clean up swtpm if running
+    if [ -n "${SWTPM_PID:-}" ]; then
+        kill "$SWTPM_PID" 2>/dev/null || true
+        rm -rf /tmp/swtpm-tpmstate /tmp/swtpm-sock 2>/dev/null || true
+    fi
     rm -f ./test_key ./test_key.pub
 }
 trap cleanup EXIT
@@ -291,104 +296,40 @@ LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
 echo "Mounted loopback device: $LOOP_DEV"
 
 if [[ "$FILESYSTEM" == xfs+crypt ]]; then
-    echo "LUKS encryption enabled — setting up disk manually..."
-    # Partition: ESP (vfat, 512MB) + root (LUKS, rest) using parted.
-    sudo parted -s "$LOOP_DEV" mklabel gpt
-    sudo parted -s "$LOOP_DEV" mkpart primary fat32 1MiB 513MiB
-    sudo parted -s "$LOOP_DEV" set 1 esp on
-    sudo parted -s "$LOOP_DEV" name 1 EFI-SYSTEM
-    sudo parted -s "$LOOP_DEV" mkpart primary 513MiB 100%
-    sudo partprobe "$LOOP_DEV"
-    sudo udevadm settle
+    echo "LUKS encryption enabled — using bootc install to-disk + swtpm..."
+    # Start swtpm for TPM2 emulation
+    sudo mkdir -p /tmp/swtpm-tpmstate
+    swtpm_setup --tpm2 --tpmstate /tmp/swtpm-tpmstate 2>&1 || true
+    swtpm socket --tpm2 --tpmstate dir=/tmp/swtpm-tpmstate \
+        --ctrl type=unixio,path=/tmp/swtpm-sock \
+        --flags startup-clear &
+    SWTPM_PID=$!
+    sleep 1
 
-    # Find root partition (partition 2)
-    ROOT_PART="${LOOP_DEV}p2"
-    ESP_PART="${LOOP_DEV}p1"
-
-    # Nuke any stale "$LUKS_MAPPER" mapper from previous runs (they survive
-    # loop device detach because the kernel holds the dm device open).
-    # Use dmsetup to force-remove the stale device-mapper entry.
-    if [ -L /dev/mapper/"$LUKS_MAPPER" ]; then
-        sudo dmsetup remove -f "$LUKS_MAPPER" 2>/dev/null || \
-            (sudo dmsetup message "$LUKS_MAPPER" 0 "key wipe" 2>/dev/null; \
-             sudo dmsetup remove -f "$LUKS_MAPPER" 2>/dev/null) || true
-        sleep 1
-    fi
-    # Also clear the LUKS header on the partition if it exists
-    if sudo blkid "$ROOT_PART" 2>/dev/null | grep -q 'crypto_LUKS'; then
-        sudo dd if=/dev/zero of="$ROOT_PART" bs=1M count=4 status=none 2>/dev/null || true
-        sudo partprobe "$LOOP_DEV" 2>/dev/null || true
-        sleep 1
-    fi
-    LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
-    dd if=/dev/urandom bs=64 count=1 of="$LUKS_KEYFILE" 2>/dev/null
-    sudo cryptsetup luksFormat "$ROOT_PART" --key-file="$LUKS_KEYFILE" --batch-mode 2>&1
-    sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE"
-
-    # Create XFS filesystem inside LUKS.
-    # Try candidates in order: full-path binaries first (works with sudo), then PATH lookup.
-    MKFS_XFS=""
-    for p in /var/usrlocal/bin/mkfs.xfs /usr/sbin/mkfs.xfs mkfs.xfs; do
-        if [ -x "$p" ] || (command -v "$p" &>/dev/null && sudo "$p" -V &>/dev/null 2>&1); then
-            MKFS_XFS="$p"
-            break
-        fi
-    done
-    if [ -z "$MKFS_XFS" ]; then
-        echo "ERROR: mkfs.xfs not found — install xfsprogs" >&2
-        exit 1
-    fi
-    sudo "$MKFS_XFS" -f /dev/mapper/"$LUKS_MAPPER"
-    sudo mkdir -p /tmp/mnt-e2e-luks-root
-    sudo mount /dev/mapper/"$LUKS_MAPPER" /tmp/mnt-e2e-luks-root
-
-    # Format ESP
-    sudo mkfs.vfat -F 32 -n EFI-SYSTEM "$ESP_PART"
-    sudo mkdir -p /tmp/mnt-e2e-luks-esp
-    sudo mount "$ESP_PART" /tmp/mnt-e2e-luks-esp
-
-    # Copy keyfile to ESP so initrd can find it
-    sudo mkdir -p /tmp/mnt-e2e-luks-esp/keys
-    sudo cp "$LUKS_KEYFILE" /tmp/mnt-e2e-luks-esp/keys/luks.key
-    sudo umount /tmp/mnt-e2e-luks-esp
-
-    # Install bootc via to-filesystem onto the unlocked root
+    # bootc install to-disk with tpm2-luks handles everything: partitions,
+    # LUKS encryption, filesystem, bootloader, and initrd setup.
     sudo podman run --privileged --pid=host --rm \
         -v /dev:/dev \
         -v /var/tmp:/var/tmp \
         -v /tmp:/tmp \
-        -v /tmp/mnt-e2e-luks-root:/target \
         -v "$WORKSPACE_DIR":/workspace \
         "$INSTALL_IMAGE" \
-        bootc install to-filesystem \
+        bootc install to-disk \
+        --generic-image \
+        --filesystem xfs \
+        --block-setup tpm2-luks \
         --root-ssh-authorized-keys /workspace/test_key.pub \
-        /target
+        "$LOOP_DEV"
 
-    # bootc install to-filesystem creates an OSTree deployment. Find the
-    # actual deployment root (where /etc lives) using ostree admin.
-    DEPLOY_ROOT=$(sudo podman run --rm -v /tmp/mnt-e2e-luks-root:/target \
-        "$INSTALL_IMAGE" ostree admin --sysroot=/target --print-current-dir 2>/dev/null || true)
-    if [ -z "$DEPLOY_ROOT" ]; then
-        # Fallback: find it manually
-        DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 5 -name 'etc' -type d 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
-    fi
-    if [ -z "$DEPLOY_ROOT" ]; then
-        echo "ERROR: could not find OSTree deployment root" >&2
-        exit 1
-    fi
-    # DEPLOY_ROOT from ostree is relative to sysroot, prepend full path
-    DEPLOY_ROOT="/tmp/mnt-e2e-luks-root/${DEPLOY_ROOT#/}"
-    echo "[luks] deploy root: $DEPLOY_ROOT"
-
-    # Add crypttab entry and keyfile path to the installed system
-    ESCAPED_UUID=$(sudo cryptsetup luksUUID "$ROOT_PART")
-    echo "$LUKS_MAPPER UUID=$ESCAPED_UUID /keys/luks.key luks" | \
-        sudo tee "$DEPLOY_ROOT/etc/crypttab"
-
-    # Copy keyfile into initramfs-accessible location on root
-    sudo mkdir -p "$DEPLOY_ROOT/keys"
-    sudo cp "$LUKS_KEYFILE" "$DEPLOY_ROOT/keys/luks.key"
-
+    # swtpm must persist for VM boot to unlock LUKS via TPM2
+    # SWTPM_PID is kept running; QEMU connects via SWTPM_QEMU_ARGS
+    SWTPM_QEMU_ARGS="-tpmdev passthrough,id=tpm0,path=/tmp/swtpm-sock -device tpm-tis,tpmdev=tpm0"
+    export SWTPM_QEMU_ARGS
+    # Skip SSH injection + fixtures: bootc install already injected the
+    # SSH key, and the LUKS-encrypted root is inaccessible from the host.
+    SKIP_SETUP=true
+    echo "LUKS disk setup complete (tpm2-luks, QEMU TPM configured)"
+fi
     # Add rd.luks.key + rd.luks.name + rd.luks.options kernel args to BLS entries
     for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
         [ -f "$bls" ] || continue
@@ -642,7 +583,8 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,file="$OVMF_VARS" \
     -drive file=disk.raw,format=raw,if=virtio \
     -netdev user,id=n1,hostfwd=tcp::"$SSH_PORT"-:22 \
-    -device virtio-net-pci,netdev=n1 > qemu.log 2>&1 &
+    -device virtio-net-pci,netdev=n1 \
+    ${SWTPM_QEMU_ARGS:-} > qemu.log 2>&1 &
 QEMU_PID=$!
 
 # 7. Wait for SSH to be available
