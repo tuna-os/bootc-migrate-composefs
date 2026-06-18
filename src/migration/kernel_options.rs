@@ -62,7 +62,7 @@ fn should_filter(word: &str) -> bool {
 mod tests {
     use super::*;
 
-    // --- #1: TDD tests for kernel option filtering ---
+    // TDD tests for kernel option filtering.
 
     /// Helper that simulates get_kernel_options without reading /proc/cmdline.
     fn build_options(cmdline: &str, hex_digest: &str) -> String {
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn preserves_root_arg() {
-        // Fix 7: root= is needed alongside composefs= per SPECIFICATION.md §4.2.
+        // root= is needed alongside composefs= per SPECIFICATION.md §4.2.
         let result = build_options("root=UUID=aaaa-bbbb quiet rw", "ab01cd23ef45");
         assert!(result.contains("root=UUID=aaaa-bbbb"));
         assert!(result.contains("quiet"));
@@ -134,6 +134,22 @@ mod tests {
         let result = build_options("rootflags=defaults quiet rw", "ab01cd23ef45");
         assert!(result.contains("rootflags=defaults"));
         assert!(result.contains("quiet"));
+    }
+
+    #[test]
+    fn preserves_rd_luks_args() {
+        // Migrating an encrypted system (e.g. Bluefin installed with LUKS) must
+        // carry the rd.luks.* unlock args from the source GRUB cmdline onto the
+        // new systemd-boot/composefs BLS entry, or the post-migration boot loses
+        // the ability to unlock root. These must NOT be filtered.
+        let cmdline = "root=UUID=aaaa rd.luks.name=1234-5678=root \
+                       rd.luks.uuid=1234-5678 rd.luks.options=discard \
+                       rd.luks.key=/keys/luks.key quiet";
+        let result = build_options(cmdline, "ab01cd23ef45");
+        assert!(result.contains("rd.luks.name=1234-5678=root"));
+        assert!(result.contains("rd.luks.uuid=1234-5678"));
+        assert!(result.contains("rd.luks.options=discard"));
+        assert!(result.contains("rd.luks.key=/keys/luks.key"));
     }
 
     #[test]

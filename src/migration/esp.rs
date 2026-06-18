@@ -16,13 +16,14 @@ pub(crate) fn find_esp_device() -> Option<String> {
     }
     // Fallback: scan lsblk by partition type GUID
     // (C12A7328-F81F-11D2-BA4B-00A0C93EC93B).
-    if let Ok(output) = Command::new("lsblk").args(["-ndo", "NAME,PARTTYPE"]).output() {
+    if let Ok(output) = Command::new("lsblk")
+        .args(["-ndo", "NAME,PARTTYPE"])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2
-                && parts[1].to_lowercase()
-                    == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+            if parts.len() >= 2 && parts[1].to_lowercase() == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
             {
                 return Some(format!("/dev/{}", parts[0]));
             }

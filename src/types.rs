@@ -50,7 +50,7 @@ impl std::fmt::Display for VerityDigest {
 mod tests {
     use super::*;
 
-    // --- #14: TDD tests for VerityDigest ---
+    // TDD tests for VerityDigest.
 
     #[test]
     fn verity_digest_from_hex_bare() {

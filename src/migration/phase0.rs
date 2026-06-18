@@ -1,38 +1,8 @@
-use crate::migration::LOCK_PATH;
 use crate::preflight::PreflightReport;
 use anyhow::{Context, Result, anyhow};
-use std::fs::{self, File};
-use std::io::Write;
-use std::os::fd::AsRawFd;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-pub(crate) fn acquire_lock() -> Result<File> {
-    let lock = File::create(LOCK_PATH).context("failed to create lock file")?;
-    let fd = lock.as_raw_fd();
-    // F_OFD_SETLK: non-blocking exclusive lock, released on close/process exit.
-    let mut fl: libc::flock = libc::flock {
-        l_type: libc::F_WRLCK as i16,
-        l_whence: libc::SEEK_SET as i16,
-        l_start: 0,
-        l_len: 0,
-        l_pid: 0,
-    };
-    let rc = unsafe { libc::fcntl(fd, libc::F_OFD_SETLK, &mut fl) };
-    if rc < 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() == Some(libc::EAGAIN) || e.raw_os_error() == Some(libc::EACCES) {
-            return Err(anyhow!(
-                "Another instance of bootc-migrate-composefs is already running (lock held at {}).",
-                LOCK_PATH
-            ));
-        }
-        return Err(e).context("failed to acquire lock");
-    }
-    // Write PID so admins can inspect.
-    let _ = writeln!(&lock, "{}", std::process::id());
-    Ok(lock)
-}
 
 // ---- Mount guard (Optional: safe cleanup of TempDir-backed mounts) ----
 
@@ -107,7 +77,9 @@ pub fn check_free_space(reflink_available: bool) -> Result<()> {
 /// XFS does not support fs-verity (required by cfs pull). When the /sysroot
 /// filesystem lacks verity, create a loopback ext4 image, mount it at
 /// /sysroot/composefs, and migrate the composefs store onto it.
-pub(crate) fn setup_composefs_loopback_if_needed(report: &PreflightReport) -> Result<Option<MountGuard>> {
+pub(crate) fn setup_composefs_loopback_if_needed(
+    report: &PreflightReport,
+) -> Result<Option<MountGuard>> {
     let fs_type = report.fs_type.as_deref().unwrap_or("unknown");
     // btrfs and ext4 support fs-verity. xfs does not (as of kernel 6.12).
     if fs_type == "xfs" {

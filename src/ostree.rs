@@ -54,8 +54,8 @@ pub fn scan_ostree_file_objects<P: AsRef<Path>>(repo_path: P) -> Result<Vec<Ostr
                         let file_name =
                             file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         // Check if it ends with .file
-                        if file_name.ends_with(".file") {
-                            let remaining_hex = &file_name[..file_name.len() - 5]; // remove ".file"
+                        if let Some(remaining_hex) = file_name.strip_suffix(".file") {
+                            // remove ".file"
                             let ostree_checksum = format!("{}{}", dir_name, remaining_hex);
                             file_objects.push(OstreeFileObject {
                                 path: file_path,

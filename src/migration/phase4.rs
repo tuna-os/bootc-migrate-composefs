@@ -16,7 +16,7 @@ pub(crate) fn build_origin_content(
     // Schema must match bootc's canonical layout (crates/lib/src/composefs_consts.rs):
     //   [origin] container-image-reference = ...
     //   [boot]   boot_type = bls
-    //   [boot]   digest    = <verity hex>           # NB: key is "digest", not "boot_digest"
+    //   [boot]   digest = <verity hex>           # NB: key is "digest", not "boot_digest"
     //   [image]  manifest_digest = sha256:...
     // bootc's status code reads from [image]/manifest_digest and [boot]/digest;
     // wrong section or key names produce "No manifest_digest in origin and no
@@ -64,7 +64,7 @@ pub(crate) fn phase4_stage_deploy(
         return Ok(deploy_dir);
     }
 
-    // Idempotency (#11): skip if already staged with valid .origin.
+    // Idempotency: skip if already staged with valid .origin.
     // bootc expects the filename as `<bare-hex-verity>.origin` (no `sha512:`
     // prefix); using as_prefixed() here would cause `bootc status` to fail
     // with "Opening origin file: No such file or directory" and break the
@@ -83,7 +83,7 @@ pub(crate) fn phase4_stage_deploy(
     let etc_dir = deploy_dir.join("etc");
     fs::create_dir_all(&etc_dir).context("failed to create deployment etc directory")?;
 
-    // 3-way /etc merge (#4)
+    // 3-way /etc merge
     println!("Performing 3-way /etc merge...");
     if let Err(e) = perform_etc_merge(verity, target_image, &etc_dir) {
         eprintln!(
@@ -94,7 +94,7 @@ pub(crate) fn phase4_stage_deploy(
             .context("failed to copy /etc (fallback)")?;
     }
 
-    // Stage /var symlink (#7)
+    // Stage /var symlink
     let var_symlink = deploy_dir.join("var");
     if var_symlink.exists() {
         fs::remove_file(&var_symlink).context("failed to remove existing var entry")?;
@@ -129,7 +129,7 @@ pub(crate) fn phase4_stage_deploy(
         }
     }
 
-    // Handle /var migration (#7)
+    // Handle /var migration
     phase4_var_migration(&etc_dir, dry_run)?;
 
     Ok(deploy_dir)
@@ -224,7 +224,11 @@ fn resolve_device_uuid(device: &str) -> Option<String> {
 }
 
 /// Perform 3-way /etc merge: old OSTree default, current live /etc, new ComposeFS default.
-pub(crate) fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_dir: &Path) -> Result<()> {
+pub(crate) fn perform_etc_merge(
+    verity: &VerityDigest,
+    target_image: &str,
+    etc_dir: &Path,
+) -> Result<()> {
     // Mount the EROFS image for directory listing / symlink-target validation.
     // The EROFS mount correctly exposes file NAMES and METADATA (stat, readdir,
     // readlink) but ALL file CONTENT reads as zeros through the bare EROFS mount.
@@ -319,8 +323,12 @@ pub(crate) fn perform_etc_merge(verity: &VerityDigest, target_image: &str, etc_d
             let t = target.to_string_lossy();
             if t.contains("dbus-broker") {
                 match fs::remove_file(&dbus_svc_link) {
-                    Ok(()) => println!("[phase4] dropped dangling dbus.service -> dbus-broker symlink"),
-                    Err(e) => eprintln!("[phase4] warning: failed to remove dbus.service symlink: {e}"),
+                    Ok(()) => {
+                        println!("[phase4] dropped dangling dbus.service -> dbus-broker symlink")
+                    }
+                    Err(e) => {
+                        eprintln!("[phase4] warning: failed to remove dbus.service symlink: {e}")
+                    }
                 }
             }
         }
@@ -586,10 +594,7 @@ fn supplement_identity_dbs_from_registry(target_image: &str, etc_dir: &Path) -> 
     }
 
     // --- Overwrite critical config files that EROFS zero-filled ---
-    let cfg_names = [
-        "/etc/dbus-1/system.conf",
-        "/etc/dbus-1/session.conf",
-    ];
+    let cfg_names = ["/etc/dbus-1/system.conf", "/etc/dbus-1/session.conf"];
     for src_path in &cfg_names {
         let rel_dst = src_path.strip_prefix("/etc/").unwrap_or(src_path);
         let scratch_path = scratch.path().join(rel_dst);
@@ -599,20 +604,21 @@ fn supplement_identity_dbs_from_registry(target_image: &str, etc_dir: &Path) -> 
         }
         let content = fs::read(&scratch_path).unwrap_or_default();
         if content.is_empty() || content.iter().all(|&b| b == 0) {
-            continue;  // Registry also returned zeros — file truly absent
+            continue; // Registry also returned zeros — file truly absent
         }
         if let Some(parent) = merged_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
         fs::write(&merged_path, &content)
             .with_context(|| format!("failed to write {}", merged_path.display()))?;
-        println!("[phase4] overwrote {} with registry-extracted target version", rel_dst);
+        println!(
+            "[phase4] overwrote {} with registry-extracted target version",
+            rel_dst
+        );
     }
 
     Ok(())
 }
-
-
 
 fn line_union_by_first_colon(current: &str, new: &str) -> String {
     use std::collections::HashSet;
@@ -663,4 +669,3 @@ fn find_ostree_etc_default() -> Result<PathBuf> {
     }
     anyhow::bail!("could not locate OSTree deployment default /etc");
 }
-

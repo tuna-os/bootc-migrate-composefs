@@ -1,8 +1,6 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::ffi::CString;
 use std::fs;
-use std::mem::MaybeUninit;
 use std::path::Path;
 use std::process::Command;
 
@@ -55,23 +53,13 @@ pub struct PreflightReport {
 }
 
 pub fn get_free_space<P: AsRef<Path>>(path: P) -> Result<u64> {
-    let path_str = path
-        .as_ref()
-        .to_str()
-        .ok_or_else(|| anyhow!("invalid path"))?;
-    let c_path = CString::new(path_str)?;
-    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
-    let res = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
-    if res < 0 {
-        return Err(std::io::Error::last_os_error()).context("statvfs failed");
-    }
-    let stats = unsafe { stats.assume_init() };
+    let stats = rustix::fs::statvfs(path.as_ref()).context("statvfs failed")?;
     let block_size = if stats.f_frsize > 0 {
         stats.f_frsize
     } else {
         stats.f_bsize
     };
-    Ok(block_size as u64 * stats.f_bavail as u64)
+    Ok(block_size * stats.f_bavail)
 }
 
 pub fn check_reflink_support<P: AsRef<Path>>(dir: P) -> bool {
@@ -132,60 +120,58 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
     let mut esp_tmp_mounted = false;
 
     for path in ["/boot/efi", "/efi", "/boot"] {
-        if Path::new(path).exists() {
-            if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
-                for line in mounts.lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3
-                        && parts[1] == path
-                        && (parts[2] == "vfat" || parts[2] == "msdos")
-                    {
-                        esp_path = Some(path.to_string());
-                        esp_fs_type = Some(parts[2].to_string());
-                        if let Ok(free_space) = get_free_space(path) {
-                            esp_free_space_bytes = free_space;
-                        }
-                        break;
+        if Path::new(path).exists()
+            && let Ok(mounts) = fs::read_to_string("/proc/mounts")
+        {
+            for line in mounts.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3
+                    && parts[1] == path
+                    && (parts[2] == "vfat" || parts[2] == "msdos")
+                {
+                    esp_path = Some(path.to_string());
+                    esp_fs_type = Some(parts[2].to_string());
+                    if let Ok(free_space) = get_free_space(path) {
+                        esp_free_space_bytes = free_space;
                     }
-                }
-                if esp_path.is_some() {
                     break;
                 }
+            }
+            if esp_path.is_some() {
+                break;
             }
         }
     }
 
     // ESP not auto-mounted — try to find it by partition type GUID.
-    if esp_path.is_none() {
-        if let Ok(output) = Command::new("lsblk")
+    if esp_path.is_none()
+        && let Ok(output) = Command::new("lsblk")
             .args(["-o", "NAME,PARTTYPE,FSTYPE,SIZE", "-l", "-n", "-b"])
             .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                // ESP partition type GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-                if parts.len() >= 2
-                    && parts[1].to_lowercase() == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // ESP partition type GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+            if parts.len() >= 2 && parts[1].to_lowercase() == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+            {
+                let device = format!("/dev/{}", parts[0]);
+                // Temporarily mount to check free space.
+                let tmp_mount = "/var/tmp/esp-preflight";
+                let _ = fs::create_dir_all(tmp_mount);
+                let mount_status = Command::new("mount")
+                    .args(["-t", "vfat", &device, tmp_mount])
+                    .status();
+                if let Ok(s) = mount_status
+                    && s.success()
                 {
-                    let device = format!("/dev/{}", parts[0]);
-                    // Temporarily mount to check free space.
-                    let tmp_mount = "/var/tmp/esp-preflight";
-                    let _ = fs::create_dir_all(tmp_mount);
-                    let mount_status = Command::new("mount")
-                        .args(["-t", "vfat", &device, tmp_mount])
-                        .status();
-                    if let Ok(s) = mount_status {
-                        if s.success() {
-                            if let Ok(free_space) = get_free_space(tmp_mount) {
-                                esp_free_space_bytes = free_space;
-                            }
-                            esp_fs_type = Some("vfat".to_string());
-                            esp_path = Some(tmp_mount.to_string());
-                            esp_tmp_mounted = true;
-                            break;
-                        }
+                    if let Ok(free_space) = get_free_space(tmp_mount) {
+                        esp_free_space_bytes = free_space;
                     }
+                    esp_fs_type = Some("vfat".to_string());
+                    esp_path = Some(tmp_mount.to_string());
+                    esp_tmp_mounted = true;
+                    break;
                 }
             }
         }

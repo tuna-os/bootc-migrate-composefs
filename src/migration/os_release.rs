@@ -27,25 +27,25 @@ pub fn read_os_release(root: &Path) -> Result<OsRelease> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(val) = parse_os_release_value(line, "ID=") {
-            if id.is_empty() {
-                id = val.to_string();
-            }
+        if let Some(val) = parse_os_release_value(line, "ID=")
+            && id.is_empty()
+        {
+            id = val.to_string();
         }
-        if let Some(val) = parse_os_release_value(line, "VERSION_ID=") {
-            if version_id.is_empty() {
-                version_id = val.to_string();
-            }
+        if let Some(val) = parse_os_release_value(line, "VERSION_ID=")
+            && version_id.is_empty()
+        {
+            version_id = val.to_string();
         }
-        if let Some(val) = parse_os_release_value(line, "NAME=") {
-            if name.is_empty() {
-                name = val.to_string();
-            }
+        if let Some(val) = parse_os_release_value(line, "NAME=")
+            && name.is_empty()
+        {
+            name = val.to_string();
         }
-        if let Some(val) = parse_os_release_value(line, "PRETTY_NAME=") {
-            if pretty_name.is_empty() {
-                pretty_name = val.to_string();
-            }
+        if let Some(val) = parse_os_release_value(line, "PRETTY_NAME=")
+            && pretty_name.is_empty()
+        {
+            pretty_name = val.to_string();
         }
     }
 
@@ -53,7 +53,12 @@ pub fn read_os_release(root: &Path) -> Result<OsRelease> {
         return Err(anyhow!("ID not found in os-release"));
     }
 
-    Ok(OsRelease { id, version_id, name, pretty_name })
+    Ok(OsRelease {
+        id,
+        version_id,
+        name,
+        pretty_name,
+    })
 }
 
 fn parse_os_release_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -80,7 +85,9 @@ fn parse_os_release_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 pub fn bls_entry_filename(os: &OsRelease, verity_hash: &str, priority: u32) -> String {
     let id = os.id.replace('-', "_");
     let ver = if os.version_id.is_empty() {
-        verity_hash[..12].to_string()
+        // Fall back to a short hash prefix; tolerate hashes shorter than 12 chars
+        // rather than panicking on the slice.
+        verity_hash.get(..12).unwrap_or(verity_hash).to_string()
     } else {
         os.version_id.clone()
     };
@@ -99,13 +106,12 @@ pub fn bls_entry_title(os: &OsRelease, kind: &str) -> String {
     } else if !os.name.is_empty() {
         os.name.clone()
     } else {
-        let cap = if let Some(first) = os.id.chars().next() {
+        if let Some(first) = os.id.chars().next() {
             let rest = &os.id[first.len_utf8()..];
             format!("{}{}", first.to_uppercase(), rest)
         } else {
             os.id.clone()
-        };
-        cap
+        }
     };
     format!("{display_name} ({kind})")
 }
@@ -114,7 +120,7 @@ pub fn bls_entry_title(os: &OsRelease, kind: &str) -> String {
 mod tests {
     use super::*;
 
-    // --- #6: TDD tests for BLS entry naming ---
+    // TDD tests for BLS entry naming.
 
     #[test]
     fn parses_os_release_basic() {
@@ -156,52 +162,51 @@ mod tests {
     }
 
     #[test]
-    fn bls_entry_filename_format() {
-        let os = OsRelease {
-            id: "fedora".into(),
-            version_id: "41.20251125.0".into(),
-            name: String::new(),
-            pretty_name: String::new(),
-        };
-        let name = bls_entry_filename(&os, "abc123def456", 1);
-        assert_eq!(name, "bootc_fedora-41.20251125.0-1.conf");
-    }
-
-    #[test]
-    fn bls_entry_filename_hyphens_become_underscores() {
-        let os = OsRelease {
-            id: "bluefin-dakota".into(),
-            version_id: "1.0".into(),
-            name: String::new(),
-            pretty_name: String::new(),
-        };
-        let name = bls_entry_filename(&os, "hash123", 1);
-        assert_eq!(name, "bootc_bluefin_dakota-1.0-1.conf");
-    }
-
-    #[test]
-    fn bls_entry_filename_priority_zero() {
-        let os = OsRelease {
-            id: "fedora".into(),
-            version_id: "41".into(),
-            name: String::new(),
-            pretty_name: String::new(),
-        };
-        let name = bls_entry_filename(&os, "hash", 0);
-        assert_eq!(name, "bootc_fedora-41-0.conf");
-    }
-
-    #[test]
-    fn bls_entry_filename_fallback_when_no_version() {
-        let os = OsRelease {
-            id: "dakota".into(),
-            version_id: String::new(),
-            name: String::new(),
-            pretty_name: String::new(),
-        };
-        // When no version, use first 12 chars of hash
-        let name = bls_entry_filename(&os, "abc123def4567890abcdef", 1);
-        assert_eq!(name, "bootc_dakota-abc123def456-1.conf");
+    fn bls_entry_filename_cases() {
+        // (id, version_id, hash, priority) -> expected filename.
+        let cases = [
+            // Basic id-version-priority composition.
+            (
+                "fedora",
+                "41.20251125.0",
+                "abc123def456",
+                1,
+                "bootc_fedora-41.20251125.0-1.conf",
+            ),
+            // Hyphens in the id become underscores (BLS filename safety).
+            (
+                "bluefin-dakota",
+                "1.0",
+                "hash123",
+                1,
+                "bootc_bluefin_dakota-1.0-1.conf",
+            ),
+            // Priority 0 is rendered literally.
+            ("fedora", "41", "hash", 0, "bootc_fedora-41-0.conf"),
+            // No version_id: fall back to the first 12 chars of the hash.
+            (
+                "dakota",
+                "",
+                "abc123def4567890abcdef",
+                1,
+                "bootc_dakota-abc123def456-1.conf",
+            ),
+            // No version and a short (<12 char) hash: use the hash as-is.
+            ("dakota", "", "abc", 2, "bootc_dakota-abc-2.conf"),
+        ];
+        for (id, version_id, hash, priority, expected) in cases {
+            let os = OsRelease {
+                id: id.into(),
+                version_id: version_id.into(),
+                name: String::new(),
+                pretty_name: String::new(),
+            };
+            assert_eq!(
+                bls_entry_filename(&os, hash, priority),
+                expected,
+                "id={id} version={version_id} hash={hash} priority={priority}"
+            );
+        }
     }
 
     #[test]

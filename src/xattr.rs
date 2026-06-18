@@ -1,8 +1,14 @@
 use anyhow::{Context, Result};
+use rustix::fs::XattrFlags;
+use rustix::io::Errno;
+use std::ffi::CString;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
+
+/// Initial buffer size for xattr name lists and values; grown on `ERANGE`.
+const XATTR_BUF_INIT: usize = 256;
 
 /// Copy a file preserving all extended attributes (SELinux, capabilities, user.*).
 /// On Btrfs, prefers FICLONE reflink first (via the caller), then copies xattrs.
@@ -23,11 +29,7 @@ pub fn copy_file_with_xattrs(src: &Path, dst: &Path) -> Result<()> {
     }
 
     // Copy extended attributes from src to dst
-    let src_path = src
-        .to_str()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid src path"))?;
-
-    copy_xattrs(src_path, dst)?;
+    copy_xattrs(src, dst)?;
 
     // Copy permissions
     let metadata = src.metadata()?;
@@ -39,93 +41,75 @@ pub fn copy_file_with_xattrs(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Copy all extended attributes from one file to another.
-fn copy_xattrs(src_path: &str, dst: &Path) -> Result<()> {
-    // On Linux we use the raw libc xattr syscalls.
-    // listxattr returns the null-separated list of names.
-
-    let src_c = std::ffi::CString::new(src_path)?;
-    let dst_c = std::ffi::CString::new(dst.to_str().unwrap_or(""))?;
-
-    // Get the size of the xattr list.
-    let list_size = unsafe { libc::listxattr(src_c.as_ptr(), std::ptr::null_mut(), 0) };
-
-    if list_size <= 0 {
-        // No xattrs, or error, either way nothing to copy.
+/// Copy all extended attributes from `src` to `dst` (follows symlinks).
+///
+/// Shared by [`copy_file_with_xattrs`] and the `/etc` merge in
+/// [`crate::mergetc`]. Best-effort: a destination filesystem without xattr
+/// support (`ENOTSUP`, e.g. a FAT32 ESP) is silently tolerated; other set
+/// failures are logged but do not abort the copy.
+pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
+    let Some(names) = list_xattr_names(src)? else {
         return Ok(());
-    }
-
-    let mut list_buf = vec![0u8; list_size as usize];
-    let list_size = unsafe {
-        libc::listxattr(
-            src_c.as_ptr(),
-            list_buf.as_mut_ptr() as *mut libc::c_char,
-            list_buf.len(),
-        )
     };
 
-    if list_size <= 0 {
-        return Ok(());
-    }
-    list_buf.truncate(list_size as usize);
-
-    // Split the null-separated list.
-    for name_bytes in list_buf.split(|b| *b == 0) {
+    // The kernel returns names as a NUL-separated list.
+    for name_bytes in names.split(|b| *b == 0) {
         if name_bytes.is_empty() {
             continue;
         }
-        let name = std::ffi::CString::new(name_bytes)?;
-
-        // Get value size.
-        let val_size =
-            unsafe { libc::getxattr(src_c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
-
-        if val_size < 0 {
-            continue; // Skip if we can't read
-        }
-
-        let mut val_buf = vec![0u8; val_size as usize];
-        let val_size = unsafe {
-            libc::getxattr(
-                src_c.as_ptr(),
-                name.as_ptr(),
-                val_buf.as_mut_ptr() as *mut libc::c_void,
-                val_buf.len(),
-            )
-        };
-
-        if val_size < 0 {
+        let name = CString::new(name_bytes)?;
+        let Some(value) = get_xattr_value(src, &name)? else {
             continue;
-        }
-        val_buf.truncate(val_size as usize);
-
-        // Set xattr on destination. Log failures but don't abort (Fix 11).
-        let rc = unsafe {
-            libc::setxattr(
-                dst_c.as_ptr(),
-                name.as_ptr(),
-                val_buf.as_ptr() as *const libc::c_void,
-                val_buf.len(),
-                0,
-            )
         };
-        if rc < 0 {
-            let e = std::io::Error::last_os_error();
+
+        match rustix::fs::setxattr(dst, name.as_c_str(), &value, XattrFlags::empty()) {
+            Ok(()) => {}
             // ENOTSUP is expected on filesystems without xattr support (FAT32 ESP).
-            if e.raw_os_error() != Some(libc::ENOTSUP) {
-                if let Ok(name_str) = std::str::from_utf8(name_bytes) {
-                    eprintln!(
-                        "Warning: failed to set xattr '{}' on {}: {}",
-                        name_str,
-                        dst.display(),
-                        e
-                    );
-                }
-            }
+            Err(Errno::NOTSUP) => {}
+            Err(e) => eprintln!(
+                "Warning: failed to set xattr '{}' on {}: {}",
+                String::from_utf8_lossy(name_bytes),
+                dst.display(),
+                e
+            ),
         }
     }
 
     Ok(())
+}
+
+/// Return the NUL-separated list of xattr names on `path`, or `None` when the
+/// file has no xattrs or the filesystem doesn't support them.
+fn list_xattr_names(path: &Path) -> Result<Option<Vec<u8>>> {
+    let mut buf = vec![0u8; XATTR_BUF_INIT];
+    loop {
+        match rustix::fs::listxattr(path, &mut buf[..]) {
+            Ok(0) => return Ok(None),
+            Ok(n) => {
+                buf.truncate(n);
+                return Ok(Some(buf));
+            }
+            Err(Errno::RANGE) => buf.resize(buf.len() * 2, 0),
+            Err(Errno::NOTSUP) | Err(Errno::NODATA) => return Ok(None),
+            Err(e) => return Err(e).context("listxattr failed"),
+        }
+    }
+}
+
+/// Read the value of a single xattr, or `None` if it vanished or is unreadable.
+fn get_xattr_value(path: &Path, name: &CString) -> Result<Option<Vec<u8>>> {
+    let mut buf = vec![0u8; XATTR_BUF_INIT];
+    loop {
+        match rustix::fs::getxattr(path, name.as_c_str(), &mut buf[..]) {
+            Ok(n) => {
+                buf.truncate(n);
+                return Ok(Some(buf));
+            }
+            Err(Errno::RANGE) => buf.resize(buf.len() * 2, 0),
+            Err(Errno::NODATA) | Err(Errno::NOTSUP) => return Ok(None),
+            Err(e) => return Err(e).context("getxattr failed"),
+        }
+    }
 }
 
 /// Copy a directory tree recursively, preserving extended attributes on all files.
@@ -140,9 +124,7 @@ pub fn copy_dir_all_with_xattrs(src: impl AsRef<Path>, dst: impl AsRef<Path>) ->
     let mut dst_perms = fs::metadata(dst)?.permissions();
     unix_fs::PermissionsExt::set_mode(&mut dst_perms, src_mode);
     fs::set_permissions(dst, dst_perms)?;
-    if let Some(s) = src.to_str() {
-        let _ = copy_xattrs(s, dst);
-    }
+    let _ = copy_xattrs(src, dst);
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let path = entry.path();
@@ -175,7 +157,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    // --- #5: TDD tests for xattr-preserving copy ---
+    // TDD tests for xattr-preserving copy.
 
     #[test]
     fn copy_file_with_xattrs_preserves_data() {

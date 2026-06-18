@@ -1,7 +1,7 @@
 use crate::VerityDigest;
-use crate::preflight::PreflightReport;
 use crate::migration::esp::find_esp_device;
 use crate::migration::phase0::detect_lvm;
+use crate::preflight::PreflightReport;
 use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,11 +81,7 @@ pub(crate) fn verify_migration(verity: &VerityDigest, _report: &PreflightReport)
                         .map(|s| s.success())
                         .unwrap_or(false)
                     {
-                        let p = t
-                            .path()
-                            .join("EFI/Linux")
-                            .join(&boot_name)
-                            .join("vmlinuz");
+                        let p = t.path().join("EFI/Linux").join(&boot_name).join("vmlinuz");
                         if p.exists() {
                             vmlinuz_candidate = Some(p);
                         }
@@ -99,8 +95,7 @@ pub(crate) fn verify_migration(verity: &VerityDigest, _report: &PreflightReport)
     } else {
         None
     };
-    let vmlinuz =
-        vmlinuz_candidate.ok_or_else(|| anyhow!("vmlinuz not found in ESP or /boot"))?;
+    let vmlinuz = vmlinuz_candidate.ok_or_else(|| anyhow!("vmlinuz not found in ESP or /boot"))?;
     let magic =
         fs::read(&vmlinuz).with_context(|| format!("failed to read {}", vmlinuz.display()))?;
     if magic.len() < 4 || &magic[..2] != b"MZ" {
@@ -128,14 +123,17 @@ pub(crate) fn verify_migration(verity: &VerityDigest, _report: &PreflightReport)
             anyhow::bail!("initrd not found (checked ESP and /boot)");
         }
     }
-    let initrd = if vmlinuz.parent().unwrap_or(Path::new("/")).join("initrd").exists() {
+    let initrd = if vmlinuz
+        .parent()
+        .unwrap_or(Path::new("/"))
+        .join("initrd")
+        .exists()
+    {
         vmlinuz.parent().unwrap_or(Path::new("/")).join("initrd")
     } else {
         Path::new("/boot").join(&boot_name).join("initrd")
     };
-    let initrd_size = fs::metadata(&initrd)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let initrd_size = fs::metadata(&initrd).map(|m| m.len()).unwrap_or(0);
     if initrd_size == 0 {
         anyhow::bail!(
             "initrd at {} is 0 bytes — registry extraction may have failed",

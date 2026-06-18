@@ -219,7 +219,11 @@ pub(crate) fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path
 /// `boot_digest = …` line. `bootc status` uses this digest to set the soft
 /// reboot capability; without it, status bails with
 /// "Could not find boot digest for deployment".
-pub(crate) fn patch_origin_boot_digest(verity: &VerityDigest, vmlinuz: &Path, initrd: &Path) -> Result<()> {
+pub(crate) fn patch_origin_boot_digest(
+    verity: &VerityDigest,
+    vmlinuz: &Path,
+    initrd: &Path,
+) -> Result<()> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let v = fs::read(vmlinuz).with_context(|| format!("reading vmlinuz {}", vmlinuz.display()))?;
@@ -249,7 +253,11 @@ pub(crate) fn patch_origin_boot_digest(verity: &VerityDigest, vmlinuz: &Path, in
 /// matching how the container runtime composes the rootfs. Whiteouts
 /// (`.wh.*`) are ignored — at worst we'll keep a few extra stale files in
 /// `etc/`, which doesn't break anything we care about.
-pub(crate) fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) -> Result<()> {
+pub(crate) fn extract_subtree_via_registry(
+    image_ref: &str,
+    subtree: &str,
+    dst_dir: &Path,
+) -> Result<()> {
     let endpoint = RegistryEndpoint::resolve(image_ref)?;
     let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
     let layers_manifest = if endpoint.is_manifest_index(&manifest_json) {
@@ -666,4 +674,3 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
     }
     Ok(false)
 }
-

@@ -74,6 +74,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootc-migrate-composefs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tini",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -297,20 +311,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "ostree-composefs-rebase"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tini",
-]
 
 [[package]]
 name = "prettyplease"

@@ -302,96 +302,14 @@ fn copy_file_metadata(src: &Path, dst: &Path) -> Result<()> {
         unix_fs::PermissionsExt::set_mode(&mut perms, mode);
         let _ = fs::set_permissions(dst, perms);
     }
-    // Copy xattrs
-    let src_str = src
-        .to_str()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid src path"))?;
-    copy_xattrs_to_file(src_str, dst)?;
-    Ok(())
-}
-
-/// Copy all extended attributes from one file path to another.
-fn copy_xattrs_to_file(src_path: &str, dst: &Path) -> Result<()> {
-    let src_c = std::ffi::CString::new(src_path)?;
-    let dst_c = std::ffi::CString::new(dst.to_str().unwrap_or(""))?;
-
-    // First pass: get list size.
-    let list_size = unsafe { libc::listxattr(src_c.as_ptr(), std::ptr::null_mut(), 0) };
-    if list_size <= 0 {
-        return Ok(());
-    }
-
-    let mut list_buf = vec![0u8; list_size as usize];
-    let actual = unsafe {
-        libc::listxattr(
-            src_c.as_ptr(),
-            list_buf.as_mut_ptr() as *mut libc::c_char,
-            list_buf.len(),
-        )
-    };
-    if actual <= 0 {
-        return Ok(());
-    }
-    list_buf.truncate(actual as usize);
-
-    for name_bytes in list_buf.split(|b| *b == 0) {
-        if name_bytes.is_empty() {
-            continue;
-        }
-        let name = std::ffi::CString::new(name_bytes)?;
-
-        // Get value size.
-        let val_size =
-            unsafe { libc::getxattr(src_c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
-        if val_size < 0 {
-            continue;
-        }
-
-        let mut val_buf = vec![0u8; val_size as usize];
-        let val_size = unsafe {
-            libc::getxattr(
-                src_c.as_ptr(),
-                name.as_ptr(),
-                val_buf.as_mut_ptr() as *mut libc::c_void,
-                val_buf.len(),
-            )
-        };
-        if val_size < 0 {
-            continue;
-        }
-        val_buf.truncate(val_size as usize);
-
-        // Don't fail if xattr already exists; just overwrite silently.
-        let rc = unsafe {
-            libc::setxattr(
-                dst_c.as_ptr(),
-                name.as_ptr(),
-                val_buf.as_ptr() as *const libc::c_void,
-                val_buf.len(),
-                0,
-            )
-        };
-        if rc < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() != Some(libc::ENOTSUP) {
-                if let Ok(name_str) = std::str::from_utf8(name_bytes) {
-                    eprintln!(
-                        "Warning: failed to set xattr '{}' on {}: {}",
-                        name_str,
-                        dst.display(),
-                        e
-                    );
-                }
-            }
-        }
-    }
-
+    // Copy xattrs (SELinux labels, capabilities) via the shared helper.
+    crate::xattr::copy_xattrs(src, dst)?;
     Ok(())
 }
 
 fn read_file_at(base: &Path, rel_path: &str) -> Option<Vec<u8>> {
     let full = base.join(rel_path);
-    // Use symlink_metadata to avoid following symlinks (Fix 9).
+    // Use symlink_metadata to avoid following symlinks.
     match fs::symlink_metadata(&full) {
         Ok(meta) if meta.is_file() => fs::read(&full).ok(),
         _ => None,
@@ -401,14 +319,12 @@ fn read_file_at(base: &Path, rel_path: &str) -> Option<Vec<u8>> {
 /// Core 3-way merge decision. Public so unit tests can exercise it directly.
 pub fn choose_merged_content(ctx: &MergeContext) -> Option<Vec<u8>> {
     match (&ctx.old_default, &ctx.current, &ctx.new_default) {
-        // File exists in all three
+        // File exists in all three. If the user left it untouched (old == cur),
+        // take the target's version; otherwise the user changed it, so keep
+        // theirs (last-writer-wins on a genuine three-way conflict).
         (Some(old), Some(cur), Some(new)) => {
             if old == cur {
                 Some(new.clone())
-            } else if old == new {
-                Some(cur.clone())
-            } else if cur == new {
-                Some(cur.clone())
             } else {
                 Some(cur.clone())
             }
@@ -438,14 +354,8 @@ pub fn choose_merged_content(ctx: &MergeContext) -> Option<Vec<u8>> {
         (Some(_old), None, Some(_new)) => None,
         // File only in old (deleted upstream, also deleted by user) — drop
         (Some(_old), None, None) => None,
-        // File in current and new (never in old... unusual)
-        (None, Some(cur), Some(new)) => {
-            if cur == new {
-                Some(cur.clone())
-            } else {
-                Some(cur.clone())
-            }
-        }
+        // File in current and new but never in old (unusual): keep current.
+        (None, Some(cur), Some(_new)) => Some(cur.clone()),
         _ => None,
     }
 }
@@ -533,7 +443,7 @@ mod tests {
 
     #[test]
     fn merge_symlink_to_file_type_change_takes_new() {
-        // Regression for #20: Bluefin's /etc/pam.d/password-auth is a symlink
+        // Regression: Bluefin's /etc/pam.d/password-auth is a symlink
         // → /etc/authselect/password-auth. Dakota ships it as a regular file.
         // The user didn't modify it (old==cur), so the merge MUST take new
         // (the regular file). Previously the dispatcher unconditionally kept
@@ -554,7 +464,7 @@ mod tests {
         .unwrap();
         fs::write(
             new.path().join("password-auth"),
-            b"auth  required  pam_unix.so\n",
+            b"auth required pam_unix.so\n",
         )
         .unwrap();
 
@@ -680,7 +590,7 @@ mod tests {
 
     #[test]
     fn prune_drops_dangling_etc_symlink() {
-        // Regression for #19: Bluefin's PAM files are symlinks into
+        // Regression: Bluefin's PAM files are symlinks into
         // /etc/authselect/, which Dakota doesn't ship. Without pruning the
         // dangling link survives the merge and sshd's PAM stack fails to
         // load.
@@ -721,7 +631,7 @@ mod tests {
         assert!(fs::symlink_metadata(etc.path().join("foo")).is_ok());
     }
 
-    // --- #4: TDD tests for 3-way /etc merge ---
+    // TDD tests for 3-way /etc merge.
 
     #[test]
     fn merge_unchanged_file_takes_new_default() {
@@ -838,7 +748,7 @@ mod tests {
 
     #[test]
     fn merge_preserves_symlinks() {
-        // Symlinks in /etc must be preserved (#4 review gap 1).
+        // Symlinks in /etc must be preserved.
         let dir = tempdir().unwrap();
         let old = dir.path().join("old");
         let cur = dir.path().join("cur");

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::fs::File;
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 pub fn reflink<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dest: Q) -> Result<()> {
@@ -18,18 +17,10 @@ pub fn reflink<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dest: Q) -> Result<()> {
         )
     })?;
 
-    let src_fd = src_file.as_raw_fd();
-    let dest_fd = dest_file.as_raw_fd();
-
-    // FICLONE ioctl code:
-    // On Linux x86_64, _IOW(0x94, 9, int) is 0x40049409
-    const FICLONE: libc::c_ulong = 0x40049409;
-
-    let ret = unsafe { libc::ioctl(dest_fd, FICLONE, src_fd) };
-    if ret < 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(err).context("FICLONE ioctl failed");
-    }
+    // FICLONE shares the source file's extents with the destination (copy-on-write
+    // clone). Only supported on reflink-capable filesystems (btrfs, xfs); callers
+    // fall back to a plain copy when this fails.
+    rustix::fs::ioctl_ficlone(&dest_file, &src_file).context("FICLONE ioctl failed")?;
 
     Ok(())
 }

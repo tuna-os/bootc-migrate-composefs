@@ -1,15 +1,15 @@
 use crate::VerityDigest;
-use crate::migration::{BOOTC_DRACUT_MODULE, BOOTC_ROOT_SETUP_SERVICE};
-use crate::preflight::PreflightReport;
 use crate::migration::bootloader;
+use crate::migration::esp::*;
 use crate::migration::kernel_options::get_kernel_options;
 use crate::migration::mount_image;
 use crate::migration::os_release;
 use crate::migration::os_release::{bls_entry_filename, bls_entry_title, read_os_release};
+use crate::migration::phase0::*;
 use crate::migration::registry::patch_origin_boot_digest;
 use crate::migration::registry::*;
-use crate::migration::esp::*;
-use crate::migration::phase0::*;
+use crate::migration::{BOOTC_DRACUT_MODULE, BOOTC_ROOT_SETUP_SERVICE};
+use crate::preflight::PreflightReport;
 use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -112,7 +112,7 @@ pub(crate) fn phase5_setup_bootloader(
             .join(format!("initramfs-{}.img", kver))
     };
 
-    // Read target os-release for BLS naming (#6)
+    // Read target os-release for BLS naming
     let target_os = read_os_release(&mount_path).unwrap_or_else(|_| os_release::OsRelease {
         id: "dakota".into(),
         version_id: String::new(),
@@ -122,7 +122,7 @@ pub(crate) fn phase5_setup_bootloader(
 
     let options_str = get_kernel_options(verity.as_hex())?;
 
-    // Write to staged entries first (#9), then atomically rename.
+    // Write to staged entries first, then atomically rename.
     let mut entries: Vec<bootloader::BlsEntry> = Vec::new();
 
     // Track whether we actually completed the systemd-boot install. If extraction from the
@@ -192,7 +192,7 @@ pub(crate) fn phase5_setup_bootloader(
                 // /var/tmp/esp-migration for the rest of Phase 5.
                 // Without this, in-VM reads see cached data but the raw disk
                 // (host-side .raw scan) shows zeros for large files like initrd.
-                unsafe { libc::sync(); }
+                rustix::fs::sync();
 
                 // Now that vmlinuz + initrd are on the ESP, compute their
                 // boot_digest (sha256(vmlinuz || initrd)) and patch the .origin
@@ -265,12 +265,9 @@ pub(crate) fn phase5_setup_bootloader(
                 // Also set GRUB's saved_entry so that if OVMF falls back
                 // to shim → GRUB (e.g. after NVRAM reset), it still boots
                 // composefs rather than Bluefin.
-                let entry_id = composefs_entry
-                    .filename
-                    .trim_end_matches(".conf");
+                let entry_id = composefs_entry.filename.trim_end_matches(".conf");
                 let grubenv = "/boot/grub2/grubenv";
-                if Path::new(grubenv).exists() || Path::new("/boot/grub2/grub.cfg").exists()
-                {
+                if Path::new(grubenv).exists() || Path::new("/boot/grub2/grub.cfg").exists() {
                     if Command::new("grub2-editenv")
                         .args([grubenv, "set", &format!("saved_entry={}", entry_id)])
                         .status()
@@ -304,15 +301,14 @@ pub(crate) fn phase5_setup_bootloader(
                     // Write a BLS entry with /boot-relative paths (GRUB needs these).
                     let grub_bls = format!(
                         "title Linux (composefs)\nversion 7.0.7\nlinux /boot/{}/vmlinuz\ninitrd /boot/{}/initrd\ninitrd /boot/{}/xfs-mount.cpio\noptions {}\nsort-key bootc-linux-0\n",
-                        boot_dir_name,
-                        boot_dir_name,
-                        boot_dir_name,
-                        options_str
+                        boot_dir_name, boot_dir_name, boot_dir_name, options_str
                     );
                     let grub_entries = Path::new("/boot/loader/entries");
                     fs::create_dir_all(grub_entries).ok();
                     let _ = fs::write(grub_entries.join(&composefs_entry.filename), &grub_bls);
-                    println!("  Wrote GRUB-compatible composefs BLS entry to /boot/loader/entries/");
+                    println!(
+                        "  Wrote GRUB-compatible composefs BLS entry to /boot/loader/entries/"
+                    );
 
                     // Inject set default="${saved_entry}" into grub.cfg so GRUB
                     // boots composefs as the default.
@@ -320,7 +316,8 @@ pub(crate) fn phase5_setup_bootloader(
                     if let Ok(cfg) = fs::read_to_string(grub_cfg) {
                         let default_kwd = "set default=\"${saved_entry}\"";
                         if !cfg.contains(default_kwd) {
-                            let patched = cfg.replace("\nblscfg\n", &format!("\n{}\nblscfg\n", default_kwd));
+                            let patched =
+                                cfg.replace("\nblscfg\n", &format!("\n{}\nblscfg\n", default_kwd));
                             if patched != cfg {
                                 let _ = fs::write(grub_cfg, &patched);
                             }
@@ -390,7 +387,7 @@ pub(crate) fn phase5_setup_bootloader(
             }
         }
 
-        // Composefs entry (priority 1) — #8
+        // Composefs entry (priority 1)
         let mut grub_initrd_paths = vec![format!("/{}/initrd", boot_dir_name)];
         if let Some(ref extra) = extra_initrd_grub {
             grub_initrd_paths.push(format!("/{}/{}", boot_dir_name, extra));
@@ -405,12 +402,12 @@ pub(crate) fn phase5_setup_bootloader(
             sort_key: format!("bootc-{}-0", target_os.id),
         });
 
-        // OSTree fallback entry (priority 0) — #8
+        // OSTree fallback entry (priority 0)
         if let Ok(ostree_entry) = build_ostree_fallback_entry() {
             entries.push(ostree_entry);
         }
 
-        // Write to entries.staged/ first (#9)
+        // Write to entries.staged/ first
         let staged_dir = Path::new("/boot/loader/entries.staged");
         fs::create_dir_all(&staged_dir)?;
         for entry in &entries {
@@ -418,7 +415,7 @@ pub(crate) fn phase5_setup_bootloader(
             fs::write(&entry_path, entry.render())?;
         }
 
-        // Fix 3: propagate rename errors.
+        // Propagate rename errors.
         let entries_dir = Path::new("/boot/loader/entries");
         fs::create_dir_all(&entries_dir)?;
         for entry in &entries {
@@ -461,7 +458,7 @@ pub(crate) fn phase5_setup_bootloader(
         // Best-effort one-shot for distros with the next_entry block.
         let _ = Command::new("grub2-reboot").arg(entry_id).status();
 
-        // Ensure GRUB_DEFAULT=saved in /etc/default/grub (Fix 4: propagate error)
+        // Ensure GRUB_DEFAULT=saved in /etc/default/grub
         let grub_defaults_path = "/etc/default/grub";
         let existing = fs::read_to_string(grub_defaults_path).unwrap_or_default();
         let mut new_cfg = String::new();
@@ -480,7 +477,7 @@ pub(crate) fn phase5_setup_bootloader(
         }
         fs::write(grub_defaults_path, &new_cfg).context("failed to write /etc/default/grub")?;
 
-        // Inject set default="${saved_entry}" into grub.cfg (Fix 4: propagate error)
+        // Inject set default="${saved_entry}" into grub.cfg
         let grub_cfg_path = "/boot/grub2/grub.cfg";
         if let Ok(cfg) = fs::read_to_string(grub_cfg_path) {
             if !cfg.contains("set default=\"${saved_entry}\"") {
@@ -758,8 +755,7 @@ fn rebuild_initrd_with_lvm_if_needed(
         );
         return Ok(None);
     }
-    let kmod_dir =
-        TempDir::new_in("/var/tmp").context("failed to create kmod extract dir")?;
+    let kmod_dir = TempDir::new_in("/var/tmp").context("failed to create kmod extract dir")?;
     let subtree = format!("usr/lib/modules/{}", kver);
     println!(
         "[phase5] extracting kernel modules via registry stream (subtree: {})...",
@@ -809,10 +805,16 @@ fn rebuild_initrd_with_lvm_if_needed(
         // Write bootc-root-setup.service
         let svc_dir = bd.path().join("usr/lib/systemd/system");
         fs::create_dir_all(&svc_dir).ok();
-        fs::write(svc_dir.join("bootc-root-setup.service"), BOOTC_ROOT_SETUP_SERVICE).ok();
+        fs::write(
+            svc_dir.join("bootc-root-setup.service"),
+            BOOTC_ROOT_SETUP_SERVICE,
+        )
+        .ok();
 
         // Enable it in initrd-root-fs.target.wants
-        let wants_dir = bd.path().join("usr/lib/systemd/system/initrd-root-fs.target.wants");
+        let wants_dir = bd
+            .path()
+            .join("usr/lib/systemd/system/initrd-root-fs.target.wants");
         fs::create_dir_all(&wants_dir).ok();
         let _ = std::os::unix::fs::symlink(
             "../bootc-root-setup.service",
@@ -823,7 +825,10 @@ fn rebuild_initrd_with_lvm_if_needed(
         println!("[phase5] extracting initramfs-setup from target image...");
         let setup_dst = bd.path().join("usr/lib/bootc/initramfs-setup");
         fs::create_dir_all(setup_dst.parent().unwrap_or(Path::new("/"))).ok();
-        let extract_files = vec![(Path::new("/usr/lib/bootc/initramfs-setup"), setup_dst.as_path())];
+        let extract_files = vec![(
+            Path::new("/usr/lib/bootc/initramfs-setup"),
+            setup_dst.as_path(),
+        )];
         let setup_ok = match extract_files_via_registry(target_image, &extract_files) {
             Ok(()) => {
                 // Make the binary executable — it must be run as /usr/lib/bootc/initramfs-setup
@@ -891,7 +896,10 @@ fn rebuild_initrd_with_lvm_if_needed(
             // loopback is mounted BEFORE composefs is mounted as root.
             let wants_dir = unit_dir.join("initrd-root-fs.target.wants");
             fs::create_dir_all(&wants_dir)?;
-            let _ = std::os::unix::fs::symlink("../sysroot-composefs.mount", wants_dir.join("sysroot-composefs.mount"));
+            let _ = std::os::unix::fs::symlink(
+                "../sysroot-composefs.mount",
+                wants_dir.join("sysroot-composefs.mount"),
+            );
             let dropin_dir = unit_dir.join("bootc-root-setup.service.d");
             fs::create_dir_all(&dropin_dir)?;
             fs::write(
@@ -936,7 +944,7 @@ fn rebuild_initrd_with_lvm_if_needed(
         Ok(s) => {
             eprintln!(
                 "[phase5] Warning: dracut exited {:?} — initrd may lack {} support.\n\
-                 If the system fails to boot, select the OSTree fallback entry and run:\n  \
+                 If the system fails to boot, select the OSTree fallback entry and run:\n \
                  dracut --kver {} --add '{}' --force {}",
                 s.code(),
                 label,
@@ -949,7 +957,7 @@ fn rebuild_initrd_with_lvm_if_needed(
         Err(e) => {
             eprintln!(
                 "[phase5] Warning: dracut failed to run ({}) — initrd may lack {} support.\n\
-                 If the system fails to boot, select the OSTree fallback entry and run:\n  \
+                 If the system fails to boot, select the OSTree fallback entry and run:\n \
                  dracut --kver {} --add '{}' --force {}",
                 e,
                 label,
@@ -961,4 +969,3 @@ fn rebuild_initrd_with_lvm_if_needed(
         }
     }
 }
-
