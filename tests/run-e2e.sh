@@ -296,88 +296,66 @@ LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
 echo "Mounted loopback device: $LOOP_DEV"
 
 if [[ "$FILESYSTEM" == xfs+crypt ]]; then
-    echo "LUKS encryption enabled — partitioning disk manually..."
-    # Partition: ESP (vfat, 512MB) + root (LUKS, rest) using parted.
-    sudo parted -s "$LOOP_DEV" mklabel gpt
-    sudo parted -s "$LOOP_DEV" mkpart primary fat32 1MiB 513MiB
-    sudo parted -s "$LOOP_DEV" set 1 esp on
-    sudo parted -s "$LOOP_DEV" name 1 EFI-SYSTEM
-    sudo parted -s "$LOOP_DEV" mkpart primary 513MiB 100%
-    sudo partprobe "$LOOP_DEV"
-    sudo udevadm settle
+    echo "LUKS encryption enabled — installing plain disk first, then encrypting..."
+    # Use bootc install to-disk for proper ESP + bootloader setup.
+    sudo podman run --privileged --pid=host --rm \
+        -v /dev:/dev \
+        -v /var/tmp:/var/tmp \
+        -v /tmp:/tmp \
+        -v "$WORKSPACE_DIR":/workspace \
+        "$INSTALL_IMAGE" \
+        bootc install to-disk \
+        --generic-image \
+        --filesystem xfs \
+        --root-ssh-authorized-keys /workspace/test_key.pub \
+        "$LOOP_DEV"
 
-    ROOT_PART="${LOOP_DEV}p2"
-    ESP_PART="${LOOP_DEV}p1"
+    # Find root partition (XFS) and ESP
+    ROOT_PART=""; ESP_PART=""
+    for p in "${LOOP_DEV}"p*; do
+        fstype=$(sudo blkid -o value -s TYPE "$p" 2>/dev/null || true)
+        if [ "$fstype" = "vfat" ]; then ESP_PART="$p"
+        elif [ "$fstype" = "xfs" ]; then ROOT_PART="$p"; fi
+    done
+    if [ -z "$ROOT_PART" ] || [ -z "$ESP_PART" ]; then
+        echo "ERROR: could not find root or ESP partition"; exit 1
+    fi
 
-    # Wipe any old LUKS header, create keyfile, format
-    dd if=/dev/zero of="$ROOT_PART" bs=1M count=4 status=none 2>/dev/null || true
+    # Mount ESP, store LUKS keyfile
     LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
     dd if=/dev/urandom bs=64 count=1 of="$LUKS_KEYFILE" 2>/dev/null
-    sudo cryptsetup luksFormat "$ROOT_PART" --key-file="$LUKS_KEYFILE" --batch-mode
-    sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE"
-
-    # XFS inside LUKS
-    sudo /var/usrlocal/bin/mkfs.xfs -f /dev/mapper/"$LUKS_MAPPER"
-    sudo mkdir -p /tmp/mnt-e2e-luks-root
-    sudo mount /dev/mapper/"$LUKS_MAPPER" /tmp/mnt-e2e-luks-root
-
-    # Format ESP
-    sudo mkfs.vfat -F 32 -n EFI-SYSTEM "$ESP_PART"
     sudo mkdir -p /tmp/mnt-e2e-luks-esp
     sudo mount "$ESP_PART" /tmp/mnt-e2e-luks-esp
     sudo mkdir -p /tmp/mnt-e2e-luks-esp/keys
     sudo cp "$LUKS_KEYFILE" /tmp/mnt-e2e-luks-esp/keys/luks.key
     sudo umount /tmp/mnt-e2e-luks-esp
 
-    # bootc install to-filesystem onto the unlocked root
-    sudo podman run --privileged --pid=host --rm \
-        -v /dev:/dev \
-        -v /var/tmp:/var/tmp \
-        -v /tmp:/tmp \
-        -v /tmp/mnt-e2e-luks-root:/target \
-        -v "$WORKSPACE_DIR":/workspace \
-        "$INSTALL_IMAGE" \
-        bootc install to-filesystem \
-        --root-ssh-authorized-keys /workspace/test_key.pub \
-        /target
+    # Convert root XFS to LUKS in-place
+    echo "[luks] encrypting root partition..."
+    sudo cryptsetup reencrypt \
+        --encrypt --type luks2 \
+        --key-file="$LUKS_KEYFILE" \
+        --resilience=checksum --batch-mode \
+        "$ROOT_PART" 2>&1 || echo "[luks] WARN: reencrypt failed (try luksFormat next time)"
 
-    # bootc install to-filesystem may create etc/ at the target root or not.
-    # If /etc is missing, create it along with crypttab directly.
-    if [ -d /tmp/mnt-e2e-luks-root/etc ]; then
-        DEPLOY_ROOT="/tmp/mnt-e2e-luks-root"
-    elif [ -d /tmp/mnt-e2e-luks-root/ostree/deploy/default/deploy/*.0/etc ]; then
-        DEPLOY_ROOT=$(ls -d /tmp/mnt-e2e-luks-root/ostree/deploy/default/deploy/*.0 2>/dev/null | head -1)
-    else
-        DEPLOY_ROOT="/tmp/mnt-e2e-luks-root"
-        sudo mkdir -p "$DEPLOY_ROOT/etc" "$DEPLOY_ROOT/keys"
-        echo "[luks] created /etc and /keys directories on root"
+    # Open LUKS, update BLS entries with rd.luks kernel args
+    if sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE" 2>/dev/null; then
+        sudo mkdir -p /tmp/mnt-e2e-luks-root
+        sudo mount "/dev/mapper/$LUKS_MAPPER" /tmp/mnt-e2e-luks-root
+        for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
+            [ -f "$bls" ] || continue
+            if ! grep -q 'rd.luks' "$bls"; then
+                sudo sed "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls" 2>/dev/null | \
+                    sudo tee "$bls" > /dev/null 2>/dev/null || true
+                echo "[luks] added LUKS kernel args to $bls"
+            fi
+        done
+        sudo umount /tmp/mnt-e2e-luks-root
+        sudo cryptsetup close "$LUKS_MAPPER"
     fi
-    echo "[luks] deploy root: $DEPLOY_ROOT"
-
-    # Keyfile already on ESP (copied during ESP format step above).
-    # BLS entry already has rd.luks.key + rd.luks.name from the loop below.
-    # No crypttab needed: systemd-cryptsetup uses rd.luks.key= kernel arg
-    # to find the keyfile on the ESP during early boot.
-
-    # Remount rw so we can edit BLS entries (bootc leaves fs ro)
-    sudo mount -o remount,rw /tmp/mnt-e2e-luks-root 2>/dev/null || true
-
-    # Add rd.luks kernel args to BLS entries. Use a temp file outside the
-    # read-only mount to avoid sed's in-place temp file issue.
-    for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
-        [ -f "$bls" ] || continue
-        if ! grep -q 'rd.luks' "$bls"; then
-            sudo sed "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls" 2>/dev/null | \
-                sudo tee "$bls" > /dev/null 2>/dev/null || true
-            echo "[luks] added LUKS kernel args to $bls"
-        fi
-    done
-
-    sudo umount /tmp/mnt-e2e-luks-root
-    sudo cryptsetup close "$LUKS_MAPPER"
+    SKIP_SETUP=true
     echo "LUKS disk setup complete"
-fi
-else
+fielse
     echo "Installing base OSTree bootc system to disk image..."
     # Run bootc install to-disk using podman on the loop device
     sudo podman run --privileged --pid=host --rm \
