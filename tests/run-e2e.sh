@@ -261,6 +261,7 @@ cleanup() {
     if [ -n "${LOOP_DEV:-}" ]; then
         step "Detaching loopback device $LOOP_DEV..."
         sudo umount /tmp/mnt-e2e-disk 2>/dev/null || true
+        sudo cryptsetup close e2e-root 2>/dev/null || true
         sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
     fi
     rm -f ./test_key ./test_key.pub
@@ -276,19 +277,101 @@ echo "Setting up loopback device..."
 LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
 echo "Mounted loopback device: $LOOP_DEV"
 
-echo "Installing base OSTree bootc system to disk image..."
-# Run bootc install to-disk using podman on the loop device
-sudo podman run --privileged --pid=host --rm \
-    -v /dev:/dev \
-    -v /var/tmp:/var/tmp \
-    -v /tmp:/tmp \
-    -v "$WORKSPACE_DIR":/workspace \
-    "$INSTALL_IMAGE" \
-    bootc install to-disk \
-    --generic-image \
-    --filesystem "$FILESYSTEM" \
-    --root-ssh-authorized-keys /workspace/test_key.pub \
-    "$LOOP_DEV"
+if [[ "$FILESYSTEM" == xfs+crypt ]]; then
+    echo "LUKS encryption enabled — setting up disk manually..."
+    # Partition: ESP (vfat, 512MB) + root (LUKS, rest)
+    sudo sgdisk -Z "$LOOP_DEV"
+    sudo sgdisk -n 1:0:+512M -t 1:ef00 -c 1:EFI-SYSTEM "$LOOP_DEV"
+    sudo sgdisk -n 2:0:0 -t 2:8300 -c 2:root "$LOOP_DEV"
+    sudo partprobe "$LOOP_DEV"
+    sudo udevadm settle
+
+    # Find root partition (partition 2)
+    ROOT_PART="${LOOP_DEV}p2"
+    ESP_PART="${LOOP_DEV}p1"
+
+    # Create LUKS keyfile and format
+    LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
+    dd if=/dev/urandom bs=64 count=1 of="$LUKS_KEYFILE" 2>/dev/null
+    sudo cryptsetup luksFormat "$ROOT_PART" --key-file="$LUKS_KEYFILE" --batch-mode
+    sudo cryptsetup open "$ROOT_PART" e2e-root --key-file="$LUKS_KEYFILE"
+
+    # Create XFS filesystem inside LUKS
+    sudo mkfs.xfs -f /dev/mapper/e2e-root
+    sudo mkdir -p /tmp/mnt-e2e-luks-root
+    sudo mount /dev/mapper/e2e-root /tmp/mnt-e2e-luks-root
+
+    # Format ESP
+    sudo mkfs.vfat -F 32 -n EFI-SYSTEM "$ESP_PART"
+    sudo mkdir -p /tmp/mnt-e2e-luks-esp
+    sudo mount "$ESP_PART" /tmp/mnt-e2e-luks-esp
+
+    # Copy keyfile to ESP so initrd can find it
+    sudo mkdir -p /tmp/mnt-e2e-luks-esp/keys
+    sudo cp "$LUKS_KEYFILE" /tmp/mnt-e2e-luks-esp/keys/luks.key
+    sudo umount /tmp/mnt-e2e-luks-esp
+
+    # Install bootc via to-filesystem onto the unlocked root
+    sudo podman run --privileged --pid=host --rm \
+        -v /dev:/dev \
+        -v /var/tmp:/var/tmp \
+        -v /tmp:/tmp \
+        -v /tmp/mnt-e2e-luks-root:/target \
+        -v "$WORKSPACE_DIR":/workspace \
+        "$INSTALL_IMAGE" \
+        bootc install to-filesystem \
+        --root-ssh-authorized-keys /workspace/test_key.pub \
+        /target
+
+    # Add crypttab entry and keyfile path to the installed system
+    ESCAPED_UUID=$(sudo cryptsetup luksUUID "$ROOT_PART")
+    echo "e2e-root UUID=$ESCAPED_UUID /keys/luks.key luks" | \
+        sudo tee /tmp/mnt-e2e-luks-root/etc/crypttab
+
+    # Copy keyfile into initramfs-accessible location on root
+    sudo mkdir -p /tmp/mnt-e2e-luks-root/keys
+    sudo cp "$LUKS_KEYFILE" /tmp/mnt-e2e-luks-root/keys/luks.key
+
+    # Add rd.luks.key kernel arg to the BLS entry
+    for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
+        [ -f "$bls" ] || continue
+        if ! grep -q 'rd.luks.key' "$bls"; then
+            sudo sed -i 's|^options \(.*\)|options \1 rd.luks.key=/keys/luks.key|' "$bls"
+        fi
+    done
+
+    # Rebuild initrd to include cryptsetup
+    # Use the podman container to run dracut with crypt module
+    sudo podman run --privileged --pid=host --rm \
+        -v /dev:/dev \
+        -v /tmp/mnt-e2e-luks-root:/target \
+        --entrypoint /bin/bash \
+        "$INSTALL_IMAGE" \
+        -c "\
+            dracut --kver \$(ls /target/usr/lib/modules) \
+                --add crypt \
+                --force /target/boot/ostree/*/initramfs-*.img \
+        " 2>&1 || echo "WARN: dracut rebuild for LUKS failed"
+
+    sudo umount /tmp/mnt-e2e-luks-root
+    sudo cryptsetup close e2e-root
+    sudo losetup -d "$LOOP_DEV"
+    echo "LUKS disk setup complete"
+else
+    echo "Installing base OSTree bootc system to disk image..."
+    # Run bootc install to-disk using podman on the loop device
+    sudo podman run --privileged --pid=host --rm \
+        -v /dev:/dev \
+        -v /var/tmp:/var/tmp \
+        -v /tmp:/tmp \
+        -v "$WORKSPACE_DIR":/workspace \
+        "$INSTALL_IMAGE" \
+        bootc install to-disk \
+        --generic-image \
+        --filesystem "$FILESYSTEM" \
+        --root-ssh-authorized-keys /workspace/test_key.pub \
+        "$LOOP_DEV"
+fi
 
 # Force kernel to reread partition table by detaching and re-attaching
 echo "Cycling loop device to refresh partitions..."
@@ -305,19 +388,34 @@ for i in $(seq 1 10); do
     sudo partprobe "$LOOP_DEV" 2>/dev/null || true
     sudo udevadm settle 2>/dev/null || true
     for p in "${LOOP_DEV}"p*; do
-        if sudo blkid -o value -s TYPE "$p" 2>/dev/null | grep -qx "$FILESYSTEM"; then
+        local_fstype=$(sudo blkid -o value -s TYPE "$p" 2>/dev/null || true)
+        if [ "$FILESYSTEM" = "xfs+crypt" ]; then
+            # LUKS: detect crypto_LUKS type, then open it
+            if [ "$local_fstype" = "crypto_LUKS" ]; then
+                ROOT_PART="$p"
+                LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
+                sudo cryptsetup open "$ROOT_PART" e2e-root --key-file="$LUKS_KEYFILE" 2>/dev/null || true
+                # Now the mapper device is available
+                ROOT_MAPPER="/dev/mapper/e2e-root"
+                break 2
+            fi
+        elif [ "$local_fstype" = "$FILESYSTEM" ]; then
             ROOT_PART="$p"; break 2
         fi
     done
     sleep 1
 done
 if [ -z "$ROOT_PART" ]; then
-    echo "ERROR: could not find $FILESYSTEM root partition on $LOOP_DEV" >&2
+    echo "ERROR: could not find root partition on $LOOP_DEV (fs=$FILESYSTEM)" >&2
     sudo losetup -d "$LOOP_DEV"; exit 1
 fi
 MNT_DIR="/tmp/mnt-e2e-disk"
 sudo mkdir -p "$MNT_DIR"
-sudo mount "$ROOT_PART" "$MNT_DIR"
+if [ "$FILESYSTEM" = "xfs+crypt" ] && [ -b "/dev/mapper/e2e-root" ]; then
+    sudo mount "/dev/mapper/e2e-root" "$MNT_DIR"
+else
+    sudo mount "$ROOT_PART" "$MNT_DIR"
+fi
 
 # Wait a second for mount to settle
 sleep 1

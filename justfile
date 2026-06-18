@@ -52,6 +52,15 @@ e2e-lts: build test
       FILESYSTEM="xfs" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-lts.log
 
+# Bluefin LTS → Dakota (xfs + LUKS encryption + loopback).
+e2e-luks: build test
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      BASE_IMAGE="ghcr.io/projectbluefin/bluefin:lts" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      DISK_SIZE="20G" \
+      FILESYSTEM="xfs+crypt" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-luks.log
+
 # Run E2E with composefs boot log_level=debug
 e2e-debug: build
     @echo "=== Running E2E with composefs systemd debug logging ==="
