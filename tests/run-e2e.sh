@@ -341,15 +341,12 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
         --root-ssh-authorized-keys /workspace/test_key.pub \
         /target
 
-    # Find the OSTree deployment root (where /etc lives)
-    DEPLOY_ROOT=$(sudo podman run --rm -v /tmp/mnt-e2e-luks-root:/target \
-        "$INSTALL_IMAGE" ostree admin --sysroot=/target --print-current-dir 2>&1 || true) || echo "[luks] ostree admin failed (non-fatal)"
-    if [ -z "$DEPLOY_ROOT" ]; then
-        # Find the deploy dir: a directory under deploy/ with etc/ and var/ subdirs
-        DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 6 -type d 2>/dev/null | while read d; do
-            if [ -d "$d/etc" ] && [ -d "$d/var" ] && [ -d "$d/usr" ]; then echo "$d"; break; fi
-        done)
-    fi
+    # Find the OSTree deployment root (where /etc lives). ostree admin
+    # --print-current-dir requires init-fs subcommand not available in all
+    # versions; use find as the primary method.
+    DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 6 -type d 2>/dev/null | while read d; do
+        if [ -d "$d/etc" ] && [ -d "$d/var" ] && [ -d "$d/usr" ] && [ -d "$d/boot" ]; then echo "$d"; break; fi
+    done)
     if [ -z "$DEPLOY_ROOT" ]; then echo "ERROR: no deploy root"; exit 1; fi
     # ostree admin returns path relative to sysroot; prepend if not already absolute
     case "$DEPLOY_ROOT" in
