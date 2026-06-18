@@ -296,40 +296,79 @@ LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
 echo "Mounted loopback device: $LOOP_DEV"
 
 if [[ "$FILESYSTEM" == xfs+crypt ]]; then
-    echo "LUKS encryption enabled — using bootc install to-disk + swtpm..."
-    # Start swtpm for TPM2 emulation
-    sudo mkdir -p /tmp/swtpm-tpmstate
-    swtpm_setup --tpm2 --tpmstate /tmp/swtpm-tpmstate 2>&1 || true
-    swtpm socket --tpm2 --tpmstate dir=/tmp/swtpm-tpmstate \
-        --ctrl type=unixio,path=/tmp/swtpm-sock \
-        --flags startup-clear &
-    SWTPM_PID=$!
-    sleep 1
+    echo "LUKS encryption enabled — partitioning disk manually..."
+    # Partition: ESP (vfat, 512MB) + root (LUKS, rest) using parted.
+    sudo parted -s "$LOOP_DEV" mklabel gpt
+    sudo parted -s "$LOOP_DEV" mkpart primary fat32 1MiB 513MiB
+    sudo parted -s "$LOOP_DEV" set 1 esp on
+    sudo parted -s "$LOOP_DEV" name 1 EFI-SYSTEM
+    sudo parted -s "$LOOP_DEV" mkpart primary 513MiB 100%
+    sudo partprobe "$LOOP_DEV"
+    sudo udevadm settle
 
-    # bootc install to-disk with tpm2-luks handles everything: partitions,
-    # LUKS encryption, filesystem, bootloader, and initrd setup.
+    ROOT_PART="${LOOP_DEV}p2"
+    ESP_PART="${LOOP_DEV}p1"
+
+    # Wipe any old LUKS header, create keyfile, format
+    dd if=/dev/zero of="$ROOT_PART" bs=1M count=4 status=none 2>/dev/null || true
+    LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
+    dd if=/dev/urandom bs=64 count=1 of="$LUKS_KEYFILE" 2>/dev/null
+    sudo cryptsetup luksFormat "$ROOT_PART" --key-file="$LUKS_KEYFILE" --batch-mode
+    sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE"
+
+    # XFS inside LUKS
+    sudo /var/usrlocal/bin/mkfs.xfs -f /dev/mapper/"$LUKS_MAPPER"
+    sudo mkdir -p /tmp/mnt-e2e-luks-root
+    sudo mount /dev/mapper/"$LUKS_MAPPER" /tmp/mnt-e2e-luks-root
+
+    # Format ESP
+    sudo mkfs.vfat -F 32 -n EFI-SYSTEM "$ESP_PART"
+    sudo mkdir -p /tmp/mnt-e2e-luks-esp
+    sudo mount "$ESP_PART" /tmp/mnt-e2e-luks-esp
+    sudo mkdir -p /tmp/mnt-e2e-luks-esp/keys
+    sudo cp "$LUKS_KEYFILE" /tmp/mnt-e2e-luks-esp/keys/luks.key
+    sudo umount /tmp/mnt-e2e-luks-esp
+
+    # bootc install to-filesystem onto the unlocked root
     sudo podman run --privileged --pid=host --rm \
         -v /dev:/dev \
         -v /var/tmp:/var/tmp \
         -v /tmp:/tmp \
+        -v /tmp/mnt-e2e-luks-root:/target \
         -v "$WORKSPACE_DIR":/workspace \
         "$INSTALL_IMAGE" \
-        bootc install to-disk \
-        --generic-image \
-        --filesystem xfs \
-        --block-setup tpm2-luks \
+        bootc install to-filesystem \
         --root-ssh-authorized-keys /workspace/test_key.pub \
-        "$LOOP_DEV"
+        /target
 
-    # swtpm must persist for VM boot to unlock LUKS via TPM2
-    # SWTPM_PID is kept running; QEMU connects via SWTPM_QEMU_ARGS
-    # QEMU TPM2 via swtpm socket: chardev + tpmdev emulator, not passthrough
-    SWTPM_QEMU_ARGS="-chardev socket,id=chrtpm,path=/tmp/swtpm-sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0"
-    export SWTPM_QEMU_ARGS
-    # Skip SSH injection + fixtures: bootc install already injected the
-    # SSH key, and the LUKS-encrypted root is inaccessible from the host.
-    SKIP_SETUP=true
-    echo "LUKS disk setup complete (tpm2-luks, QEMU TPM configured)"
+    # Find the OSTree deployment root (where /etc lives)
+    DEPLOY_ROOT=$(sudo podman run --rm -v /tmp/mnt-e2e-luks-root:/target \
+        "$INSTALL_IMAGE" ostree admin --sysroot=/target --print-current-dir 2>/dev/null || true)
+    if [ -z "$DEPLOY_ROOT" ]; then
+        DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 5 -name 'etc' -type d 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
+    fi
+    if [ -z "$DEPLOY_ROOT" ]; then echo "ERROR: no deploy root"; exit 1; fi
+    DEPLOY_ROOT="/tmp/mnt-e2e-luks-root/${DEPLOY_ROOT#/}"
+    echo "[luks] deploy root: $DEPLOY_ROOT"
+
+    # crypttab + keyfile on the installed system
+    LUKS_UUID=$(sudo cryptsetup luksUUID "$ROOT_PART")
+    echo "$LUKS_MAPPER UUID=$LUKS_UUID /keys/luks.key luks" | sudo tee "$DEPLOY_ROOT/etc/crypttab"
+    sudo mkdir -p "$DEPLOY_ROOT/keys"
+    sudo cp "$LUKS_KEYFILE" "$DEPLOY_ROOT/keys/luks.key"
+
+    # Add rd.luks kernel args to BLS entries
+    for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
+        [ -f "$bls" ] || continue
+        if ! grep -q 'rd.luks' "$bls"; then
+            sudo sed -i "s|^\(options .*\)|\1 rd.luks.key=/keys/luks.key rd.luks.name=$LUKS_MAPPER rd.luks.options=discard|" "$bls"
+            echo "[luks] added LUKS kernel args to $bls"
+        fi
+    done
+
+    sudo umount /tmp/mnt-e2e-luks-root
+    sudo cryptsetup close "$LUKS_MAPPER"
+    echo "LUKS disk setup complete"
 fi
     # Add rd.luks.key + rd.luks.name + rd.luks.options kernel args to BLS entries
     for bls in /tmp/mnt-e2e-luks-root/boot/loader/entries/ostree-*.conf; do
