@@ -508,6 +508,8 @@ echo "hidden-file-content" | sudo tee "$VAR_DIR/cache/.hidden-dir/secret" >/dev/
 
 echo "Test fixtures written."
 
+MNT_DIR="${MNT_DIR:-/tmp/mnt-e2e-disk}"
+
 # Inject console=ttyS0 into BLS entries so the kernel logs to serial (visible
 # in qemu.log). Without this, desktop-flavored images like Bluefin send kernel
 # output only to the graphical console and we have zero visibility post-GRUB.
