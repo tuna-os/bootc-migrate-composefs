@@ -1,7 +1,4 @@
-# Temp research clones (large)
-/tmp/
-
-# Rust build artifacts  
+# Rust build artifacts
 target/
 
 # IDE
@@ -9,16 +6,20 @@ target/
 .vscode/
 *.swp
 
-# E2E test artifacts
-test_key
-test_key.pub
-disk.raw
-qemu.log
-disk.raw.pre-migration
-
-# E2E test artifacts
+# E2E test artifacts: disk images, keys, logs, OVMF NVRAM
 *.raw
 *.raw.*
-e2e-*.log
+test_key
+test_key.pub
+luks.key
+*.log
 qemu.log
 serial-*.log
+ovmf_vars.fd
+*.fd
+
+# Scratch agent transcripts / notes (not versioned)
+2026-*.txt*
+context.md
+status.md
+research.md
