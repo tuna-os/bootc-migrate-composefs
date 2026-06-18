@@ -335,8 +335,9 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     sudo cryptsetup reencrypt \
         --encrypt --type luks2 \
         --key-file="$LUKS_KEYFILE" \
+        --reduce-device-size 32M \
         --resilience=checksum --batch-mode \
-        "$ROOT_PART" 2>&1 || echo "[luks] WARN: reencrypt failed (try luksFormat next time)"
+        "$ROOT_PART" 2>&1 || echo "[luks] WARN: reencrypt failed"
 
     # Open LUKS, update BLS entries with rd.luks kernel args
     if sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE" 2>/dev/null; then
@@ -355,7 +356,8 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     fi
     SKIP_SETUP=true
     echo "LUKS disk setup complete"
-fielse
+fi
+else
     echo "Installing base OSTree bootc system to disk image..."
     # Run bootc install to-disk using podman on the loop device
     sudo podman run --privileged --pid=host --rm \
