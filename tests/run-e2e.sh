@@ -551,7 +551,6 @@ LOOP_DEV=""
 echo "Disk image initialized and customized."
 # Save checkpoint for faster re-runs (skip disk creation + install).
 cp disk.raw "$CHECKPOINT"
-fi  # SKIP_SETUP
 
 # 6. Launch QEMU VM
 step "=== Booting VM under QEMU ==="
