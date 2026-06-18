@@ -140,6 +140,18 @@ e2e-reboot-test:
 e2e-log:
     @less e2e-run.log
 
+# Watch the latest E2E log with auto-exit on errors
+watch log="":
+    @bash -c '
+        LOG="{{log}}"
+        if [ -z "$LOG" ]; then
+            LOG=$$(ls -t e2e-*.log 2>/dev/null | head -1)
+        fi
+        if [ -z "$LOG" ]; then echo "No E2E log found"; exit 1; fi
+        echo "Watching: $LOG"
+        exec ./watcher.sh "$LOG" 30 300
+    '
+
 # Grep E2E log for failures
 e2e-failures:
     @grep --color=always -E 'FAILED|error|Error|WARNING|panic|blocker' e2e-run.log || echo "No failures found"
