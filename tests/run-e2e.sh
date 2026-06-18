@@ -341,18 +341,12 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
         --root-ssh-authorized-keys /workspace/test_key.pub \
         /target
 
-    # Find the OSTree deployment root (where /etc lives). ostree admin
-    # --print-current-dir requires init-fs subcommand not available in all
-    # versions; use find as the primary method.
-    DEPLOY_ROOT=$(find /tmp/mnt-e2e-luks-root/ostree/deploy -maxdepth 6 -type d 2>/dev/null | while read d; do
-        if [ -d "$d/etc" ] && [ -d "$d/var" ] && [ -d "$d/usr" ] && [ -d "$d/boot" ]; then echo "$d"; break; fi
-    done)
-    if [ -z "$DEPLOY_ROOT" ]; then echo "ERROR: no deploy root"; exit 1; fi
-    # ostree admin returns path relative to sysroot; prepend if not already absolute
-    case "$DEPLOY_ROOT" in
-      /tmp/mnt-e2e-luks-root/*) ;;
-      *) DEPLOY_ROOT="/tmp/mnt-e2e-luks-root/${DEPLOY_ROOT#/}" ;;
-    esac
+    # bootc install to-filesystem writes directly to the root of the target
+    # filesystem — no OSTree subdirectory structure like to-disk creates.
+    DEPLOY_ROOT="/tmp/mnt-e2e-luks-root"
+    if [ ! -d "$DEPLOY_ROOT/etc" ]; then
+        echo "ERROR: no /etc in deploy root $DEPLOY_ROOT"; exit 1
+    fi
     echo "[luks] deploy root: $DEPLOY_ROOT"
 
     # crypttab + keyfile on the installed system
