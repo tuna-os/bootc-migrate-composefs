@@ -302,32 +302,8 @@ if [[ "$FILESYSTEM" == xfs+crypt ]]; then
     sudo cryptsetup luksFormat "$ROOT_PART" --key-file="$LUKS_KEYFILE" --batch-mode
     sudo cryptsetup open "$ROOT_PART" e2e-root --key-file="$LUKS_KEYFILE"
 
-    # Create XFS filesystem inside LUKS. Use the install image container
-    # to run mkfs.xfs if the host doesn't have xfsprogs installed.
-    if command -v mkfs.xfs &>/dev/null; then
-        sudo mkfs.xfs -f /dev/mapper/e2e-root
-    elif podman image exists localhost/bluefin-installer:latest 2>/dev/null; then
-        echo "[luks] using mkfs.xfs from container localhost/bluefin-installer:latest"
-        sudo podman run --rm --privileged \
-            -v /dev:/dev \
-            localhost/bluefin-installer:latest \
-            mkfs.xfs -f /dev/mapper/e2e-root
-    else
-        # Fallback: search any available image for mkfs.xfs
-        MKFS_IMG=$(podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | while read img; do
-            podman run --rm --entrypoint bash "$img" -c 'command -v mkfs.xfs' 2>/dev/null && echo "$img" && break
-        done | head -1)
-        if [ -n "$MKFS_IMG" ]; then
-            echo "[luks] using mkfs.xfs from container $MKFS_IMG"
-            sudo podman run --rm --privileged \
-                -v /dev:/dev \
-                "$MKFS_IMG" \
-                mkfs.xfs -f /dev/mapper/e2e-root
-        else
-            echo "[luks] xfsprogs not available in any container, using ext4"
-            sudo mkfs.ext4 -F /dev/mapper/e2e-root
-        fi
-    fi
+    # Create XFS filesystem inside LUKS.
+    sudo mkfs.xfs -f /dev/mapper/e2e-root
     sudo mkdir -p /tmp/mnt-e2e-luks-root
     sudo mount /dev/mapper/e2e-root /tmp/mnt-e2e-luks-root
 
