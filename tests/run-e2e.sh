@@ -412,7 +412,6 @@ SFDISK
     sudo cryptsetup luksClose "$LUKS_MAPPER" 2>/dev/null || true
     SKIP_SETUP=true
     echo "LUKS disk setup complete (bootc install to-filesystem + keyfile, GRUB source)"
-fi
 else
     echo "Installing base OSTree bootc system to disk image..."
     # Run bootc install to-disk using podman on the loop device
@@ -427,6 +426,7 @@ else
         --filesystem "$FILESYSTEM" \
         --root-ssh-authorized-keys /workspace/test_key.pub \
         "$LOOP_DEV"
+fi
 fi
 
 # Force kernel to reread partition table by detaching and re-attaching
