@@ -366,8 +366,6 @@ for i in $(seq 1 10); do
                 ROOT_PART="$p"
                 LUKS_KEYFILE="$WORKSPACE_DIR/luks.key"
                 sudo cryptsetup open "$ROOT_PART" "$LUKS_MAPPER" --key-file="$LUKS_KEYFILE" 2>/dev/null || true
-                # Now the mapper device is available
-                ROOT_MAPPER="/dev/mapper/"$LUKS_MAPPER""
                 break 2
             fi
         elif [ "$local_fstype" = "$FILESYSTEM" ]; then
@@ -382,8 +380,8 @@ if [ -z "$ROOT_PART" ]; then
 fi
 MNT_DIR="/tmp/mnt-e2e-disk"
 sudo mkdir -p "$MNT_DIR"
-if [ "$FILESYSTEM" = "xfs+crypt" ] && [ -b "/dev/mapper/"$LUKS_MAPPER"" ]; then
-    sudo mount "/dev/mapper/"$LUKS_MAPPER"" "$MNT_DIR"
+if [ "$FILESYSTEM" = "xfs+crypt" ] && [ -b "/dev/mapper/$LUKS_MAPPER" ]; then
+    sudo mount "/dev/mapper/$LUKS_MAPPER" "$MNT_DIR"
 else
     sudo mount "$ROOT_PART" "$MNT_DIR"
 fi

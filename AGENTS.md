@@ -37,6 +37,32 @@ Key project-specific points (see REVIEW.md for the full list):
   table-driven tests.
 - Run `just check` (clippy, rustfmt, unit tests, shellcheck) before opening a PR.
 
+## Monitoring E2E runs
+
+Use `watcher.sh` instead of polling loops. It tails the e2e log, exits on fatal
+error patterns or idle timeout:
+
+```bash
+# Watch the latest .log file with default timeout (300s idle)
+./watcher.sh e2e-luks.log 30 300
+```
+
+Also available via just: `just watch log="e2e-luks.log"`
+
+## CI matrix
+
+| Scenario | Base | Target | Filesystem | Disk size |
+|----------|------|--------|------------|-----------|
+| btrfs + composefs | bluefin:stable | dakota:stable | btrfs | 20G |
+| xfs + loopback | bluefin:lts | dakota:stable | ext4 | 20G |
+| LUKS + xfs | bluefin:lts | dakota:stable | xfs+crypt | 40G |
+
+## Two-candidate CI races
+
+When evaluating competing implementations (e.g. monolith M vs modular P), push
+both branches and dispatch CI on each. The watcher script can monitor any local
+run; for CI use `gh run view --json jobs` to poll per-scenario results.
+
 ## Follow other guidelines
 
 Read [README.md](README.md) and [CONTRIBUTING.md](CONTRIBUTING.md) and follow
