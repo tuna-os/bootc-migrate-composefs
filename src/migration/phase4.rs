@@ -173,7 +173,7 @@ pub(crate) fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()>
         "Migrating /var data from {} to ComposeFS state...",
         source_var
     );
-    xattr::copy_dir_all_with_xattrs(source_var, &target_var)
+    xattr::copy_dir_all_with_xattrs(source_var, target_var)
         .context("failed to migrate /var data to ComposeFS state")?;
     println!("/var data migrated successfully.");
 
@@ -318,17 +318,17 @@ pub(crate) fn perform_etc_merge(
     // the file for systemd to load at runtime, causing "Failed to load
     // configuration: No such file or directory" on dbus-broker.service.
     let dbus_svc_link = etc_dir.join("systemd/system/dbus.service");
-    if dbus_svc_link.is_symlink() || dbus_svc_link.exists() {
-        if let Ok(target) = fs::read_link(&dbus_svc_link) {
-            let t = target.to_string_lossy();
-            if t.contains("dbus-broker") {
-                match fs::remove_file(&dbus_svc_link) {
-                    Ok(()) => {
-                        println!("[phase4] dropped dangling dbus.service -> dbus-broker symlink")
-                    }
-                    Err(e) => {
-                        eprintln!("[phase4] warning: failed to remove dbus.service symlink: {e}")
-                    }
+    if (dbus_svc_link.is_symlink() || dbus_svc_link.exists())
+        && let Ok(target) = fs::read_link(&dbus_svc_link)
+    {
+        let t = target.to_string_lossy();
+        if t.contains("dbus-broker") {
+            match fs::remove_file(&dbus_svc_link) {
+                Ok(()) => {
+                    println!("[phase4] dropped dangling dbus.service -> dbus-broker symlink")
+                }
+                Err(e) => {
+                    eprintln!("[phase4] warning: failed to remove dbus.service symlink: {e}")
                 }
             }
         }
@@ -361,8 +361,7 @@ pub(crate) fn perform_etc_merge(
         // through the overlay.
         let unit_dir = etc_dir.join("systemd/system");
         fs::create_dir_all(&unit_dir)?;
-        let mount_unit = format!(
-            r#"[Unit]
+        let mount_unit = r#"[Unit]
 Description=ComposeFS Loopback Mount
 After=sysroot.mount
 Before=initrd-root-fs.target bootc-root-setup.service
@@ -377,7 +376,7 @@ Options=loop,ro
 [Install]
 WantedBy=initrd-root-fs.target
 "#
-        );
+        .to_string();
         let unit_path = unit_dir.join("sysroot-composefs.mount");
         if !unit_path.exists() {
             fs::write(&unit_path, mount_unit.as_bytes())
@@ -397,8 +396,7 @@ WantedBy=initrd-root-fs.target
         // This oneshot service bind-mounts the ext4 loopback ON TOP of the
         // EROFS directory so /sysroot/composefs/meta.json is accessible.
         // Runs after sysroot.mount and before services that need the repo.
-        let rebind_unit = format!(
-            r#"[Unit]
+        let rebind_unit = r#"[Unit]
 Description=Rebind composefs loopback through EROFS overlay
 DefaultDependencies=no
 After=sysroot.mount
@@ -413,7 +411,7 @@ RemainAfterExit=yes
 [Install]
 WantedBy=local-fs.target
 "#
-        );
+        .to_string();
         let rebind_path = unit_dir.join("bootc-composefs-rebind.service");
         if !rebind_path.exists() {
             fs::write(&rebind_path, rebind_unit.as_bytes())

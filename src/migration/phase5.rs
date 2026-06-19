@@ -199,10 +199,10 @@ pub(crate) fn phase5_setup_bootloader(
                 // file. `bootc status` requires this digest to set soft-reboot
                 // capability; without it, status fails with "Could not find
                 // boot digest for deployment".
-                if have_initrd {
-                    if let Err(e) = patch_origin_boot_digest(verity, &esp_vmlinuz, &esp_initrd) {
-                        eprintln!("[phase5] warning: failed to patch origin boot_digest: {e:#}");
-                    }
+                if have_initrd
+                    && let Err(e) = patch_origin_boot_digest(verity, &esp_vmlinuz, &esp_initrd)
+                {
+                    eprintln!("[phase5] warning: failed to patch origin boot_digest: {e:#}");
                 }
 
                 // Build composefs BLS entry with optional second initrd.
@@ -409,7 +409,7 @@ pub(crate) fn phase5_setup_bootloader(
 
         // Write to entries.staged/ first
         let staged_dir = Path::new("/boot/loader/entries.staged");
-        fs::create_dir_all(&staged_dir)?;
+        fs::create_dir_all(staged_dir)?;
         for entry in &entries {
             let entry_path = staged_dir.join(&entry.filename);
             fs::write(&entry_path, entry.render())?;
@@ -417,7 +417,7 @@ pub(crate) fn phase5_setup_bootloader(
 
         // Propagate rename errors.
         let entries_dir = Path::new("/boot/loader/entries");
-        fs::create_dir_all(&entries_dir)?;
+        fs::create_dir_all(entries_dir)?;
         for entry in &entries {
             let src = staged_dir.join(&entry.filename);
             let dst = entries_dir.join(&entry.filename);
@@ -479,14 +479,12 @@ pub(crate) fn phase5_setup_bootloader(
 
         // Inject set default="${saved_entry}" into grub.cfg
         let grub_cfg_path = "/boot/grub2/grub.cfg";
-        if let Ok(cfg) = fs::read_to_string(grub_cfg_path) {
-            if !cfg.contains("set default=\"${saved_entry}\"") {
-                let patched =
-                    cfg.replace("\nblscfg\n", "\nset default=\"${saved_entry}\"\nblscfg\n");
-                if patched != cfg {
-                    fs::write(grub_cfg_path, &patched)
-                        .context("failed to write patched grub.cfg")?;
-                }
+        if let Ok(cfg) = fs::read_to_string(grub_cfg_path)
+            && !cfg.contains("set default=\"${saved_entry}\"")
+        {
+            let patched = cfg.replace("\nblscfg\n", "\nset default=\"${saved_entry}\"\nblscfg\n");
+            if patched != cfg {
+                fs::write(grub_cfg_path, &patched).context("failed to write patched grub.cfg")?;
             }
         }
     }

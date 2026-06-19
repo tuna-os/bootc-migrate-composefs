@@ -7,12 +7,11 @@ use std::process::Command;
 pub(crate) fn find_esp_device() -> Option<String> {
     // Try the by-partlabel symlink (works inside VMs without lsblk sudo).
     let by_label = Path::new("/dev/disk/by-partlabel/EFI-SYSTEM");
-    if by_label.exists() {
-        if let Ok(target) = fs::read_link(by_label) {
-            if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
-                return Some(format!("/dev/{}", name));
-            }
-        }
+    if by_label.exists()
+        && let Ok(target) = fs::read_link(by_label)
+        && let Some(name) = target.file_name().and_then(|n| n.to_str())
+    {
+        return Some(format!("/dev/{}", name));
     }
     // Fallback: scan lsblk by partition type GUID
     // (C12A7328-F81F-11D2-BA4B-00A0C93EC93B).
@@ -35,10 +34,10 @@ pub(crate) fn find_esp_device() -> Option<String> {
 /// Main migration entry point. Orchestrates all 5 phases.
 pub(crate) fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
     // If already detected and mounted, use it.
-    if let Some(ref path) = report.esp_path {
-        if Path::new(path).exists() {
-            return Ok(path.clone());
-        }
+    if let Some(ref path) = report.esp_path
+        && Path::new(path).exists()
+    {
+        return Ok(path.clone());
     }
 
     // Try common mount points first.

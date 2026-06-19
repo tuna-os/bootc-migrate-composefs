@@ -70,12 +70,12 @@ fn try_extract_from_podman(image_ref: &str, files: &[(&Path, &Path)]) -> bool {
             .status();
         match cp {
             Ok(s) if s.success() => {
-                if let Ok(meta) = fs::metadata(&tmp_dst) {
-                    if meta.len() > 0 {
-                        // Plain copy to final destination (tolerates vfat).
-                        if fs::copy(&tmp_dst, dst).is_ok() {
-                            continue;
-                        }
+                if let Ok(meta) = fs::metadata(&tmp_dst)
+                    && meta.len() > 0
+                {
+                    // Plain copy to final destination (tolerates vfat).
+                    if fs::copy(&tmp_dst, dst).is_ok() {
+                        continue;
                     }
                 }
             }
@@ -155,7 +155,7 @@ pub(crate) fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path
 
     let total_layers = layers.len();
     let mut layer_idx = 0usize;
-    let mut remaining: Vec<(&Path, &Path)> = files.iter().copied().collect();
+    let mut remaining: Vec<(&Path, &Path)> = files.to_vec();
     for layer in layers.iter().rev() {
         layer_idx += 1;
         if remaining.is_empty() {
@@ -542,8 +542,8 @@ fn probe_v2(base_url: &str, repo: &str) -> Result<Option<String>> {
 /// pull access to `repo`.
 fn fetch_bearer_token(challenge: &str, repo: &str) -> Result<String> {
     let bearer_part = challenge
-        .splitn(2, ':')
-        .nth(1)
+        .split_once(':')
+        .map(|x| x.1)
         .map(|s| s.trim())
         .unwrap_or("");
     let bearer_part = bearer_part
@@ -663,10 +663,10 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
         if status.success() {
             // tar emitted to stdout — verify we got actual bytes (some tar versions
             // exit 0 even when the path isn't in the archive, just producing empty).
-            if let Ok(meta) = fs::metadata(dst) {
-                if meta.len() > 0 {
-                    return Ok(true);
-                }
+            if let Ok(meta) = fs::metadata(dst)
+                && meta.len() > 0
+            {
+                return Ok(true);
             }
         }
         // Clean the empty destination so the next attempt starts fresh.

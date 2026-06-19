@@ -515,44 +515,9 @@ SERVICEEOF
 sudo ln -sf ../e2e-sshd.socket \
     "$ETC_SYSTEMD/sockets.target.wants/e2e-sshd.socket"
 
-# Create test fixtures in /var to verify state preservation
-step "=== Writing migration test fixtures ==="
-VAR_DIR="$MNT_DIR/ostree/deploy/default/var"
-
-# Basic persistence marker
-sudo mkdir -p "$VAR_DIR/lib/migration-test"
-echo "persistent-test-data-value" | sudo tee "$VAR_DIR/lib/migration-test/data" >/dev/null
-echo "timestamp-$(date +%s)" | sudo tee "$VAR_DIR/lib/migration-test/created-at" >/dev/null
-
-# User home directories
-sudo mkdir -p "$VAR_DIR/home/testuser/.config"
-echo "hello-user-data-value" | sudo tee "$VAR_DIR/home/testuser/user-data.txt" >/dev/null
-echo "dotfile-content" | sudo tee "$VAR_DIR/home/testuser/.config/settings.conf" >/dev/null
-sudo chmod -R 755 "$VAR_DIR/home/testuser"
-
-# Second user with nested structure
-sudo mkdir -p "$VAR_DIR/home/devuser/projects/myapp/src"
-echo "package main" | sudo tee "$VAR_DIR/home/devuser/projects/myapp/src/main.go" >/dev/null
-echo "README for myapp" | sudo tee "$VAR_DIR/home/devuser/projects/myapp/README.md" >/dev/null
-sudo mkdir -p "$VAR_DIR/home/devuser/.ssh"
-echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..." | sudo tee "$VAR_DIR/home/devuser/.ssh/id_ed25519.pub" >/dev/null
-sudo chmod 700 "$VAR_DIR/home/devuser/.ssh"
-sudo chmod -R 755 "$VAR_DIR/home/devuser"
-
-# System service state
-sudo mkdir -p "$VAR_DIR/lib/systemd/timers"
-echo "stamp" | sudo tee "$VAR_DIR/lib/systemd/timers/test-timer" >/dev/null
-
-# Symlinks within /var
-sudo mkdir -p "$VAR_DIR/lib/alternatives"
-echo "selected-option" | sudo tee "$VAR_DIR/lib/alternatives/current" >/dev/null
-sudo ln -sf current "$VAR_DIR/lib/alternatives/default" 2>/dev/null || true
-
-# Hidden directory
-sudo mkdir -p "$VAR_DIR/cache/.hidden-dir"
-echo "hidden-file-content" | sudo tee "$VAR_DIR/cache/.hidden-dir/secret" >/dev/null
-
-echo "Test fixtures written."
+# /var state-preservation fixtures are created live over SSH on the booted
+# source system (see the ETCFIX block below), not pre-staged here: bootc/ostree
+# first-boot /var setup does not preserve arbitrary pre-staged /var content.
 fi
 
 MNT_DIR="${MNT_DIR:-/tmp/mnt-e2e-disk}"
@@ -741,18 +706,43 @@ if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     exit 1
 fi
 
-# 8. Verify target image is pullable (fast-fail before VM starts)
+# 8. Ensure the target image is in the local registry (the VM pulls from it).
+# Self-seeding so the test is self-contained locally and in CI: start the
+# registry if it's down, and mirror the target image into it if missing. The
+# VM reaches the host registry at 10.0.2.2:5000 (QEMU user-net gateway).
 step "=== Verifying target image ==="
-if ! curl -sf http://127.0.0.1:5000/v2/dakota/tags/list 2>/dev/null | grep -q stable; then
-    echo "ERROR: dakota image not in local registry. Run: sudo podman tag ghcr.io/projectbluefin/dakota:stable 127.0.0.1:5000/dakota:stable && sudo podman push --tls-verify=false 127.0.0.1:5000/dakota:stable"
-    exit 1
-fi
-# Use local registry (host at 10.0.2.2 from QEMU) for fast VM pulls. Derive the
-# repo:tag from TARGET_IMAGE so CI matrices that test other base/target pairs
-# don't have to patch the script — the local registry already mirrors it by the
-# same path the CI Mirror-images step pushed.
-TARGET_REPO_TAG=$(basename "$TARGET_IMAGE")
+LOCAL_REG="127.0.0.1:5000"
+# Derive the repo:tag from TARGET_IMAGE so CI matrices that test other
+# base/target pairs don't have to patch the script — the local registry mirrors
+# it by the same path.
+TARGET_REPO_TAG=$(basename "$TARGET_IMAGE")   # e.g. dakota:stable
+TARGET_REPO=${TARGET_REPO_TAG%%:*}            # dakota
+TARGET_TAG=${TARGET_REPO_TAG##*:}             # stable
 VM_TARGET_IMAGE="10.0.2.2:5000/${TARGET_REPO_TAG}"
+
+if ! curl -sf "http://${LOCAL_REG}/v2/" >/dev/null 2>&1; then
+    step "Local registry not reachable — starting e2e-registry..."
+    if sudo podman ps -a --format '{{.Names}}' | grep -qx e2e-registry; then
+        sudo podman start e2e-registry
+    else
+        sudo podman run -d --name e2e-registry --network=host \
+            docker.io/library/registry:2
+    fi
+    for _ in $(seq 1 30); do
+        curl -sf "http://${LOCAL_REG}/v2/" >/dev/null 2>&1 && break
+        sleep 1
+    done
+    curl -sf "http://${LOCAL_REG}/v2/" >/dev/null 2>&1 \
+        || { echo "ERROR: local registry failed to start"; exit 1; }
+fi
+
+if ! curl -sf "http://${LOCAL_REG}/v2/${TARGET_REPO}/tags/list" 2>/dev/null \
+        | grep -q "\"${TARGET_TAG}\""; then
+    step "Mirroring ${TARGET_IMAGE} into ${LOCAL_REG}/${TARGET_REPO_TAG}..."
+    sudo podman image exists "$TARGET_IMAGE" || sudo podman pull "$TARGET_IMAGE"
+    sudo podman tag "$TARGET_IMAGE" "${LOCAL_REG}/${TARGET_REPO_TAG}"
+    sudo podman push --tls-verify=false "${LOCAL_REG}/${TARGET_REPO_TAG}"
+fi
 
 step "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/bootc-migrate-composefs root@localhost:/var/tmp/bootc-migrate-composefs
@@ -826,6 +816,36 @@ echo "flatpak-user-stub-org.gnome.Calculator" > /var/home/realuser/.local/share/
 mkdir -p /var/lib/flatpak/app/com.example.SystemApp/current/active
 echo "flatpak-system-stub-com.example.SystemApp" > /var/lib/flatpak/app/com.example.SystemApp/current/active/metadata
 chown -R realuser:realuser /var/home/realuser 2>/dev/null || true
+
+# Basic /var state-preservation fixtures. These MUST be created live on the
+# running system (not pre-staged to the disk before first boot): bootc/ostree
+# first-boot /var setup does not preserve arbitrary pre-staged /var content, so
+# pre-staging gives a false negative. The migration captures live /var data.
+mkdir -p /var/lib/migration-test
+echo "persistent-test-data-value" > /var/lib/migration-test/data
+echo "timestamp-$(date +%s)" > /var/lib/migration-test/created-at
+
+mkdir -p /var/home/testuser/.config
+echo "hello-user-data-value" > /var/home/testuser/user-data.txt
+echo "dotfile-content" > /var/home/testuser/.config/settings.conf
+chmod -R 755 /var/home/testuser
+
+mkdir -p /var/home/devuser/projects/myapp/src /var/home/devuser/.ssh
+echo "package main" > /var/home/devuser/projects/myapp/src/main.go
+echo "README for myapp" > /var/home/devuser/projects/myapp/README.md
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..." > /var/home/devuser/.ssh/id_ed25519.pub
+chmod -R 755 /var/home/devuser
+chmod 700 /var/home/devuser/.ssh
+
+mkdir -p /var/lib/systemd/timers
+echo "stamp" > /var/lib/systemd/timers/test-timer
+
+mkdir -p /var/lib/alternatives
+echo "selected-option" > /var/lib/alternatives/current
+ln -sf current /var/lib/alternatives/default 2>/dev/null || true
+
+mkdir -p /var/cache/.hidden-dir
+echo "hidden-file-content" > /var/cache/.hidden-dir/secret
 ETCFIX
 
 step "=== Running migration inside VM ==="

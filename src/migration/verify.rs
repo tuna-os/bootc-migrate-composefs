@@ -74,17 +74,16 @@ pub(crate) fn verify_migration(verity: &VerityDigest, _report: &PreflightReport)
             } else {
                 // Not mounted — mount it temporarily.
                 let tmp = TempDir::new_in("/tmp").ok();
-                if let Some(ref t) = tmp {
-                    if Command::new("mount")
+                if let Some(ref t) = tmp
+                    && Command::new("mount")
                         .args(["-o", "ro", &esp_dev, t.path().to_str().unwrap_or("")])
                         .status()
                         .map(|s| s.success())
                         .unwrap_or(false)
-                    {
-                        let p = t.path().join("EFI/Linux").join(&boot_name).join("vmlinuz");
-                        if p.exists() {
-                            vmlinuz_candidate = Some(p);
-                        }
+                {
+                    let p = t.path().join("EFI/Linux").join(&boot_name).join("vmlinuz");
+                    if p.exists() {
+                        vmlinuz_candidate = Some(p);
                     }
                 }
                 tmp
