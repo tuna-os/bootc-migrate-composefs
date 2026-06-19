@@ -258,6 +258,13 @@ pub(crate) fn extract_subtree_via_registry(
     subtree: &str,
     dst_dir: &Path,
 ) -> Result<()> {
+    // Try podman cache first. bootc images don't have /etc in OCI layer tars
+    // (it's handled by ostree), but `podman cp` from the local merged rootfs
+    // has it. Also much faster than downloading 120 layers from ghcr.io.
+    if let Ok(true) = try_extract_subtree_from_podman(image_ref, subtree, dst_dir) {
+        return Ok(());
+    }
+
     let endpoint = RegistryEndpoint::resolve(image_ref)?;
     let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
     let layers_manifest = if endpoint.is_manifest_index(&manifest_json) {
@@ -460,6 +467,53 @@ pub(crate) fn extract_kernel_modules_via_registry(
         ));
     }
     Ok((scratch, mods))
+}
+
+/// Try extracting a subtree (e.g. /etc) from the local podman cache.
+/// Returns Ok(true) on success, Ok(false) if image not in podman storage.
+fn try_extract_subtree_from_podman(image_ref: &str, subtree: &str, dst_dir: &Path) -> Result<bool> {
+    let has = Command::new("podman")
+        .args(["image", "exists", image_ref])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !has {
+        return Ok(false);
+    }
+
+    let create = Command::new("podman")
+        .args(["create", "--name", "migrate-subtree-extract", image_ref])
+        .output()
+        .map_err(|e| anyhow!("podman create failed: {e}"))?;
+    if !create.status.success() {
+        return Ok(false);
+    }
+    let container_id = String::from_utf8_lossy(&create.stdout).trim().to_string();
+
+    println!("[extract] podman cp {}:{subtree} -> {dst_dir:?}", image_ref);
+    let cp = Command::new("podman")
+        .args([
+            "cp",
+            &format!("{container_id}:{subtree}"),
+            dst_dir.to_str().unwrap_or("/dev/null"),
+        ])
+        .status()
+        .map_err(|e| {
+            let _ = Command::new("podman")
+                .args(["rm", "-f", "migrate-subtree-extract"])
+                .status();
+            anyhow!("podman cp failed: {e}")
+        })?;
+
+    let _ = Command::new("podman")
+        .args(["rm", "-f", "migrate-subtree-extract"])
+        .status();
+
+    if !cp.success() {
+        return Ok(false);
+    }
+    println!("[extract] subtree {subtree} from local podman cache");
+    Ok(true)
 }
 
 /// Try extracting the kernel module subtree from the local podman cache.
