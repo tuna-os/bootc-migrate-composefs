@@ -16,6 +16,9 @@ BASE_IMAGE="${BASE_IMAGE:-ghcr.io/projectbluefin/bluefin:stable}"
 TARGET_IMAGE="${TARGET_IMAGE:-ghcr.io/projectbluefin/dakota:stable}"
 DISK_SIZE="${DISK_SIZE:-20G}"
 SSH_PORT="${SSH_PORT:-2222}"
+# Derived from TARGET_IMAGE: extracts the repo:tag part (e.g. "dakota:stable"
+# from "ghcr.io/projectbluefin/dakota:stable"). Used by the subscription check.
+TARGET_REPO_TAG="${TARGET_REPO_TAG:-$(echo "$TARGET_IMAGE" | sed 's|.*/||')}"
 FILESYSTEM="${FILESYSTEM:-btrfs}"
 # Test variant: "migrate" (default — migrate, commit, rollback round-trip) or
 # "undo" (migrate, then verify `undo` cleans up and falls back to OSTree).
