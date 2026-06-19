@@ -503,6 +503,33 @@ fn run_commit(dry_run: bool) -> Result<()> {
         is_systemd_boot = true;
     }
 
+    // Fallback: the ESP may be unmounted or at a non-standard path
+    // (e.g. after LUKS migration where Phase 5 auto-mounted it at
+    // /var/tmp/esp-migration and the boot-time fstab doesn't know about
+    // it). Try auto-mounting the ESP by partition type GUID.
+    if composefs_entries.is_empty()
+        && let Ok(esp_path) = crate::migration::find_esp_or_mount()
+    {
+        let esp_entries = Path::new(&esp_path).join("loader/entries");
+        if esp_entries.exists() {
+            for entry in std::fs::read_dir(&esp_entries)? {
+                let entry = entry?;
+                let name_str = entry.file_name().to_string_lossy().into_owned();
+                if name_str.starts_with("bootc_") {
+                    composefs_entries.push(name_str);
+                }
+            }
+            if !composefs_entries.is_empty() {
+                entries_dir = esp_entries;
+                is_systemd_boot = true;
+                println!(
+                    "Found composefs BLS entries on auto-mounted ESP at {}",
+                    esp_path
+                );
+            }
+        }
+    }
+
     if composefs_entries.is_empty() {
         if is_systemd_boot {
             println!("No composefs BLS entries found on ESP. Nothing to commit.");
