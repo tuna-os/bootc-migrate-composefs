@@ -607,7 +607,7 @@ fallback path.
 ## 11. Composefs Boot Blocker: The Missing Dracut Module
 
 ### Symptoms
-- Migration completes all 5 phases ✅
+- Migration completes all 6 phases (0–5) ✅
 - Host-side `.raw` scan shows valid vmlinuz (19.6 MB, MZ magic), initrd
   (220 MB), systemd-boot.efi, .origin file, BLS entries ✅
 - Direct `-kernel` QEMU boot with `composefs=<digest>` on cmdline:

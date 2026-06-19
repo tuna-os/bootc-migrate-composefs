@@ -16,41 +16,60 @@ flatpaks, container storage, or user accounts.
 
 ```mermaid
 flowchart TB
-    subgraph SRC["Source: OSTree-backed Bluefin"]
-        S_USR["/ — OSTree hardlink farm<br/>/usr/etc<br/>/ostree/repo (object store)"]
-        S_ETC["/etc<br/>(live, 3-way merge source)"]
-        S_VAR["/ostree/deploy/&lt;n&gt;/var<br/>(user state)"]
-        S_BOOT["/boot/loader/entries<br/>(GRUB BLS, ostree-*)"]
+    %% ── Source: what we migrate from ────────────────────────────
+    subgraph SRC["Source &middot; OSTree-backed Bluefin"]
+        direction TB
+        S_USR["<b>/</b> &mdash; OSTree hardlink farm<br/>/usr/etc &middot; /ostree/repo object store"]
+        S_ETC["<b>/etc</b><br/>live, 3-way-merge source"]
+        S_VAR["<b>/ostree/deploy/&lt;n&gt;/var</b><br/>user state"]
+        S_BOOT["<b>/boot/loader/entries</b><br/>GRUB BLS &middot; ostree-*"]
     end
 
-    subgraph BIN["bootc-migrate-composefs (5 phases)"]
-        P0["Phase 0: Preflight<br/>ESP size, NVRAM, reflink"]
-        P1["Phase 1: OSTree import (opt)<br/>reflink objects into composefs store"]
-        P2["Phase 2: OCI pull<br/>target image → composefs store"]
-        P3["Phase 3: EROFS seal<br/>build, seal, capture sealed config digest"]
-        P4["Phase 4: Stage deploy<br/>3-way /etc merge (via sealed mount)<br/>+ dangling-symlink prune<br/>+ identity-DB line-union<br/>+ /var copy<br/>+ .origin (tini)"]
-        P5["Phase 5: Bootloader<br/>copy sd-boot from sealed mount<br/>BLS entries on ESP<br/>register NVRAM"]
+    %% ── The migration tool: six phases, one command ─────────────
+    subgraph BIN["bootc-migrate-composefs &middot; 6 phases (0&ndash;5)"]
+        direction TB
+        P0["<b>Phase 0 &middot; Preflight</b><br/>ESP size &middot; NVRAM &middot; reflink"]
+        P1["<b>Phase 1 &middot; OSTree import</b> (optional)<br/>reflink objects &rarr; composefs store"]
+        P2["<b>Phase 2 &middot; OCI pull</b><br/>target image &rarr; composefs store"]
+        P3["<b>Phase 3 &middot; EROFS seal</b><br/>build &middot; seal &middot; capture config digest"]
+        P4["<b>Phase 4 &middot; Stage deploy</b><br/>3-way /etc merge (sealed mount)<br/>symlink prune &middot; identity-DB union<br/>/var copy &middot; .origin (tini)"]
+        P5["<b>Phase 5 &middot; Bootloader</b><br/>sd-boot from sealed mount<br/>BLS entries on ESP &middot; NVRAM"]
         P0 --> P1 --> P2 --> P3 --> P4 --> P5
     end
 
-    subgraph DST["Target: ComposeFS-backed Dakota"]
-        D_CFS["/composefs/<br/>images/ (EROFS)<br/>objects/ (content)<br/>streams/"]
-        D_STATE["/state/deploy/&lt;verity&gt;/<br/>etc/  +  &lt;verity&gt;.origin"]
-        D_VAR["/state/os/default/var<br/>(bind-mounted as /var by initramfs)"]
-        D_BOOT["/EFI/Linux/bootc_composefs-&lt;verity&gt;/<br/>vmlinuz  initrd<br/>+ /loader/entries/*.conf<br/>+ /EFI/systemd/systemd-bootx64.efi"]
+    %% ── Target: what we migrate to ──────────────────────────────
+    subgraph DST["Target &middot; ComposeFS-backed Dakota"]
+        direction TB
+        D_CFS["<b>/composefs/</b><br/>images/ (EROFS) &middot; objects/ &middot; streams/"]
+        D_STATE["<b>/state/deploy/&lt;verity&gt;/</b><br/>etc/ &middot; &lt;verity&gt;.origin"]
+        D_VAR["<b>/state/os/default/var</b><br/>bind-mounted as /var by initramfs"]
+        D_BOOT["<b>/EFI/Linux/bootc_composefs-&lt;verity&gt;/</b><br/>vmlinuz &middot; initrd<br/>/loader/entries/*.conf &middot; systemd-bootx64.efi"]
     end
 
+    %% ── Data flows across the lanes ─────────────────────────────
     S_USR -- "ostree object reflinks" --> P1
     P2 --> D_CFS
-    S_ETC -- "current/old/new merge (from mount)" --> P4
+    S_ETC -- "current / old / new merge" --> P4
     P4 --> D_STATE
-    S_VAR -- "verbatim copy<br/>(preserves containers, flatpaks, machine-id)" --> D_VAR
+    S_VAR -- "verbatim copy<br/>(containers &middot; flatpaks &middot; machine-id)" --> D_VAR
     P3 -- "sealed config digest<br/>(not rootfs verity)" --> P4
     P3 --> P5
     P5 -- "copy from sealed mount" --> D_BOOT
-    P5 -. "efibootmgr<br/>Linux Boot Manager" .-> NVRAM["UEFI NVRAM"]
+    P5 -. "efibootmgr &middot; Linux Boot Manager" .-> NVRAM(["UEFI NVRAM"])
 
-    DST -. "reboot: systemd-boot → kernel<br/>cmdline composefs=&lt;verity&gt;" .-> RUN["Booted Dakota<br/>/ = composefs overlay (RO)<br/>/etc = writable from state/<br/>/var = writable from state/os/default/var"]
+    RUN["<b>Booted Dakota</b><br/>/ = composefs overlay (RO)<br/>/etc writable &larr; state/<br/>/var writable &larr; state/os/default/var"]
+    DST -. "reboot &rarr; systemd-boot &rarr; kernel<br/>cmdline composefs=&lt;verity&gt;" .-> RUN
+
+    %% ── Lane colours ────────────────────────────────────────────
+    classDef src fill:#e3f0ff,stroke:#3b82c4,color:#0b2545;
+    classDef bin fill:#fff4e0,stroke:#d9920b,color:#5a3a00;
+    classDef dst fill:#e4f7e7,stroke:#3ca34a,color:#06311a;
+    classDef run fill:#f3e8ff,stroke:#8b5cf6,color:#2e1065;
+
+    class S_USR,S_ETC,S_VAR,S_BOOT src;
+    class P0,P1,P2,P3,P4,P5 bin;
+    class D_CFS,D_STATE,D_VAR,D_BOOT dst;
+    class RUN,NVRAM run;
 ```
 
 **Key insight:** Phase 3 runs `bootc internals cfs oci seal` which prints the
@@ -61,21 +80,25 @@ modules, eliminating the need to re-stream OCI layers at runtime.
 
 ## What it does
 
-Five phases, run as one command:
+Six phases (numbered 0–5 to match the console output), run as one command:
 
-1. **Preflight** — free-space, reflink/CoW, UEFI, NVRAM-writable, ESP capacity.
-2. **OSTree import** *(optional)* — reflinks existing OSTree file objects into
-   the composefs object store so the pull in phase 2 is mostly dedup.
-3. **OCI pull** — `bootc internals cfs oci pull` of the target bootc image.
-4. **EROFS image** — builds, seals, and captures the sealed config digest.
-5. **Stage deploy** — 3-way `/etc` merge (read from sealed mount, no registry
-   streaming), identity-DB line-union, dangling `/usr/*` symlink pruning,
-   `/var` data copy into `state/os/default/var`, `.origin` (boot_digest,
-   manifest_digest) written via tini.
-6. **Bootloader** — copies `systemd-bootx64.efi` from the sealed mount to the
-   ESP (no registry streaming), writes BLS entries, registers
-   `Linux Boot Manager` in UEFI NVRAM. The original GRUB entry is left as a
-   rollback escape hatch.
+- **Phase 0 — Preflight** — free-space, reflink/CoW, UEFI, NVRAM-writable, ESP
+  capacity.
+- **Phase 1 — OSTree import** *(optional)* — reflinks existing OSTree file
+  objects into the composefs object store so the pull in Phase 2 is mostly
+  dedup. Skipped with `--skip-import`.
+- **Phase 2 — OCI pull** — `bootc internals cfs oci pull` of the target bootc
+  image into the composefs store.
+- **Phase 3 — EROFS seal** — builds and seals the EROFS image, capturing the
+  sealed config digest that Phases 4 and 5 mount.
+- **Phase 4 — Stage deploy** — 3-way `/etc` merge (read from the sealed mount,
+  no registry streaming), identity-DB line-union, dangling `/usr/*` symlink
+  pruning, `/var` data copy into `state/os/default/var`, and `.origin`
+  (boot_digest, manifest_digest) written via tini.
+- **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed mount
+  to the ESP (no registry streaming), writes BLS entries, and registers
+  `Linux Boot Manager` in UEFI NVRAM. The original GRUB entry is left as a
+  rollback escape hatch.
 
 After a successful reboot into the composefs entry, `bootc-migrate-composefs
 commit` removes the OSTree fallback and makes composefs permanent.
@@ -125,8 +148,8 @@ sudo bootc-migrate-composefs \
   --target-image ghcr.io/projectbluefin/dakota:stable
 ```
 
-Expect ~5–10 minutes on warm caches, ~15–25 minutes on a cold pull. Five
-phase headers print as it goes:
+Expect ~5–10 minutes on warm caches, ~15–25 minutes on a cold pull. Six
+phase headers (0–5) print as it goes:
 
 | Phase | What's happening | Why it might take a while |
 |---|---|---|
