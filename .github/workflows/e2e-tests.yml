@@ -35,6 +35,7 @@ jobs:
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
             filesystem: xfs+crypt
+            disk_size: 40G
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
@@ -110,6 +111,7 @@ jobs:
           echo "BASE_IMAGE=${{ matrix.scenario.base }}" >> "$GITHUB_ENV"
           echo "TARGET_IMAGE=${{ matrix.scenario.target }}" >> "$GITHUB_ENV"
           echo "FILESYSTEM=${{ matrix.scenario.filesystem || 'btrfs' }}" >> "$GITHUB_ENV"
+          echo "DISK_SIZE=${{ matrix.scenario.disk_size || '20G' }}" >> "$GITHUB_ENV"
 
       - name: Disk space before E2E
         run: df -h /
