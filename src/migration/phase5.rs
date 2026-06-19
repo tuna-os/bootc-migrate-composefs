@@ -753,26 +753,11 @@ fn rebuild_initrd_with_lvm_if_needed(
         );
         return Ok(None);
     }
-    let kmod_dir = TempDir::new_in("/var/tmp").context("failed to create kmod extract dir")?;
-    let subtree = format!("usr/lib/modules/{}", kver);
-    println!(
-        "[phase5] extracting kernel modules via registry stream (subtree: {})...",
-        subtree
-    );
-    // Extract subtree to kmod_dir root. The subtree is
-    // "usr/lib/modules/<kver>" and tar strips the leading component
-    // (usr/), so files land at kmod_dir/lib/modules/<kver>/kernel/...
-    let kmod_dest = kmod_dir.path().to_path_buf();
-    fs::create_dir_all(&kmod_dest)?;
-    extract_subtree_via_registry(target_image, &subtree, &kmod_dest)
-        .context("failed to extract kernel modules via registry")?;
-    let kmoddir_arg = kmod_dest.join("lib/modules").join(kver);
-    if !kmoddir_arg.join("kernel").exists() {
-        anyhow::bail!(
-            "registry stream did not produce kernel modules at {}",
-            kmoddir_arg.display()
-        );
-    }
+    let (kmod_dir, kmod_src) = extract_kernel_modules_via_registry(target_image, kver)
+        .context("failed to extract target kernel modules via registry")?;
+    // kmod_src points to <scratch>/usr/lib/modules/<kver> with real .ko
+    // files and a valid modules.dep.bin.
+    let kmoddir_arg = kmod_src;
     println!(
         "[phase5] kernel modules available at {}",
         kmoddir_arg.display()

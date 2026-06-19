@@ -2,7 +2,7 @@ use crate::VerityDigest;
 use crate::migration::phase4::patch_boot_digest_in_content;
 use anyhow::{Context, Result, anyhow};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -376,6 +376,85 @@ pub(crate) fn extract_subtree_via_registry(
     Ok(())
 }
 
+/// Extract the target image's kernel modules for `kver` from the registry
+/// into a fresh /var/tmp directory, returning the tempdir guard plus the
+/// path to the extracted `usr/lib/modules/<kver>` tree.
+///
+/// Works around the composefs cfs mount fallback (raw EROFS where large
+/// files read as zeros) by sourcing modules from registry layers (real
+/// bytes). Iterates newest → first with --skip-old-files overlay semantics;
+/// stops once the filesystem drivers the composefs+LUKS+XFS initrd needs
+/// (xfs, erofs, overlay — shipped together in the kernel-modules layer)
+/// are present.
+pub(crate) fn extract_kernel_modules_via_registry(
+    image_ref: &str,
+    kver: &str,
+) -> Result<(TempDir, PathBuf)> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    let layers_manifest = endpoint.arch_layers_manifest(manifest_json)?;
+    let layers = layers_manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-kmods-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for kernel module streaming")?;
+    let blob_path = scratch.path().join("layer.blob");
+    let want = format!("usr/lib/modules/{kver}");
+    let mods = scratch.path().join(&want);
+    let needed_kos = [
+        mods.join("kernel/fs/xfs/xfs.ko"),
+        mods.join("kernel/fs/erofs/erofs.ko"),
+        mods.join("kernel/fs/overlayfs/overlay.ko"),
+    ];
+
+    for layer in layers.iter().rev() {
+        let digest = layer
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("layer entry has no digest"))?;
+        endpoint
+            .download_blob(digest, &blob_path)
+            .with_context(|| format!("failed to fetch layer {}", digest))?;
+        for candidate in [format!("./{want}"), want.clone()] {
+            let _ = Command::new("tar")
+                .arg("-xaf")
+                .arg(&blob_path)
+                .arg("-C")
+                .arg(scratch.path())
+                .args(["--skip-old-files", "--no-same-owner"])
+                .arg(&candidate)
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = fs::remove_file(&blob_path);
+        if needed_kos.iter().all(|p| p.exists()) {
+            break;
+        }
+    }
+
+    let missing: Vec<String> = needed_kos
+        .iter()
+        .filter(|p| !p.exists())
+        .map(|p| p.display().to_string())
+        .collect();
+    if !mods.join("modules.dep.bin").exists() || !missing.is_empty() {
+        return Err(anyhow!(
+            "incomplete kernel modules for {kver} from {image_ref} via registry \
+             (missing: {})",
+            if missing.is_empty() {
+                "modules.dep.bin".to_string()
+            } else {
+                missing.join(", ")
+            }
+        ));
+    }
+    Ok((scratch, mods))
+}
+
 /// Resolved registry endpoint: base URL (scheme + host), repository, reference, and
 /// optional Bearer token. Built once per image and reused for the manifest + every
 /// blob fetch.
@@ -450,6 +529,37 @@ impl RegistryEndpoint {
             Some(mt) => mt.contains("manifest.list") || mt.contains("image.index"),
             None => m.get("manifests").is_some(),
         }
+    }
+
+    /// Resolve a (possibly multi-arch) manifest to the concrete image manifest
+    /// for the current architecture.
+    fn arch_layers_manifest(&self, manifest_json: serde_json::Value) -> Result<serde_json::Value> {
+        if !self.is_manifest_index(&manifest_json) {
+            return Ok(manifest_json);
+        }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let entries = manifest_json
+            .get("manifests")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("manifest index has no manifests array"))?;
+        let pick = entries
+            .iter()
+            .find(|m| {
+                m.get("platform")
+                    .and_then(|p| p.get("architecture"))
+                    .and_then(|a| a.as_str())
+                    == Some(arch)
+            })
+            .ok_or_else(|| anyhow!("manifest index has no entry for arch {}", arch))?;
+        let digest = pick
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("manifest index entry has no digest"))?;
+        self.fetch_manifest(digest)
     }
 
     fn download_blob(&self, digest: &str, dst: &Path) -> Result<()> {
