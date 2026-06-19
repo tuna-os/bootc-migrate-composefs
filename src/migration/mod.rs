@@ -113,6 +113,11 @@ pub fn check_free_space(reflink_available: bool) -> Result<()> {
 /// XFS does not support fs-verity (required by cfs pull). When the /sysroot
 /// filesystem lacks verity, create a loopback ext4 image, mount it at
 /// /sysroot/composefs, and migrate the composefs store onto it.
+/// composefs repository metadata (`meta.json`) as written by `cfsctl init`:
+/// format version 1 with sha512 fs-verity digests. Required by `bootc status`
+/// and cfsctl; our hand-built XFS-loopback repo must carry it.
+const COMPOSEFS_REPO_META_JSON: &str = "{\n  \"version\": 1,\n  \"algorithm\": \"fsverity-sha512-12\",\n  \"features\": {\n    \"compatible\": [],\n    \"read-only-compatible\": [],\n    \"incompatible\": []\n  }\n}\n";
+
 fn setup_composefs_loopback_if_needed(report: &PreflightReport) -> Result<Option<MountGuard>> {
     let fs_type = report.fs_type.as_deref().unwrap_or("unknown");
     // btrfs and ext4 support fs-verity. xfs does not (as of kernel 6.12).
@@ -173,6 +178,16 @@ fn setup_composefs_loopback_if_needed(report: &PreflightReport) -> Result<Option
             return Err(anyhow!("mount failed for composefs loopback"));
         }
 
+        // Initialize the composefs repository metadata. Migration populates
+        // objects/images/streams by hand; without meta.json `bootc status` and
+        // cfsctl reject the repo ("must be initialized with `cfsctl init`").
+        // Matches what `cfsctl init` writes (format v1, sha512 fs-verity).
+        fs::write(
+            Path::new(target).join("meta.json"),
+            COMPOSEFS_REPO_META_JSON,
+        )
+        .context("failed to write composefs repo meta.json")?;
+
         println!("ComposeFS loopback mounted at {target} ({size_gb} GB ext4, fs-verity enabled).");
         Ok(Some(MountGuard::new(Path::new(target))))
     } else {
@@ -196,9 +211,54 @@ fn detect_lvm() -> bool {
 /// Non-fatal: warns if dracut is absent or fails so migration still completes.
 /// The user can rerun dracut manually from the OSTree fallback if the system
 /// fails to boot (see the warning message for the exact command).
+/// Build a scratch tree (for `dracut --include`) carrying the systemd units that
+/// loop-mount the composefs ext4 store at /sysroot/composefs inside the initrd,
+/// ordered after sysroot.mount and before bootc-root-setup.service. Returns the
+/// tempdir guard; its contents are copied into the initrd by dracut.
+fn prepare_composefs_loopback_include() -> Result<tempfile::TempDir> {
+    let tmp = tempfile::Builder::new()
+        .prefix("bootc-cfsloop-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create scratch dir for composefs loopback unit")?;
+    let unit_dir = tmp.path().join("etc/systemd/system");
+    fs::create_dir_all(&unit_dir)?;
+    fs::write(
+        unit_dir.join("sysroot-composefs.mount"),
+        "[Unit]\n\
+         Description=ComposeFS Loopback Mount\n\
+         After=sysroot.mount\n\
+         Before=initrd-root-fs.target bootc-root-setup.service\n\
+         DefaultDependencies=no\n\
+         \n\
+         [Mount]\n\
+         What=/sysroot/composefs-loopback.ext4\n\
+         Where=/sysroot/composefs\n\
+         Type=ext4\n\
+         Options=loop,ro\n\
+         \n\
+         [Install]\n\
+         WantedBy=initrd-root-fs.target\n",
+    )?;
+    // Enable the mount unit and make bootc-root-setup require + order after it.
+    let wants_dir = unit_dir.join("initrd-root-fs.target.wants");
+    fs::create_dir_all(&wants_dir)?;
+    std::os::unix::fs::symlink(
+        "../sysroot-composefs.mount",
+        wants_dir.join("sysroot-composefs.mount"),
+    )
+    .context("failed to enable sysroot-composefs.mount")?;
+    let dropin_dir = unit_dir.join("bootc-root-setup.service.d");
+    fs::create_dir_all(&dropin_dir)?;
+    fs::write(
+        dropin_dir.join("RequiresLoopback.conf"),
+        "[Unit]\nRequires=sysroot-composefs.mount\nAfter=sysroot-composefs.mount\n",
+    )?;
+    Ok(tmp)
+}
+
 fn rebuild_initrd_with_lvm_if_needed(
     kver: &str,
-    mount_path: &Path,
+    target_image: &str,
     initrd_dst: &Path,
 ) -> Result<()> {
     // LUKS roots appear as device-mapper nodes (detect_lvm), and XFS roots get
@@ -216,85 +276,142 @@ fn rebuild_initrd_with_lvm_if_needed(
     };
     println!("[phase5] Rebuilding composefs initrd with {label} support...");
 
+    // Source the target's kernel modules from the registry (real bytes); the
+    // Phase 5 composefs mount can degrade to raw EROFS where large files read as
+    // zeros. `_modules_tmp` holds the extracted tree alive until the rebuild ends.
+    let (_modules_tmp, modules_src) = extract_kernel_modules_via_registry(target_image, kver)
+        .context("failed to obtain target kernel modules for initrd rebuild")?;
+
+    // The target image ships no dracut binary — only its dracut *modules* — so we
+    // run the *source* system's dracut, which carries the same 50ostree/51bootc
+    // dracut modules. `--rebuild` then re-runs the target initrd's stored build
+    // configuration (preserving the composefs root assembly, crypt, and dm
+    // modules) and only ADDS the missing xfs driver (plus dm/crypt/lvm as
+    // belt-and-suspenders for the LUKS root).
+    //
+    // The catch: dracut resolves the kernel module index from the standard
+    // /lib/modules/<kver> path and ignores --kmoddir for it. On the source —
+    // whose running kernel differs from the target's <kver> — that path is empty,
+    // so every driver (erofs, overlay, dm, crypt, xfs) silently drops out and the
+    // initrd is unbootable. We fix that by making /lib/modules/<kver> resolve to
+    // the target's modules: a staging dir whose <kver> entry symlinks to the
+    // mounted target modules is bind-mounted over /usr/lib/modules (= /lib/
+    // modules) for the rebuild, then unmounted.
     let dracut_path = ["/usr/bin/dracut", "/usr/sbin/dracut", "dracut"]
         .iter()
         .find(|&&p| Path::new(p).exists())
         .copied()
-        .ok_or_else(|| anyhow!("dracut not found; cannot rebuild initrd for {label}"))?;
+        .ok_or_else(|| anyhow!("dracut not found on source; cannot rebuild initrd for {label}"))?;
 
-    let modules_src = mount_path.join("usr/lib/modules").join(kver);
-    if !modules_src.exists() {
-        return Err(anyhow!(
-            "Dakota kernel modules not found at {} — \
-             composefs overlay may not be mounted correctly",
-            modules_src.display()
-        ));
-    }
+    let modules_root = PathBuf::from("/usr/lib/modules");
+    let staging = PathBuf::from("/var/tmp").join(format!("bootc-kmod-root-{}", std::process::id()));
+    // staging/<kver> -> <mount>/usr/lib/modules/<kver>. The link target is an
+    // absolute path *outside* /usr/lib/modules, so it stays valid after we bind
+    // staging over /usr/lib/modules (no self-referential loop).
+    let staged_kver = staging.join(kver);
 
-    // Symlink Dakota's kernel modules into /var/tmp (always writable) so dracut
-    // can find them. /lib/modules is read-only on OSTree deployments because
-    // /lib → /usr/lib is part of the immutable OSTree image.
-    let modules_link = PathBuf::from("/var/tmp").join(format!("bootc-kmod-{}", kver));
-    if modules_link.exists() || modules_link.is_symlink() {
-        let _ = fs::remove_file(&modules_link);
-    }
-    let created_link = std::os::unix::fs::symlink(&modules_src, &modules_link)
-        .map(|_| true)
-        .unwrap_or_else(|e| {
-            eprintln!("[phase5] Warning: could not create module symlink: {e}");
-            false
-        });
+    // For XFS roots the composefs verity store lives in an ext4 loopback file on
+    // the XFS root. The initrd must loop-mount it at /sysroot/composefs after the
+    // root mounts but before bootc assembles composefs, otherwise bootc-root-setup
+    // fails with "Opening ref 'images/<hash>': No such file or directory". Inject
+    // a systemd mount unit (+ ordering drop-in) via dracut --include; the ext4 and
+    // loop drivers added below let the initrd actually mount it.
+    let loop_include = if needs_xfs {
+        Some(prepare_composefs_loopback_include()?)
+    } else {
+        None
+    };
 
-    // Use `--rebuild` so dracut re-runs the *original* Dakota initrd's stored
-    // build configuration (preserving the composefs root assembly, crypt, and
-    // dm modules it already ships) and only ADDS what's missing — the xfs driver
-    // for the XFS root, plus dm/crypt/lvm as belt-and-suspenders. A from-scratch
-    // rebuild would strip the composefs setup and the system would never boot.
-    let mut cmd = Command::new(dracut_path);
-    cmd.env("DRACUT_KMODDIR_OVERRIDE", "1")
-        .arg("--rebuild")
-        .arg(initrd_dst.to_str().unwrap_or("/dev/null"))
-        .arg("--kver")
-        .arg(kver)
-        .arg("--kmoddir")
-        .arg(modules_link.to_str().unwrap_or("/dev/null"))
-        .arg("--force");
-    if needs_dm {
-        cmd.arg("--add").arg("lvm dm crypt");
-    }
-    if needs_xfs {
-        cmd.arg("--add-drivers").arg("xfs");
-    }
-    let status = cmd.status();
+    let mut bound = false;
+    let run_rebuild = |bound: &mut bool| -> Result<std::process::ExitStatus> {
+        if staging.exists() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        fs::create_dir_all(&staging)
+            .with_context(|| format!("create kmod staging dir {}", staging.display()))?;
+        std::os::unix::fs::symlink(&modules_src, &staged_kver).with_context(|| {
+            format!(
+                "symlink {} -> {}",
+                staged_kver.display(),
+                modules_src.display()
+            )
+        })?;
 
-    // Always clean up the symlink, regardless of dracut outcome.
-    if created_link && let Err(e) = fs::remove_file(&modules_link) {
+        let st = Command::new("mount")
+            .arg("--bind")
+            .arg(&staging)
+            .arg(&modules_root)
+            .status()
+            .with_context(|| {
+                format!("bind {} over {}", staging.display(), modules_root.display())
+            })?;
+        if !st.success() {
+            return Err(anyhow!(
+                "failed to bind kmod staging over {}",
+                modules_root.display()
+            ));
+        }
+        *bound = true;
+
+        // /lib/modules/<kver> now resolves to the target modules (valid
+        // modules.dep.bin); `--rebuild` preserves composefs and adds xfs.
+        let mut cmd = Command::new(dracut_path);
+        cmd.arg("--rebuild")
+            .arg(initrd_dst)
+            .arg("--kver")
+            .arg(kver)
+            .arg("--force");
+        if needs_dm {
+            cmd.arg("--add").arg("lvm dm crypt");
+        }
+        if needs_xfs {
+            cmd.arg("--add-drivers").arg("xfs ext4 loop");
+            if let Some(ref inc) = loop_include {
+                cmd.arg("--include").arg(inc.path()).arg("/");
+            }
+        }
+        cmd.status().context("failed to run dracut --rebuild")
+    };
+
+    let result = run_rebuild(&mut bound);
+
+    // Restore the source's /usr/lib/modules and drop the staging dir, regardless
+    // of the dracut outcome.
+    if bound
+        && let Ok(s) = Command::new("umount")
+            .arg("--lazy")
+            .arg(&modules_root)
+            .status()
+        && !s.success()
+    {
         eprintln!(
-            "[phase5] Warning: failed to remove module symlink {}: {}",
-            modules_link.display(),
-            e
+            "[phase5] Warning: failed to unmount kmod staging from {}",
+            modules_root.display()
         );
     }
+    let _ = fs::remove_dir_all(&staging);
 
-    match status {
+    match result {
         Ok(s) if s.success() => {
             println!(
-                "[phase5] {label} initrd staged at {}.",
+                "[phase5] {label} initrd rebuilt and staged at {}.",
                 initrd_dst.display()
             );
             Ok(())
         }
         Ok(s) => {
             eprintln!(
-                "[phase5] Warning: dracut exited {:?} — initrd may lack {label} support; \
-                 boot the OSTree fallback and rerun dracut if the system won't boot.",
+                "[phase5] Warning: dracut exited {:?} — composefs initrd left unchanged; it \
+                 lacks {label} support and the composefs entry may not boot. Boot the OSTree \
+                 fallback and rerun the migration to recover.",
                 s.code()
             );
             Ok(())
         }
         Err(e) => {
             eprintln!(
-                "[phase5] Warning: dracut failed to run ({e}) — initrd may lack {label} support."
+                "[phase5] Warning: initrd rebuild failed ({e:#}) — composefs initrd left \
+                 unchanged; boot the OSTree fallback to recover."
             );
             Ok(())
         }
@@ -669,7 +786,50 @@ fn phase4_stage_deploy(
     // Handle /var migration
     phase4_var_migration(&etc_dir, dry_run)?;
 
+    // For XFS roots, the composefs repo lives in an ext4 loopback file; the
+    // booted system must mount it at /sysroot/composefs so `bootc status` and
+    // day-2 updates can read the repo (the initrd mount is torn down at
+    // switch-root). Install a runtime mount unit into the deployment's /etc.
+    if Path::new("/sysroot/composefs-loopback.ext4").exists()
+        && let Err(e) = write_runtime_composefs_loopback_mount(&etc_dir)
+    {
+        eprintln!("[phase4] Warning: failed to install runtime composefs mount: {e:#}");
+    }
+
     Ok(deploy_dir)
+}
+
+/// Install a systemd mount unit into the deployment's /etc so the booted system
+/// loop-mounts the composefs ext4 store at /sysroot/composefs. Idempotent with
+/// any mount that survives the initrd: systemd treats an already-mounted target
+/// as active.
+fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
+    let unit_dir = etc_dir.join("systemd/system");
+    fs::create_dir_all(&unit_dir)?;
+    fs::write(
+        unit_dir.join("sysroot-composefs.mount"),
+        "[Unit]\n\
+         Description=ComposeFS Loopback Store (runtime)\n\
+         DefaultDependencies=no\n\
+         After=sysroot.mount\n\
+         Before=local-fs.target\n\
+         \n\
+         [Mount]\n\
+         What=/sysroot/composefs-loopback.ext4\n\
+         Where=/sysroot/composefs\n\
+         Type=ext4\n\
+         Options=loop,ro\n\
+         \n\
+         [Install]\n\
+         WantedBy=local-fs.target\n",
+    )?;
+    let wants_dir = unit_dir.join("local-fs.target.wants");
+    fs::create_dir_all(&wants_dir)?;
+    let link = wants_dir.join("sysroot-composefs.mount");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink("../sysroot-composefs.mount", &link)
+        .context("failed to enable runtime sysroot-composefs.mount")?;
+    Ok(())
 }
 
 fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()> {
@@ -1268,7 +1428,7 @@ fn phase5_setup_bootloader(
                 // the LVM-enabled initrd bytes, not the original Dakota initrd.
                 if have_initrd
                     && let Err(e) =
-                        rebuild_initrd_with_lvm_if_needed(&kver, &mount_path, &esp_initrd)
+                        rebuild_initrd_with_lvm_if_needed(&kver, target_image, &esp_initrd)
                 {
                     eprintln!("[phase5] Warning: composefs initrd rebuild failed: {e:#}");
                 }
@@ -1382,7 +1542,7 @@ fn phase5_setup_bootloader(
         )?;
 
         if have_grub_initrd
-            && let Err(e) = rebuild_initrd_with_lvm_if_needed(&kver, &mount_path, &grub_initrd)
+            && let Err(e) = rebuild_initrd_with_lvm_if_needed(&kver, target_image, &grub_initrd)
         {
             eprintln!("[phase5] Warning: LVM initrd rebuild failed: {e:#}");
         }
@@ -1711,6 +1871,92 @@ fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) 
     Ok(())
 }
 
+/// Extract the target image's kernel modules for `kver` from the registry into a
+/// fresh /var/tmp directory, returning the tempdir guard plus the path to the
+/// extracted `usr/lib/modules/<kver>` tree.
+///
+/// The composefs cfs mount used elsewhere in Phase 5 can fall back to a raw
+/// EROFS mount, where files past the inline threshold (xfs.ko, modules.dep.bin,
+/// …) read back as zeros — so dracut cannot rebuild an initrd from that mount.
+/// The registry layer stream returns real bytes, so we source the modules tree
+/// from there instead (the same mechanism that extracts vmlinuz + initrd).
+fn extract_kernel_modules_via_registry(
+    image_ref: &str,
+    kver: &str,
+) -> Result<(tempfile::TempDir, PathBuf)> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    let layers_manifest = endpoint.arch_layers_manifest(manifest_json)?;
+    let layers = layers_manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-kmods-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for kernel module streaming")?;
+    let blob_path = scratch.path().join("layer.blob");
+    let want = format!("usr/lib/modules/{kver}");
+
+    // Newest → oldest with --skip-old-files so the newest copy of each file
+    // wins (overlay semantics). The module tree is split across layers — bootc
+    // images regenerate modules.dep.bin in a later layer than the kernel's .ko
+    // files — so we can't stop at the first layer; we keep going until the
+    // filesystem drivers the composefs+LUKS+XFS initrd actually needs (xfs,
+    // erofs, overlay — shipped together in the kernel-modules layer) are present.
+    // Full paths (no --strip-components) land the tree deterministically at
+    // <scratch>/usr/lib/modules/<kver> regardless of the layer's leading `./`.
+    let mods = scratch.path().join(&want);
+    let needed_kos = [
+        mods.join("kernel/fs/xfs/xfs.ko"),
+        mods.join("kernel/fs/erofs/erofs.ko"),
+        mods.join("kernel/fs/overlayfs/overlay.ko"),
+    ];
+    for layer in layers.iter().rev() {
+        let digest = layer
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("layer entry has no digest"))?;
+        endpoint
+            .download_blob(digest, &blob_path)
+            .with_context(|| format!("failed to fetch layer {}", digest))?;
+        for candidate in [format!("./{want}"), want.clone()] {
+            let _ = Command::new("tar")
+                .arg("-xaf")
+                .arg(&blob_path)
+                .arg("-C")
+                .arg(scratch.path())
+                .args(["--skip-old-files", "--no-same-owner"])
+                .arg(&candidate)
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = fs::remove_file(&blob_path);
+        if needed_kos.iter().all(|p| p.exists()) {
+            break;
+        }
+    }
+
+    let missing: Vec<String> = needed_kos
+        .iter()
+        .filter(|p| !p.exists())
+        .map(|p| p.display().to_string())
+        .collect();
+    if !mods.join("modules.dep.bin").exists() || !missing.is_empty() {
+        return Err(anyhow!(
+            "incomplete kernel modules for {kver} from {image_ref} via registry \
+             (missing: {})",
+            if missing.is_empty() {
+                "modules.dep.bin".to_string()
+            } else {
+                missing.join(", ")
+            }
+        ));
+    }
+    Ok((scratch, mods))
+}
+
 /// Resolved registry endpoint: base URL (scheme + host), repository, reference, and
 /// optional Bearer token. Built once per image and reused for the manifest + every
 /// blob fetch.
@@ -1808,6 +2054,37 @@ impl RegistryEndpoint {
             return Err(anyhow!("curl blob fetch failed for {}", digest));
         }
         Ok(())
+    }
+
+    /// Resolve a (possibly multi-arch) manifest to the concrete image manifest
+    /// for the current architecture.
+    fn arch_layers_manifest(&self, manifest_json: serde_json::Value) -> Result<serde_json::Value> {
+        if !self.is_manifest_index(&manifest_json) {
+            return Ok(manifest_json);
+        }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let entries = manifest_json
+            .get("manifests")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("manifest index has no manifests array"))?;
+        let pick = entries
+            .iter()
+            .find(|m| {
+                m.get("platform")
+                    .and_then(|p| p.get("architecture"))
+                    .and_then(|a| a.as_str())
+                    == Some(arch)
+            })
+            .ok_or_else(|| anyhow!("manifest index has no entry for arch {}", arch))?;
+        let digest = pick
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("manifest index entry has no digest"))?;
+        self.fetch_manifest(digest)
     }
 }
 

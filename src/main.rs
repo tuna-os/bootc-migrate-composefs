@@ -95,17 +95,41 @@ fn check_root_privilege() -> Result<()> {
 ///
 /// Best-effort: returns an error if the pipe/dup setup fails, in which case the
 /// caller proceeds without persistent logging.
-fn tee_stdio_to_log(log_file: std::fs::File) -> rustix::io::Result<()> {
+/// Holds the tee thread + a copy of the real stdout. Call [`TeeGuard::finish`]
+/// before the process exits so short-lived commands (`commit --dry-run`) don't
+/// lose their stdout: the thread only sees EOF once every writer of the pipe is
+/// closed, which on a fast exit races process teardown.
+#[derive(Debug)]
+struct TeeGuard {
+    handle: std::thread::JoinHandle<()>,
+    real_stdout: rustix::fd::OwnedFd,
+}
+
+impl TeeGuard {
+    /// Flush, restore the real stdout/stderr (closing the pipe so the tee thread
+    /// sees EOF), and wait for the thread to drain everything to stdout + log.
+    fn finish(self) {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        let _ = rustix::stdio::dup2_stdout(&self.real_stdout);
+        let _ = rustix::stdio::dup2_stderr(&self.real_stdout);
+        let _ = self.handle.join();
+    }
+}
+
+fn tee_stdio_to_log(log_file: std::fs::File) -> rustix::io::Result<TeeGuard> {
     use std::io::{Read, Write};
 
     let (pipe_read, pipe_write) = rustix::pipe::pipe()?;
-    // Save the original stdout so the tee thread can still reach the terminal
-    // after we redirect stdout/stderr onto the pipe.
-    let orig_stdout = rustix::io::dup(rustix::stdio::stdout())?;
+    // One dup for the tee thread to reach the terminal, one kept by the guard to
+    // restore fd 1/2 on shutdown (which closes the pipe and unblocks the thread).
+    let thread_stdout = rustix::io::dup(rustix::stdio::stdout())?;
+    let real_stdout = rustix::io::dup(rustix::stdio::stdout())?;
 
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let mut reader = std::fs::File::from(pipe_read);
-        let mut stdout = std::fs::File::from(orig_stdout);
+        let mut stdout = std::fs::File::from(thread_stdout);
         let mut log = log_file;
         let mut buf = [0u8; 8192];
         while let Ok(n) = reader.read(&mut buf) {
@@ -115,14 +139,20 @@ fn tee_stdio_to_log(log_file: std::fs::File) -> rustix::io::Result<()> {
             let _ = log.write_all(&buf[..n]);
             let _ = stdout.write_all(&buf[..n]);
         }
+        let _ = log.flush();
+        let _ = stdout.flush();
     });
 
     rustix::stdio::dup2_stdout(&pipe_write)?;
     rustix::stdio::dup2_stderr(&pipe_write)?;
     // Dropping our copy of the write end leaves only the redirected stdout/stderr
-    // referencing it, so the tee thread sees EOF once the process exits.
+    // referencing it, so the tee thread sees EOF once those close (process exit
+    // or TeeGuard::finish).
     drop(pipe_write);
-    Ok(())
+    Ok(TeeGuard {
+        handle,
+        real_stdout,
+    })
 }
 
 fn main() {
@@ -148,13 +178,17 @@ fn main() {
 
     // Tee stdout+stderr to the log file via a pipe so output is visible both
     // on the terminal (over SSH for E2E) and in the persistent log.
-    if let Some(log_file) = log_file {
-        let _ = tee_stdio_to_log(log_file);
-    }
+    let mut tee_guard = log_file.and_then(|f| tee_stdio_to_log(f).ok());
 
     // Handle --commit subcommand
     if let Some(Command::Commit { dry_run }) = args.command {
-        if let Err(e) = run_commit(dry_run) {
+        let result = run_commit(dry_run);
+        // Drain the tee thread so the (short-lived) command's stdout reaches the
+        // caller before we exit — otherwise the cleanup report is lost.
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        if let Err(e) = result {
             eprintln!("Error: {}", e);
             process::exit(1);
         }
@@ -163,7 +197,11 @@ fn main() {
 
     // Handle --undo subcommand
     if let Some(Command::Undo { dry_run, full }) = args.command {
-        if let Err(e) = run_undo(dry_run, full) {
+        let result = run_undo(dry_run, full);
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        if let Err(e) = result {
             eprintln!("Error: {}", e);
             process::exit(1);
         }
