@@ -23,3 +23,7 @@ ovmf_vars.fd
 context.md
 status.md
 research.md
+
+# Agent goal-tracking volatile state (archived goals are kept; these churn)
+.pi/goals/goal_events.jsonl
+.pi/goals/active_goal_*.md
