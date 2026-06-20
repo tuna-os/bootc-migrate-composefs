@@ -1,6 +1,7 @@
 # bootc-migrate-composefs
 
 [![CI](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/ci.yml/badge.svg)](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/ci.yml)
+[![E2E](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/e2e-tests.yml/badge.svg?branch=main)](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/e2e-tests.yml?query=branch%3Amain)
 
 In-place migration utility that converts an OSTree-backend bootc system
 (e.g. Bluefin) into a ComposeFS-backend bootc system (e.g. Dakota), without
@@ -9,8 +10,11 @@ flatpaks, container storage, or user accounts.
 
 > **Status: CI-validated.** All three E2E scenarios (btrfs, ext4, LUKS+XFS)
 > pass in CI on every push to `main` — migration, commit, deep-clean, and
-> bootc upgrade --check all green. Don't point this at a production machine
-> you can't reinstall, but the core path is stable.
+> `bootc upgrade --check` all green. Latest green run:
+> [E2E Migration Tests on `1bee1f3`](https://github.com/hanthor/ostree-composefs-rebase/actions/runs/27854911766)
+> ([all `main` runs](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/e2e-tests.yml?query=branch%3Amain)).
+> Don't point this at a production machine you can't reinstall, but the core
+> path is stable.
 
 ## Architecture
 
