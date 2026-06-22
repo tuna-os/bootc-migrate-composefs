@@ -81,7 +81,10 @@ fn should_filter(word: &str) -> bool {
 /// mounted filesystem. Best-effort: returns an empty vec on non-LVM systems or
 /// if `findmnt`/`lvs` are unavailable.
 fn discover_lvm_kernel_args() -> Vec<String> {
-    let sources = match Command::new("findmnt").args(["-rn", "-o", "SOURCE"]).output() {
+    let sources = match Command::new("findmnt")
+        .args(["-rn", "-o", "SOURCE"])
+        .output()
+    {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
         _ => return Vec::new(),
     };

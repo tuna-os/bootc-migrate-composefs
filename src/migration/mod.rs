@@ -659,9 +659,7 @@ fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, Strin
 
     // Also cache in podman storage so Phase 5 can fall back to podman artifact
     // extraction without a re-pull if the composefs overlay mount is unavailable.
-    let podman_pull = Command::new("podman")
-        .args(["pull", target_image])
-        .status();
+    let podman_pull = Command::new("podman").args(["pull", target_image]).status();
     match podman_pull {
         Ok(s) if s.success() => println!("Image also cached in podman storage."),
         Ok(s) => eprintln!("[phase2] podman pull exited {s} — Phase 5 may need to re-pull"),
@@ -1048,7 +1046,10 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
     } else {
         let pm = PodmanImageMount::new(target_image)
             .context("composefs /etc mount unavailable and podman image mount fallback failed")?;
-        println!("[phase4] using podman image mount at {} for /etc", pm.path.display());
+        println!(
+            "[phase4] using podman image mount at {} for /etc",
+            pm.path.display()
+        );
         mount_path = pm.path.clone();
         Some(pm)
     };
@@ -1480,9 +1481,8 @@ fn phase5_setup_bootloader(
     let _podman_guard = if composefs_mounted {
         None
     } else {
-        let pm = PodmanImageMount::new(target_image).context(
-            "composefs mount unavailable and podman image mount fallback also failed",
-        )?;
+        let pm = PodmanImageMount::new(target_image)
+            .context("composefs mount unavailable and podman image mount fallback also failed")?;
         println!(
             "[phase5] using podman image mount at {} for boot artifacts",
             pm.path.display()
@@ -1513,7 +1513,11 @@ fn phase5_setup_bootloader(
 
     let vmlinuz_src = if mounted_vmlinuz.exists() {
         mounted_vmlinuz
-    } else if mount_path.join("boot").join(format!("vmlinuz-{}", kver)).exists() {
+    } else if mount_path
+        .join("boot")
+        .join(format!("vmlinuz-{}", kver))
+        .exists()
+    {
         mount_path.join("boot").join(format!("vmlinuz-{}", kver))
     } else {
         // Mount empty/unavailable: use canonical in-container path so extraction
@@ -1562,8 +1566,9 @@ fn phase5_setup_bootloader(
                 // return zero-filled content past the inline threshold).
                 let boot_dir_name = format!("bootc_composefs-{}", verity.as_hex());
                 let esp_boot_dir = esp_path.join("EFI/Linux").join(&boot_dir_name);
-                fs::create_dir_all(&esp_boot_dir)
-                    .with_context(|| format!("creating ESP boot dir: {}", esp_boot_dir.display()))?;
+                fs::create_dir_all(&esp_boot_dir).with_context(|| {
+                    format!("creating ESP boot dir: {}", esp_boot_dir.display())
+                })?;
 
                 // Translate the discovered host-mount paths back to in-container paths.
                 let rel_vmlinuz = vmlinuz_src
@@ -1640,11 +1645,13 @@ fn phase5_setup_bootloader(
                 // via firmware menu (`Fedora\shimx64.efi` remains in NVRAM BootOrder)
                 // or by selecting the OSTree GRUB entry from /boot/loader/entries.
                 let staged_dir = esp_path.join("loader/entries.staged");
-                fs::create_dir_all(&staged_dir)
-                    .with_context(|| format!("creating ESP staged entries dir: {}", staged_dir.display()))?;
+                fs::create_dir_all(&staged_dir).with_context(|| {
+                    format!("creating ESP staged entries dir: {}", staged_dir.display())
+                })?;
                 let entries_dir = esp_path.join("loader/entries");
-                fs::create_dir_all(&entries_dir)
-                    .with_context(|| format!("creating ESP entries dir: {}", entries_dir.display()))?;
+                fs::create_dir_all(&entries_dir).with_context(|| {
+                    format!("creating ESP entries dir: {}", entries_dir.display())
+                })?;
                 let to_promote: Vec<&bootloader::BlsEntry> = vec![&composefs_entry];
                 for entry in &to_promote {
                     fs::write(staged_dir.join(&entry.filename), entry.render())
@@ -1743,8 +1750,7 @@ fn phase5_setup_bootloader(
 
         // Write to entries.staged/ first
         let staged_dir = Path::new("/boot/loader/entries.staged");
-        fs::create_dir_all(staged_dir)
-            .context("creating /boot/loader/entries.staged")?;
+        fs::create_dir_all(staged_dir).context("creating /boot/loader/entries.staged")?;
         for entry in &entries {
             let entry_path = staged_dir.join(&entry.filename);
             fs::write(&entry_path, entry.render())
