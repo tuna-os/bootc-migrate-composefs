@@ -1,98 +1,86 @@
 use anyhow::{Context, Result, anyhow};
+use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 /// The system composefs store. During migration this is writable: on btrfs it is
 /// a plain directory on `/sysroot`; on XFS it is the ext4-verity loopback mounted
 /// here by `setup_composefs_loopback_if_needed`.
 const STORE: &str = "/sysroot/composefs";
 
-/// Run `bootc internals cfs --repo <store> oci <op_args>` using the **target
-/// image's own bootc** (via podman), so the composefs store is written in the
-/// exact on-disk format the migrated system's bootc will read at runtime.
-///
-/// Why not the host's bootc: an older source bootc can write a store that the
-/// (newer) target bootc cannot fully read — e.g. it omits the `oci-manifest`
-/// streams the target expects — which silently breaks `bootc status` / `bootc
-/// upgrade` *after* a successful migration (the system still boots). Running the
-/// target's bootc against the bind-mounted store removes that version skew.
-///
-/// Falls back to the host bootc only if podman itself can't be executed (better a
-/// possibly-skewed store than a failed migration); a warning is printed so the
-/// skew is visible. A non-zero exit from the containerized bootc is NOT a
-/// fallback trigger — it's surfaced as a real error.
-fn run_cfs(target_image: &str, cfs_args: &[&str]) -> Result<Output> {
-    let mut podman = Command::new("podman");
-    podman
+/// Remembers whether the store was (re)built with the TARGET image's bootc, so
+/// `create_image`/`seal` use the same bootc that wrote the store. Set by
+/// `pull_image`.
+static USE_TARGET_BOOTC: OnceLock<bool> = OnceLock::new();
+
+/// Run `bootc internals cfs --system oci <args>` with the host (source) bootc.
+/// This is the fast path: it runs natively, so on btrfs it reflinks the image's
+/// blobs into the store (near-zero extra disk) with no container overhead.
+fn host_cfs_oci(args: &[&str]) -> Result<Output> {
+    Command::new("bootc")
+        .args(["internals", "cfs", "--system", "oci"])
+        .args(args)
+        .output()
+        .context("failed to execute host bootc internals cfs oci")
+}
+
+/// Run `bootc internals cfs --repo <store> <args>` with the **target image's own
+/// bootc** (via podman), so the store is written in the format the migrated
+/// system's bootc reads at runtime. Used only when the host bootc is too old to
+/// produce a target-readable store (see `pull_image`). The host container storage
+/// is bind-mounted so the image is read from the local cache (Phase 2 `podman
+/// pull`) rather than re-downloaded.
+fn target_cfs(target_image: &str, args: &[&str]) -> Result<Output> {
+    Command::new("podman")
         .args([
             "run",
             "--rm",
             "--privileged",
             "--net=host",
-            // The store may carry SELinux labels the container can't write
-            // through; disabling label confinement lets bootc write objects.
             "--security-opt",
             "label=disable",
             "-v",
         ])
-        // Bind the store at the same path inside so --repo matches host paths.
         .arg(format!("{STORE}:{STORE}"))
-        // Bind the host's container image storage so `pull` can read the image
-        // straight from the local cache (Phase 2 `podman pull`) via the
-        // `containers-storage:` transport, instead of re-downloading and
-        // re-unpacking it into the container's own storage (which triples the
-        // image's disk footprint and ENOSPCs on tight disks).
         .arg("-v")
         .arg("/var/lib/containers/storage:/var/lib/containers/storage")
         .arg(target_image)
         .args(["bootc", "internals", "cfs", "--repo", STORE])
-        .args(cfs_args);
+        .args(args)
+        .output()
+        .context("failed to execute target-image bootc via podman")
+}
 
-    match podman.output() {
-        Ok(out) => Ok(out),
-        Err(e) => {
-            eprintln!(
-                "[cfs] could not run the target image's bootc via podman ({e}); \
-                 falling back to the host bootc. If the host bootc is older than \
-                 the target's, `bootc status`/`upgrade` may not work post-migration."
-            );
-            Command::new("bootc")
-                .args(["internals", "cfs", "--system"])
-                .args(cfs_args)
-                .output()
-                .context("failed to execute host bootc internals cfs")
+/// True if the store has at least one `oci-manifest-*` stream — the marker that a
+/// pull produced a deployment the target bootc can read (`bootc status`/`upgrade`
+/// open `streams/oci-manifest-<digest>`). Older bootc (≤1.13) writes config+layer
+/// streams but no manifest stream.
+fn manifest_stream_present() -> bool {
+    std::fs::read_dir(format!("{STORE}/streams"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().starts_with("oci-manifest-"))
+        })
+        .unwrap_or(false)
+}
+
+/// Remove the store's content so it can be rebuilt cleanly with the target bootc.
+/// (The target bootc can't reconcile a store an older bootc already wrote —
+/// "Expected exactly 1 external object in splitstream" — so a partial reuse fails.)
+fn wipe_store() -> Result<()> {
+    for sub in ["objects", "streams", "images"] {
+        let p = format!("{STORE}/{sub}");
+        if Path::new(&p).exists() {
+            std::fs::remove_dir_all(&p).with_context(|| format!("wiping {p}"))?;
         }
     }
-}
-
-/// `bootc internals cfs … oci <op_args>` via the target image's bootc.
-fn run_cfs_oci(target_image: &str, op_args: &[&str]) -> Result<Output> {
-    let mut args = vec!["oci"];
-    args.extend_from_slice(op_args);
-    run_cfs(target_image, &args)
-}
-
-/// Initialize the composefs store with the target image's bootc if it isn't
-/// already (XFS gets a `meta.json` from the loopback setup; btrfs does not).
-/// `bootc … cfs … oci pull` requires an initialized repo.
-fn ensure_store_initialized(target_image: &str) -> Result<()> {
-    if std::path::Path::new(STORE).join("meta.json").exists() {
-        return Ok(());
-    }
-    let out = run_cfs(target_image, &["init"])?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "cfs repo init failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
+    // Drop the (host-written) meta.json so the target bootc init writes its own.
+    let _ = std::fs::remove_file(format!("{STORE}/meta.json"));
     Ok(())
 }
 
 /// Normalize an image reference to a `docker://` (or already-prefixed) transport.
 fn with_transport(image_ref: &str) -> String {
-    // Only add docker:// when there's no explicit transport (e.g. docker://,
-    // containers-storage:, oci-archive:). A lone colon (a registry port) is not
-    // a transport prefix.
     if image_ref.contains("://") {
         image_ref.to_string()
     } else {
@@ -101,32 +89,74 @@ fn with_transport(image_ref: &str) -> String {
 }
 
 pub fn pull_image(target_image: &str, image_ref: &str) -> Result<String> {
-    ensure_store_initialized(target_image)?;
-    // Prefer the locally-cached image (Phase 2 `podman pull`) via the
-    // containers-storage transport — bootc imports its layers straight into the
-    // cfs store with no second download/unpack. Only if that's unavailable do we
-    // fall back to the registry (correct, but needs disk for an extra copy).
+    // Fast path: pull with the host (source) bootc. On a current source this
+    // reflinks blobs into the store and produces a target-readable deployment.
+    let docker_ref = with_transport(image_ref);
+    let host_out = host_cfs_oci(&["pull", &docker_ref])?;
+    if host_out.status.success() && manifest_stream_present() {
+        let _ = USE_TARGET_BOOTC.set(false);
+        return Ok(String::from_utf8_lossy(&host_out.stdout).to_string());
+    }
+
+    // The host bootc is too old: its pull either failed or produced no
+    // oci-manifest stream, which leaves `bootc status`/`upgrade` broken after an
+    // otherwise-successful migration. Rebuild the store with the target image's
+    // own bootc so it's written in the format the migrated system expects.
+    if host_out.status.success() {
+        eprintln!(
+            "[cfs] host bootc produced no oci-manifest stream (too old for the \
+             target); rebuilding the store with the target image's bootc"
+        );
+    } else {
+        eprintln!(
+            "[cfs] host bootc pull failed ({}); rebuilding the store with the \
+             target image's bootc",
+            String::from_utf8_lossy(&host_out.stderr).trim()
+        );
+    }
+
+    wipe_store()?;
+    let init = target_cfs(target_image, &["init"])?;
+    if !init.status.success() {
+        return Err(anyhow!(
+            "target bootc repo init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ));
+    }
+
+    // Prefer the locally-cached image (Phase 2 `podman pull`) so we don't make a
+    // second on-disk copy; fall back to the registry transport.
     let cs_ref = format!("containers-storage:{}", image_ref);
-    let output = run_cfs_oci(target_image, &["pull", &cs_ref])?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    let mut out = target_cfs(target_image, &["oci", "pull", &cs_ref])?;
+    if !out.status.success() {
+        eprintln!(
+            "[cfs] containers-storage pull failed ({}); retrying via registry",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        out = target_cfs(target_image, &["oci", "pull", &docker_ref])?;
     }
-    let cs_err = String::from_utf8_lossy(&output.stderr).into_owned();
-    eprintln!(
-        "[cfs] containers-storage pull failed ({}); retrying via registry",
-        cs_err.trim()
-    );
-    let final_ref = with_transport(image_ref);
-    let output = run_cfs_oci(target_image, &["pull", &final_ref])?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("pull failed: {}", stderr));
+    if !out.status.success() {
+        return Err(anyhow!(
+            "pull failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let _ = USE_TARGET_BOOTC.set(true);
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Whether `pull_image` rebuilt the store with the target bootc. `create_image`
+/// and `seal` must use the same bootc that wrote the store.
+fn use_target() -> bool {
+    *USE_TARGET_BOOTC.get().unwrap_or(&false)
 }
 
 pub fn create_image(target_image: &str, image_id: &str) -> Result<String> {
-    let output = run_cfs_oci(target_image, &["create-image", image_id])?;
+    let output = if use_target() {
+        target_cfs(target_image, &["oci", "create-image", image_id])?
+    } else {
+        host_cfs_oci(&["create-image", image_id])?
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("create-image failed: {}", stderr));
@@ -135,7 +165,11 @@ pub fn create_image(target_image: &str, image_id: &str) -> Result<String> {
 }
 
 pub fn seal_image(target_image: &str, image_id: &str) -> Result<String> {
-    let output = run_cfs_oci(target_image, &["seal", image_id])?;
+    let output = if use_target() {
+        target_cfs(target_image, &["oci", "seal", image_id])?
+    } else {
+        host_cfs_oci(&["seal", image_id])?
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("seal failed: {}", stderr));
