@@ -8,14 +8,6 @@ In-place migration utility that converts an OSTree-backend bootc system
 reinstalling and without losing `/home`, `/var`, `/etc` customizations,
 flatpaks, container storage, or user accounts.
 
-> **Status: CI-validated.** All three E2E scenarios (btrfs, ext4, LUKS+XFS)
-> pass in CI on every push to `main` — migration, commit, deep-clean, and
-> `bootc upgrade --check` all green. Latest green run:
-> [E2E Migration Tests on `1bee1f3`](https://github.com/hanthor/ostree-composefs-rebase/actions/runs/27854911766)
-> ([all `main` runs](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/e2e-tests.yml?query=branch%3Amain)).
-> Don't point this at a production machine you can't reinstall, but the core
-> path is stable.
-
 ## Migrate Bluefin → Dakota (quick start)
 
 The common case: **Bluefin stable (btrfs) → Dakota stable**. Five steps. Your
@@ -79,6 +71,13 @@ breakdown, see [Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough
 On **Bluefin LTS** (XFS) or systems with **LVM / LUKS / a dedicated `/var`
 partition**, the tool handles those automatically — see
 [docs/filesystem-support.md](docs/filesystem-support.md).
+
+> **Status: CI-validated, released, and proven on real hardware.** Four E2E
+> scenarios — btrfs, ext4, LUKS+XFS, and LVM-on-LUKS with a dedicated `/var` —
+> run in CI on every push to `main` (migration, commit, deep-clean, and
+> `bootc status` / `upgrade --check` all green). Prebuilt binaries are on the
+> [Releases](../../releases) page. Don't point this at a machine you can't
+> reinstall, but the core path is stable.
 
 ## Architecture
 
