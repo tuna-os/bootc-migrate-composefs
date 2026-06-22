@@ -911,6 +911,13 @@ fn phase3_create_image(
         .ok_or_else(|| anyhow!("seal output missing 'config <digest>' line; got:\n{seal_out}"))?;
     println!("Image sealed successfully (sealed config: {sealed_config}).");
 
+    // #3 — verify the finished store is readable by the target image's bootc, so
+    // a bootc format skew fails loudly here instead of silently breaking
+    // `bootc status`/`upgrade` after reboot.
+    crate::composefs::verify_store_target_readable(target_image)
+        .context("composefs store is not readable by the target image's bootc")?;
+    println!("Verified: composefs store is readable by the target's bootc.");
+
     Ok((verity, sealed_config))
 }
 

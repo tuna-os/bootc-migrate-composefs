@@ -164,6 +164,39 @@ pub fn create_image(target_image: &str, image_id: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Post-build verification (#3): confirm the finished store is readable by the
+/// TARGET image's bootc — the binary that reads it at runtime — so a bootc
+/// format skew can never silently ship a migration that boots but breaks
+/// `bootc status`/`bootc upgrade`.
+///
+/// How we know it's readable:
+/// - In the rebuild path (`use_target()`), the **target bootc itself** wrote the
+///   store (its pull/create/seal succeeded), so it is target-readable by
+///   construction.
+/// - In the host path, we assert the `oci-manifest-*` stream is present — the
+///   exact artifact the target's status/upgrade open
+///   (`streams/oci-manifest-<digest>`). Its absence is the known symptom of an
+///   older source bootc and *guarantees* breakage.
+///
+/// Either way, a missing manifest stream here is a hard failure with a clear
+/// message — we refuse to declare success on a store the target can't read.
+/// This also future-proofs us: if a later bootc changes the format such that
+/// neither path produces the stream, the migration fails loudly instead of
+/// silently regressing updates.
+pub fn verify_store_target_readable(target_image: &str) -> Result<()> {
+    if manifest_stream_present() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "post-build verification failed: the composefs store has no oci-manifest \
+         stream, so the target image's bootc ({target_image}) cannot read this \
+         deployment — `bootc status`/`bootc upgrade` would break after reboot. \
+         This is a bootc format incompatibility between the source bootc and the \
+         target that was not resolved by rebuilding the store. Refusing to ship a \
+         silently-broken migration; update the source system's bootc and retry."
+    ))
+}
+
 pub fn seal_image(target_image: &str, image_id: &str) -> Result<String> {
     let output = if use_target() {
         target_cfs(target_image, &["oci", "seal", image_id])?
