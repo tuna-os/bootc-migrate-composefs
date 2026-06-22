@@ -36,6 +36,13 @@ fn run_cfs(target_image: &str, cfs_args: &[&str]) -> Result<Output> {
         ])
         // Bind the store at the same path inside so --repo matches host paths.
         .arg(format!("{STORE}:{STORE}"))
+        // Bind the host's container image storage so `pull` can read the image
+        // straight from the local cache (Phase 2 `podman pull`) via the
+        // `containers-storage:` transport, instead of re-downloading and
+        // re-unpacking it into the container's own storage (which triples the
+        // image's disk footprint and ENOSPCs on tight disks).
+        .arg("-v")
+        .arg("/var/lib/containers/storage:/var/lib/containers/storage")
         .arg(target_image)
         .args(["bootc", "internals", "cfs", "--repo", STORE])
         .args(cfs_args);
@@ -95,6 +102,20 @@ fn with_transport(image_ref: &str) -> String {
 
 pub fn pull_image(target_image: &str, image_ref: &str) -> Result<String> {
     ensure_store_initialized(target_image)?;
+    // Prefer the locally-cached image (Phase 2 `podman pull`) via the
+    // containers-storage transport — bootc imports its layers straight into the
+    // cfs store with no second download/unpack. Only if that's unavailable do we
+    // fall back to the registry (correct, but needs disk for an extra copy).
+    let cs_ref = format!("containers-storage:{}", image_ref);
+    let output = run_cfs_oci(target_image, &["pull", &cs_ref])?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+    let cs_err = String::from_utf8_lossy(&output.stderr).into_owned();
+    eprintln!(
+        "[cfs] containers-storage pull failed ({}); retrying via registry",
+        cs_err.trim()
+    );
     let final_ref = with_transport(image_ref);
     let output = run_cfs_oci(target_image, &["pull", &final_ref])?;
     if !output.status.success() {
