@@ -67,6 +67,51 @@ impl Drop for MountGuard {
     }
 }
 
+/// RAII guard around `podman image mount`. Mounts a locally-cached OCI image and
+/// exposes its merged rootfs at `path`, unmounting on drop. Used as the Phase 5
+/// fallback when the composefs overlay mount yields no usable content (bootc
+/// mounts in a private namespace that does not persist to our process). Because
+/// Phase 2 also `podman pull`s the image, this needs no network.
+struct PodmanImageMount {
+    image: String,
+    path: PathBuf,
+}
+
+impl PodmanImageMount {
+    fn new(image: &str) -> Result<Self> {
+        let out = Command::new("podman")
+            .args(["image", "mount", image])
+            .output()
+            .context("failed to execute podman image mount")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "podman image mount {} failed: {}",
+                image,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        if !path.is_dir() {
+            return Err(anyhow!(
+                "podman image mount returned non-directory path: {}",
+                path.display()
+            ));
+        }
+        Ok(PodmanImageMount {
+            image: image.to_string(),
+            path,
+        })
+    }
+}
+
+impl Drop for PodmanImageMount {
+    fn drop(&mut self) {
+        let _ = Command::new("podman")
+            .args(["image", "unmount", &self.image])
+            .status();
+    }
+}
+
 // ---- Public API ----
 
 /// Check free space before pulling. Returns Ok(()) if sufficient, Err otherwise.
@@ -612,6 +657,17 @@ fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, Strin
     let pull_output =
         crate::composefs::pull_image(target_image).context("failed to pull OCI image")?;
 
+    // Also cache in podman storage so Phase 5 can fall back to podman artifact
+    // extraction without a re-pull if the composefs overlay mount is unavailable.
+    let podman_pull = Command::new("podman")
+        .args(["pull", target_image])
+        .status();
+    match podman_pull {
+        Ok(s) if s.success() => println!("Image also cached in podman storage."),
+        Ok(s) => eprintln!("[phase2] podman pull exited {s} — Phase 5 may need to re-pull"),
+        Err(e) => eprintln!("[phase2] podman pull failed: {e} — Phase 5 may need to re-pull"),
+    }
+
     let mut manifest_digest = String::new();
     let mut config_digest = String::new();
     for line in pull_output.lines() {
@@ -960,7 +1016,7 @@ fn resolve_device_uuid(device: &str) -> Option<String> {
 fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) -> Result<()> {
     let temp_mount =
         TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
-    let mount_path = temp_mount.path().to_path_buf();
+    let mut mount_path = temp_mount.path().to_path_buf();
 
     // Mount the target rootfs via bootc's composefs overlay using the *sealed
     // config digest* (not the rootfs verity): `cfs oci mount` looks up
@@ -968,17 +1024,41 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
     // drop us to a raw EROFS mount that zero-fills file content above the inline
     // threshold. With the sealed digest the overlay exposes real content, so we
     // can read /etc straight off the mount (and validate prune symlink targets).
-    mount_image(sealed_config, &mount_path)
-        .context("failed to mount target composefs for etc merge")?;
-    let _guard = MountGuard::new(&mount_path);
+    //
+    // On hosts where the composefs overlay mounts into bootc's private namespace
+    // (see phase5_setup_bootloader), the mount is empty here. Fall back to a
+    // `podman image mount` of the already-cached image — local, real content, and
+    // no dependency on reaching the registry mid-migration.
+    let composefs_mounted = match mount_image(sealed_config, &mount_path) {
+        Ok(()) if mount_path.join("etc").is_dir() => true,
+        _ => {
+            eprintln!(
+                "[phase4] composefs /etc mount unavailable; falling back to podman image mount"
+            );
+            false
+        }
+    };
+    let _cfs_guard = if composefs_mounted {
+        Some(MountGuard::new(&mount_path))
+    } else {
+        None
+    };
+    let _podman_guard = if composefs_mounted {
+        None
+    } else {
+        let pm = PodmanImageMount::new(target_image)
+            .context("composefs /etc mount unavailable and podman image mount fallback failed")?;
+        println!("[phase4] using podman image mount at {} for /etc", pm.path.display());
+        mount_path = pm.path.clone();
+        Some(pm)
+    };
 
     let old_default_etc = find_ostree_etc_default()?;
     let current_etc = Path::new("/etc");
 
-    // Use the target's /etc straight off the sealed overlay mount (real
-    // content). Previously this streamed ~120 layers from the registry because
-    // the mount was in bare-EROFS mode and zero-filled content; that path is
-    // kept only as a fallback for when /etc is somehow absent from the mount.
+    // Use the target's /etc straight off the mount (real content). The registry
+    // stream is kept only as a last-resort fallback for when /etc is somehow
+    // absent from both the composefs overlay and the podman mount.
     // (The temp dir is held to function scope so it outlives merge_etc_files.)
     let registry_etc_temp =
         TempDir::new_in("/var/tmp").context("failed to create temp dir for registry /etc")?;
@@ -989,7 +1069,7 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
         .map(|mut d| d.next().is_some())
         .unwrap_or(false)
     {
-        println!("[phase4] using composefs-mounted /etc for merge source");
+        println!("[phase4] using mounted /etc for merge source");
         mount_etc
     } else {
         println!("[phase4] /etc absent from mount; streaming target /etc from registry...");
@@ -1352,7 +1432,7 @@ fn phase5_setup_bootloader(
 
     let temp_mount =
         TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
-    let mount_path = temp_mount.path().to_path_buf();
+    let mut mount_path = temp_mount.path().to_path_buf();
 
     if dry_run {
         println!("[DRY RUN] Would mount EROFS, extract boot artifacts, and write BLS entries.");
@@ -1362,13 +1442,66 @@ fn phase5_setup_bootloader(
     // Mount via the sealed config digest (see perform_etc_merge): the rootfs
     // verity would miss the oci-config stream and fall back to a raw EROFS mount
     // that zero-fills kernel/initrd/systemd-bootx64.efi content.
-    mount_image(sealed_config, &mount_path)
-        .context("failed to mount composefs image for boot artifacts")?;
-    let _guard = MountGuard::new(&mount_path);
+    //
+    // `bootc internals cfs oci mount` can return exit 0 while mounting inside its
+    // own private mount namespace (MS_REC|MS_PRIVATE), which is torn down the
+    // instant the subprocess exits — leaving us an empty directory. A zero exit is
+    // therefore not enough; we verify the mount actually exposes content here.
+    let composefs_mounted = match mount_image(sealed_config, &mount_path) {
+        Ok(()) if mount_path.join("usr/lib/modules").is_dir() => true,
+        Ok(()) => {
+            eprintln!(
+                "[phase5] composefs mount reported success but exposed no content \
+                 (bootc mounted in a private namespace that did not persist); \
+                 falling back to podman image mount"
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!(
+                "[phase5] composefs overlay mount failed ({e}); \
+                 falling back to podman image mount"
+            );
+            false
+        }
+    };
+    // Only guard the composefs overlay mount when it actually persisted into our
+    // namespace; otherwise umount would just warn about a mount that isn't ours.
+    let _cfs_guard = if composefs_mounted {
+        Some(MountGuard::new(&mount_path))
+    } else {
+        None
+    };
 
-    // Find kernel version from mounted image /usr/lib/modules
+    // Fallback: mount the already-cached image (Phase 2 podman pull) and read boot
+    // artifacts straight off local storage — no network, real file content. This
+    // sidesteps both the private-namespace composefs mount and the registry-stream
+    // path (which fails on hosts that can't reach the upstream registry mid-migration).
+    let _podman_guard = if composefs_mounted {
+        None
+    } else {
+        let pm = PodmanImageMount::new(target_image).context(
+            "composefs mount unavailable and podman image mount fallback also failed",
+        )?;
+        println!(
+            "[phase5] using podman image mount at {} for boot artifacts",
+            pm.path.display()
+        );
+        mount_path = pm.path.clone();
+        Some(pm)
+    };
+    // We now have a usable rootfs at mount_path (composefs overlay or podman mount).
+    let mount_ok = true;
+
+    // Find kernel version from the mounted image /usr/lib/modules.
     let modules_dir = mount_path.join("usr/lib/modules");
-    let kver = fs::read_dir(&modules_dir)?
+    let kver = fs::read_dir(&modules_dir)
+        .with_context(|| {
+            format!(
+                "reading kernel modules dir from mounted image: {}",
+                modules_dir.display()
+            )
+        })?
         .filter_map(|e| e.ok())
         .find(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -1380,15 +1513,26 @@ fn phase5_setup_bootloader(
 
     let vmlinuz_src = if mounted_vmlinuz.exists() {
         mounted_vmlinuz
-    } else {
+    } else if mount_path.join("boot").join(format!("vmlinuz-{}", kver)).exists() {
         mount_path.join("boot").join(format!("vmlinuz-{}", kver))
+    } else {
+        // Mount empty/unavailable: use canonical in-container path so extraction
+        // falls back to podman with the correct source path.
+        modules_dir.join(&kver).join("vmlinuz")
     };
     let initrd_src = if mounted_initrd.exists() {
         mounted_initrd
-    } else {
+    } else if mount_path
+        .join("boot")
+        .join(format!("initramfs-{}.img", kver))
+        .exists()
+    {
         mount_path
             .join("boot")
             .join(format!("initramfs-{}.img", kver))
+    } else {
+        // Same canonical fallback for initrd.
+        modules_dir.join(&kver).join("initramfs.img")
     };
 
     // Read target os-release for BLS naming
@@ -1412,13 +1556,14 @@ fn phase5_setup_bootloader(
         let esp = esp.as_ref().unwrap();
         let esp_path = Path::new(esp);
 
-        match install_systemd_boot_from_target(esp_path, &mount_path, target_image) {
+        match install_systemd_boot_from_target(esp_path, &mount_path, target_image, mount_ok) {
             Ok(()) => {
                 // Copy composefs kernel+initrd to ESP via registry stream (raw EROFS reads
                 // return zero-filled content past the inline threshold).
                 let boot_dir_name = format!("bootc_composefs-{}", verity.as_hex());
                 let esp_boot_dir = esp_path.join("EFI/Linux").join(&boot_dir_name);
-                fs::create_dir_all(&esp_boot_dir)?;
+                fs::create_dir_all(&esp_boot_dir)
+                    .with_context(|| format!("creating ESP boot dir: {}", esp_boot_dir.display()))?;
 
                 // Translate the discovered host-mount paths back to in-container paths.
                 let rel_vmlinuz = vmlinuz_src
@@ -1431,7 +1576,10 @@ fn phase5_setup_bootloader(
                 let in_container_initrd;
                 let esp_initrd;
                 let mut have_initrd = false;
-                if initrd_src.exists() {
+                // When the composefs mount is empty (bootc mounted in a private
+                // namespace), initrd_src won't exist on disk — but we still know its
+                // canonical in-container path and extract it via the registry.
+                if initrd_src.exists() || !mount_ok {
                     let rel_initrd = initrd_src
                         .strip_prefix(&mount_path)
                         .with_context(|| format!("initrd {:?} not under mount", initrd_src))?;
@@ -1492,12 +1640,15 @@ fn phase5_setup_bootloader(
                 // via firmware menu (`Fedora\shimx64.efi` remains in NVRAM BootOrder)
                 // or by selecting the OSTree GRUB entry from /boot/loader/entries.
                 let staged_dir = esp_path.join("loader/entries.staged");
-                fs::create_dir_all(&staged_dir)?;
+                fs::create_dir_all(&staged_dir)
+                    .with_context(|| format!("creating ESP staged entries dir: {}", staged_dir.display()))?;
                 let entries_dir = esp_path.join("loader/entries");
-                fs::create_dir_all(&entries_dir)?;
+                fs::create_dir_all(&entries_dir)
+                    .with_context(|| format!("creating ESP entries dir: {}", entries_dir.display()))?;
                 let to_promote: Vec<&bootloader::BlsEntry> = vec![&composefs_entry];
                 for entry in &to_promote {
-                    fs::write(staged_dir.join(&entry.filename), entry.render())?;
+                    fs::write(staged_dir.join(&entry.filename), entry.render())
+                        .with_context(|| format!("writing staged BLS entry: {}", entry.filename))?;
                     fs::rename(
                         staged_dir.join(&entry.filename),
                         entries_dir.join(&entry.filename),
@@ -1538,7 +1689,8 @@ fn phase5_setup_bootloader(
         println!("Staying on GRUB2 bootloader (BLS Type 1)...");
         let boot_dir_name = format!("bootc_composefs-{}", verity.as_hex());
         let grub_boot_dir = Path::new("/boot").join(&boot_dir_name);
-        fs::create_dir_all(&grub_boot_dir)?;
+        fs::create_dir_all(&grub_boot_dir)
+            .with_context(|| format!("creating GRUB boot dir: {}", grub_boot_dir.display()))?;
 
         // Use registry stream for vmlinuz + initrd — copying from the raw EROFS mount
         // zero-fills content past the inline threshold, producing a corrupt 192MB initrd.
@@ -1551,7 +1703,7 @@ fn phase5_setup_bootloader(
             vec![(in_container_vmlinuz, grub_vmlinuz.clone())];
         let grub_initrd = grub_boot_dir.join("initrd");
         let mut have_grub_initrd = false;
-        if initrd_src.exists() {
+        if initrd_src.exists() || !mount_ok {
             let rel_initrd = initrd_src
                 .strip_prefix(&mount_path)
                 .with_context(|| format!("initrd {:?} not under mount", initrd_src))?;
@@ -1591,10 +1743,12 @@ fn phase5_setup_bootloader(
 
         // Write to entries.staged/ first
         let staged_dir = Path::new("/boot/loader/entries.staged");
-        fs::create_dir_all(staged_dir)?;
+        fs::create_dir_all(staged_dir)
+            .context("creating /boot/loader/entries.staged")?;
         for entry in &entries {
             let entry_path = staged_dir.join(&entry.filename);
-            fs::write(&entry_path, entry.render())?;
+            fs::write(&entry_path, entry.render())
+                .with_context(|| format!("writing staged BLS entry: {}", entry.filename))?;
         }
 
         // Propagate rename errors.
@@ -2377,12 +2531,17 @@ fn install_systemd_boot_from_target(
     esp_path: &Path,
     mount_path: &Path,
     target_image: &str,
+    mount_ok: bool,
 ) -> Result<()> {
     // The sealed composefs overlay mount exposes real file content, so the
     // systemd-boot binary is read straight off the mount (with a registry
     // fallback for the unusual case where it's absent from the mount).
+    // When the mount is empty (bootc mounted in a private namespace), skip the
+    // probe and let extract_files_preferring_mount source the binary from the
+    // registry — it errors if the image genuinely doesn't ship systemd-boot,
+    // which the caller turns into a graceful GRUB2 fallback.
     let probe = mount_path.join("usr/lib/systemd/boot/efi/systemd-bootx64.efi");
-    if !probe.exists() {
+    if mount_ok && !probe.exists() {
         return Err(anyhow!(
             "target image does not ship systemd-boot at /usr/lib/systemd/boot/efi/systemd-bootx64.efi"
         ));

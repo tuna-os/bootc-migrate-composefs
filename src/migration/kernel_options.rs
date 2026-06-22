@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::process::Command;
 
 /// Build kernel command-line options for the ComposeFS boot entry.
 ///
@@ -26,6 +27,24 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
         }
         options.push(word.to_string());
     }
+
+    // Activate every LVM logical volume that backs a mounted filesystem.
+    //
+    // The source OSTree cmdline typically lists only the root LV
+    // (`rd.lvm.lv=<vg>/root`). Non-root LVs — most importantly a dedicated
+    // `/var` volume — auto-activate post-switchroot on the source distro (udev
+    // event activation / lvm2-monitor), so they never appear on the cmdline. The
+    // composefs target image may lack that auto-activation path, so its
+    // generated `var.mount` (which waits on `blockdev@…<uuid>.target`) never gets
+    // its device and `/var` silently falls back to the empty per-deployment var —
+    // losing the user's home, flatpaks, etc. Emitting `rd.lvm.lv` for each such
+    // LV makes the initrd activate it, so the device exists before the mount runs.
+    for arg in discover_lvm_kernel_args() {
+        if !options.contains(&arg) {
+            options.push(arg);
+        }
+    }
+
     // composefs= gets the bare hex digest (no sha512: prefix).
     // SPECIFICATION.md §3.4 and §4.2 examples use the bare hex form.
     let bare_hex = crate::VerityDigest::from_prefixed_or_hex(composefs_digest);
@@ -56,6 +75,63 @@ fn should_filter(word: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Return `rd.lvm.lv=<vg>/<lv>` for every LVM logical volume currently backing a
+/// mounted filesystem. Best-effort: returns an empty vec on non-LVM systems or
+/// if `findmnt`/`lvs` are unavailable.
+fn discover_lvm_kernel_args() -> Vec<String> {
+    let sources = match Command::new("findmnt").args(["-rn", "-o", "SOURCE"]).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return Vec::new(),
+    };
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    for line in sources.lines() {
+        let dev = strip_mount_source(line);
+        if dev.is_empty() || seen.iter().any(|s| s == dev) {
+            continue;
+        }
+        seen.push(dev.to_string());
+        // `lvs <device>` succeeds only for real LVM logical volumes; for anything
+        // else (plain partitions, tmpfs, overlay…) it exits non-zero — free filter.
+        let out = Command::new("lvs")
+            .args(["--noheadings", "-o", "vg_name,lv_name", dev])
+            .output();
+        if let Ok(o) = out
+            && o.status.success()
+            && let Some(arg) = parse_lvs_vg_lv(&String::from_utf8_lossy(&o.stdout))
+            && !args.contains(&arg)
+        {
+            args.push(arg);
+        }
+    }
+    args
+}
+
+/// Strip a `findmnt` SOURCE value down to the backing device path, dropping any
+/// `[/subvol]`/bind suffix (e.g. `/dev/mapper/vg-var[/lib/containers]` →
+/// `/dev/mapper/vg-var`).
+fn strip_mount_source(source: &str) -> &str {
+    let s = source.trim();
+    match s.find('[') {
+        Some(i) => &s[..i],
+        None => s,
+    }
+}
+
+/// Parse `lvs --noheadings -o vg_name,lv_name` output (e.g. `  vg0 var`) into a
+/// `rd.lvm.lv=vg0/var` argument. Returns None if the line isn't a vg/lv pair.
+fn parse_lvs_vg_lv(output: &str) -> Option<String> {
+    let line = output.lines().next()?.trim();
+    let mut it = line.split_whitespace();
+    let vg = it.next()?;
+    let lv = it.next()?;
+    if vg.is_empty() || lv.is_empty() || it.next().is_some() {
+        return None;
+    }
+    Some(format!("rd.lvm.lv={vg}/{lv}"))
 }
 
 #[cfg(test)]
@@ -181,6 +257,40 @@ mod tests {
         let result = build_options("rw quiet", "ab01cd23ef45");
         assert!(result.contains("rw"));
         assert!(result.contains("quiet"));
+    }
+
+    #[test]
+    fn strip_mount_source_drops_subvol_suffix() {
+        assert_eq!(
+            strip_mount_source("/dev/mapper/bluefin_bluefin--lts-var[/lib/containers/storage]"),
+            "/dev/mapper/bluefin_bluefin--lts-var"
+        );
+        assert_eq!(
+            strip_mount_source("  /dev/mapper/vg-root  "),
+            "/dev/mapper/vg-root"
+        );
+        assert_eq!(strip_mount_source("tmpfs"), "tmpfs");
+    }
+
+    #[test]
+    fn parse_lvs_vg_lv_extracts_pair() {
+        assert_eq!(
+            parse_lvs_vg_lv("  bluefin_bluefin-lts var\n").as_deref(),
+            Some("rd.lvm.lv=bluefin_bluefin-lts/var")
+        );
+        assert_eq!(
+            parse_lvs_vg_lv("vg0 root").as_deref(),
+            Some("rd.lvm.lv=vg0/root")
+        );
+    }
+
+    #[test]
+    fn parse_lvs_vg_lv_rejects_non_pairs() {
+        // Non-LVM `lvs` output is empty; a single token or extra columns are invalid.
+        assert_eq!(parse_lvs_vg_lv(""), None);
+        assert_eq!(parse_lvs_vg_lv("   "), None);
+        assert_eq!(parse_lvs_vg_lv("onlyone"), None);
+        assert_eq!(parse_lvs_vg_lv("vg lv extra"), None);
     }
 
     /// Representative Bluefin cmdline (simulated from a real bootc OSTree system).

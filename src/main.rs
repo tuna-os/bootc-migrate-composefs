@@ -180,17 +180,30 @@ fn main() {
     // on the terminal (over SSH for E2E) and in the persistent log.
     let mut tee_guard = log_file.and_then(|f| tee_stdio_to_log(f).ok());
 
+    // Drain the tee thread (flushing all buffered output to terminal + log)
+    // then exit. process::exit() skips Rust destructors, so without this
+    // the last few lines of output (including the error message) are lost.
+    macro_rules! exit_flushed {
+        ($code:expr) => {{
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            if let Some(g) = tee_guard.take() {
+                g.finish();
+            }
+            process::exit($code);
+        }};
+    }
+
     // Handle --commit subcommand
     if let Some(Command::Commit { dry_run }) = args.command {
         let result = run_commit(dry_run);
-        // Drain the tee thread so the (short-lived) command's stdout reaches the
-        // caller before we exit — otherwise the cleanup report is lost.
-        if let Some(g) = tee_guard.take() {
-            g.finish();
-        }
         if let Err(e) = result {
             eprintln!("Error: {}", e);
-            process::exit(1);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
         }
         return;
     }
@@ -198,30 +211,33 @@ fn main() {
     // Handle --undo subcommand
     if let Some(Command::Undo { dry_run, full }) = args.command {
         let result = run_undo(dry_run, full);
-        if let Some(g) = tee_guard.take() {
-            g.finish();
-        }
         if let Err(e) = result {
             eprintln!("Error: {}", e);
-            process::exit(1);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
         }
         return;
     }
 
     if let Err(e) = check_root_privilege() {
         eprintln!("Error: {}", e);
-        process::exit(1);
+        exit_flushed!(1);
     }
 
-    let target_image = args.target_image.unwrap_or_else(|| {
-        eprintln!("Error: --target-image is required for migration");
-        process::exit(1);
-    });
+    let target_image = match args.target_image {
+        Some(t) => t,
+        None => {
+            eprintln!("Error: --target-image is required for migration");
+            exit_flushed!(1);
+        }
+    };
 
     // Validate target_image to prevent INI injection in the .origin file.
     if target_image.contains('\n') || target_image.contains('\r') || target_image.contains('\0') {
         eprintln!("Error: --target-image contains invalid characters (newlines, nulls).");
-        process::exit(1);
+        exit_flushed!(1);
     }
 
     let version = env!("BUILD_GIT_HASH");
@@ -236,7 +252,7 @@ fn main() {
         Err(e) => {
             eprintln!("Preflight failure: {}", e);
             if !args.skip_preflight {
-                process::exit(1);
+                exit_flushed!(1);
             }
             preflight::PreflightReport {
                 is_bootc_ostree: true,
@@ -409,7 +425,7 @@ fn main() {
         eprintln!(
             "Error: System is not booted into an OSTree deployment. Cannot perform migration."
         );
-        process::exit(1);
+        exit_flushed!(1);
     }
 
     if !report.supports_reflink && !args.force {
@@ -422,11 +438,11 @@ fn main() {
             let input = input.trim().to_lowercase();
             if input != "y" && input != "yes" {
                 println!("Migration aborted.");
-                process::exit(0);
+                exit_flushed!(0);
             }
         } else {
             println!("Migration aborted.");
-            process::exit(0);
+            exit_flushed!(0);
         }
     }
 
@@ -440,7 +456,7 @@ fn main() {
         args.force,
     ) {
         eprintln!("\nMigration Failed: {:#}", e);
-        process::exit(1);
+        exit_flushed!(1);
     }
 }
 
@@ -851,6 +867,17 @@ fn run_undo(dry_run: bool, full: bool) -> Result<()> {
     println!("=== Undoing composefs migration ===");
     if dry_run {
         println!("*** DRY RUN — no changes will be made ***");
+    }
+
+    // /sysroot is mounted read-only on an OSTree-booted system (composefs or
+    // classic). Remount rw so we can delete staged deployments and loopback
+    // images that live there. Ignore the error — if it's already rw this is
+    // a no-op; if it genuinely can't be made rw the subsequent removes will
+    // surface the real error.
+    if !dry_run {
+        let _ = std::process::Command::new("mount")
+            .args(["-o", "remount,rw", "/sysroot"])
+            .status();
     }
 
     let mut removed = 0usize;
