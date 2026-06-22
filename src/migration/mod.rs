@@ -676,7 +676,7 @@ pub fn run_migration(
     let (_manifest_digest, config_digest) = phase2_pull_image(target_image, dry_run)?;
 
     // ---- Phase 3: Create and seal EROFS image ----
-    let (verity, sealed_config) = phase3_create_image(&config_digest, dry_run)?;
+    let (verity, sealed_config) = phase3_create_image(target_image, &config_digest, dry_run)?;
 
     // ---- Phase 4: Stage deployment state ----
     let _deploy_dir = phase4_stage_deploy(
@@ -778,8 +778,8 @@ fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, Strin
     }
 
     println!("Pulling target image: {}...", target_image);
-    let pull_output =
-        crate::composefs::pull_image(target_image).context("failed to pull OCI image")?;
+    let pull_output = crate::composefs::pull_image(target_image, target_image)
+        .context("failed to pull OCI image")?;
 
     // Also cache in podman storage so Phase 5 can fall back to podman artifact
     // extraction without a re-pull if the composefs overlay mount is unavailable.
@@ -862,7 +862,11 @@ fn podman_manifest_digest(image: &str) -> Option<String> {
 /// `oci-config-` and looks up `streams/oci-config-<digest>`). These are
 /// distinct: passing the rootfs verity to `mount` looks up a nonexistent
 /// `oci-config-<verity>` stream and forces the zero-filling raw-EROFS fallback.
-fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<(VerityDigest, String)> {
+fn phase3_create_image(
+    target_image: &str,
+    config_digest: &str,
+    dry_run: bool,
+) -> Result<(VerityDigest, String)> {
     println!("=== Phase 3: Creating ComposeFS EROFS Image ===");
 
     if dry_run {
@@ -881,7 +885,7 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<(VerityDige
     // Real idempotency — check if the image already exists AND is sealed.
     // We first need the verity hash to check, so we still call create_image (which
     // is typically a no-op if objects already exist), then skip seal if already done.
-    let sha512_verity_str = crate::composefs::create_image(config_digest)
+    let sha512_verity_str = crate::composefs::create_image(target_image, config_digest)
         .context("failed to create composefs image")?;
 
     let verity = VerityDigest::from_prefixed_or_hex(&sha512_verity_str);
@@ -898,8 +902,8 @@ fn phase3_create_image(config_digest: &str, dry_run: bool) -> Result<(VerityDige
     // missing unit files like dbus.service and cascading boot failures).
     // Always seal — idempotency is handled inside bootc.
     println!("Sealing composefs image...");
-    let seal_out =
-        crate::composefs::seal_image(config_digest).context("failed to seal composefs image")?;
+    let seal_out = crate::composefs::seal_image(target_image, config_digest)
+        .context("failed to seal composefs image")?;
     let sealed_config = seal_out
         .lines()
         .find_map(|l| l.trim().strip_prefix("config "))
