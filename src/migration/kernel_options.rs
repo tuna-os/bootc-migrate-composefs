@@ -359,9 +359,10 @@ mod tests {
                     "ci={ci}: expected debug args, got {args:?}"
                 );
                 assert!(args.iter().any(|a| a == "systemd.log_target=console"));
-                assert!(args
-                    .iter()
-                    .any(|a| a == "systemd.journald.forward_to_console=1"));
+                assert!(
+                    args.iter()
+                        .any(|a| a == "systemd.journald.forward_to_console=1")
+                );
             } else {
                 assert!(
                     args.is_empty(),
