@@ -875,8 +875,11 @@ fn phase3_create_image(
             config_digest
         );
         return Ok((
+            // "dryrun..." isn't valid hex (r/y/u/n) — from_hex asserts hex-only,
+            // so a placeholder digest must actually be hex. deadbeef is the
+            // traditional obviously-fake stand-in.
             VerityDigest::from_hex(
-                "dryrun0000000000000000000000000000000000000000000000000000000000",
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             ),
             config_digest.to_string(),
         ));
