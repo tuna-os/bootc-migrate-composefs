@@ -283,6 +283,11 @@ homebrew, GNOME extensions, whatever. Everything that lived under `/home`,
 `/var`, and `/etc` on Bluefin should be where you left it. If something
 is missing or broken, you can roll back (see below).
 
+A login banner (`/etc/motd.d/85-bootc-migrate-composefs`) reminds you to run
+`commit` on every login until you do, so a live migration doesn't sit
+forgotten in this dual-boot state indefinitely. It clears itself once
+`commit` runs.
+
 ### 5. Make it permanent (one-way)
 
 Once you trust the new system:

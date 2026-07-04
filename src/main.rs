@@ -6,6 +6,7 @@ use std::process;
 mod composefs;
 mod mergetc;
 mod migration;
+mod motd;
 mod ostree;
 mod preflight;
 mod reflink;
@@ -746,6 +747,9 @@ fn run_commit(dry_run: bool) -> Result<()> {
     if has_alt_mount {
         let _ = std::process::Command::new("umount").arg(alt_root).status();
         let _ = std::fs::remove_dir(alt_root);
+    }
+    if !dry_run && let Err(e) = motd::clear_migration_reminder() {
+        eprintln!("Warning: failed to clear login reminder: {e:#}");
     }
     Ok(())
 }
