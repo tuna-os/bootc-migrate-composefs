@@ -31,6 +31,9 @@ jobs:
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
             filesystem: ext4
+            # 20G default has intermittently ENOSPC'd mid Phase-2 image pull
+            # (issue #42) — the guest's own virtual disk, not the runner's.
+            disk_size: 30G
           - name: bluefin LTS -> dakota (LUKS + systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
@@ -40,7 +43,10 @@ jobs:
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
             filesystem: xfs+lvm+crypt
-            disk_size: 40G
+            # Was 40G — still ENOSPC'd during Phase-2 image pull twice (#42).
+            # The BIOS-boot + ESP + separate /boot partitions and the fixed
+            # 4G /var LV all come out of this before root sees any of it.
+            disk_size: 60G
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
@@ -51,17 +57,12 @@ jobs:
         uses: actions/checkout@v4
 
       # Bluefin + Dakota are ~5 GB each. The default ubuntu-latest runner has
-      # ~14 GB free; that plus a 20 GB disk.raw, Rust target, and the local
-      # registry blows the disk. Reclaim ~30 GB by ditching Android/dotnet/etc.
+      # ~14 GB free; that plus a 20-60 GB disk.raw (a sparse file that grows
+      # into real host disk as the guest writes to it), Rust target, and the
+      # local registry can still blow the disk. Same action projectbluefin/
+      # bluefin's own e2e uses (ublue-os/remove-unwanted-software).
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
+        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
 
       - name: Install system dependencies
         run: |
