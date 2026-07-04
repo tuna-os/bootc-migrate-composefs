@@ -49,10 +49,6 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
     // SPECIFICATION.md §3.4 and §4.2 examples use the bare hex form.
     let bare_hex = crate::VerityDigest::from_prefixed_or_hex(composefs_digest);
     options.push(format!("composefs={}", bare_hex.as_hex()));
-    // Temporary: forward journal to console for debugging emergency mode.
-    options.push("systemd.log_level=debug".into());
-    options.push("systemd.log_target=console".into());
-    options.push("systemd.journald.forward_to_console=1".into());
     Ok(options.join(" "))
 }
 

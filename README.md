@@ -1,7 +1,7 @@
 # bootc-migrate-composefs
 
-[![CI](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/ci.yml/badge.svg)](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/ci.yml)
-[![E2E](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/e2e-tests.yml/badge.svg?branch=main)](https://github.com/hanthor/ostree-composefs-rebase/actions/workflows/e2e-tests.yml?query=branch%3Amain)
+[![CI](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/ci.yml/badge.svg)](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/ci.yml)
+[![E2E](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/e2e-tests.yml/badge.svg?branch=main)](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/e2e-tests.yml?query=branch%3Amain)
 
 In-place migration utility that converts an OSTree-backend bootc system
 (e.g. Bluefin) into a ComposeFS-backend bootc system (e.g. Dakota), without
@@ -23,7 +23,7 @@ swap in `aarch64-unknown-linux-gnu`):
 
 ```bash
 curl -fsSL -o bmc.tar.gz \
-  https://github.com/hanthor/ostree-composefs-rebase/releases/latest/download/bootc-migrate-composefs-x86_64-unknown-linux-gnu.tar.gz
+  https://github.com/tuna-os/bootc-migrate-composefs/releases/latest/download/bootc-migrate-composefs-x86_64-unknown-linux-gnu.tar.gz
 tar xzf bmc.tar.gz
 sudo install -m755 bootc-migrate-composefs /usr/local/bin/
 ```
@@ -31,8 +31,8 @@ sudo install -m755 bootc-migrate-composefs /usr/local/bin/
 <details><summary>…or build from source (needs Rust)</summary>
 
 ```bash
-git clone https://github.com/hanthor/ostree-composefs-rebase
-cd ostree-composefs-rebase
+git clone https://github.com/tuna-os/bootc-migrate-composefs
+cd bootc-migrate-composefs
 cargo build --release
 sudo install -m755 target/release/bootc-migrate-composefs /usr/local/bin/
 ```
@@ -65,6 +65,11 @@ sudo systemctl reboot
 cat /proc/cmdline | grep -o 'composefs=[0-9a-f]*'   # confirms composefs boot
 sudo bootc-migrate-composefs commit                 # one-way; removes the OSTree fallback
 ```
+
+> ⚠️ **Note:** Phase 4 copies `/var` to the composefs side. After migration,
+> the two `/var` trees are **independent** — changes you make on the composefs
+> side won't be reflected if you roll back to OSTree (and vice versa). Commit
+> only when you're satisfied with the new system.
 
 That's it. For flags, rollback, troubleshooting, and the full phase-by-phase
 breakdown, see [Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough).
@@ -338,6 +343,7 @@ What's intentionally *not* carried forward:
 | `bootc status` says "No manifest_digest in origin" | You're on an old build of this tool | Update to `main` — version info is on the first line of the migration log |
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
 | GNOME boots but session settings (wallpaper, accent) look wrong | dconf database needs recompile | `dconf update` as your user, or log out + back in |
+| Migration went wrong and you want to undo it | Something failed mid-migration | Run `sudo bootc-migrate-composefs undo` (removes composefs boot artifacts, keeps object store) or `sudo bootc-migrate-composefs undo --full` (full cleanup including object store); then reboot into OSTree |
 
 ## Requirements
 
@@ -371,8 +377,8 @@ sudo ./tests/run-e2e.sh
 ```
 
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
-`FILESYSTEM`, `SKIP_SETUP`. The CI matrix runs three scenarios:
-btrfs (default), ext4, and LUKS+XFS+crypt.
+`FILESYSTEM`, `SKIP_SETUP`. The CI matrix runs four scenarios: btrfs (default), XFS+ext4-loopback, LUKS+XFS+crypt,
+and LVM-on-LUKS with a dedicated `/var`.
 
 ## Layout
 

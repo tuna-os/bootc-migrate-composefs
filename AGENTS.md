@@ -54,8 +54,9 @@ Also available via just: `just watch log="e2e-luks.log"`
 | Scenario | Base | Target | Filesystem | Disk size |
 |----------|------|--------|------------|-----------|
 | btrfs + composefs | bluefin:stable | dakota:stable | btrfs | 20G |
-| xfs + loopback | bluefin:lts | dakota:stable | ext4 | 20G |
+| xfs + loopback | bluefin:lts | dakota:stable | xfs+ext4loop | 20G |
 | LUKS + xfs | bluefin:lts | dakota:stable | xfs+crypt | 40G |
+| LVM-on-LUKS + /var | bluefin:lts | dakota:stable | xfs+lvm+crypt | 40G |
 
 ## Two-candidate CI races
 
