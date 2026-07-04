@@ -49,7 +49,29 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
     // SPECIFICATION.md §3.4 and §4.2 examples use the bare hex form.
     let bare_hex = crate::VerityDigest::from_prefixed_or_hex(composefs_digest);
     options.push(format!("composefs={}", bare_hex.as_hex()));
+    // In CI (GitHub Actions sets CI=true) forward the journal to the serial
+    // console so that QEMU serial logs capture systemd boot diagnostics for
+    // E2E failure analysis. Never emitted on user machines.
+    for arg in ci_debug_kernel_args(std::env::var_os("CI").is_some()) {
+        options.push(arg);
+    }
     Ok(options.join(" "))
+}
+
+/// Returns systemd console-journal args when running in CI; empty otherwise.
+///
+/// Factored out so the logic is testable without mutating the process
+/// environment (which would require `unsafe` in Rust 2024).
+fn ci_debug_kernel_args(ci: bool) -> Vec<String> {
+    if ci {
+        vec![
+            "systemd.log_level=debug".into(),
+            "systemd.log_target=console".into(),
+            "systemd.journald.forward_to_console=1".into(),
+        ]
+    } else {
+        vec![]
+    }
 }
 
 fn should_filter(word: &str) -> bool {
@@ -321,5 +343,31 @@ mod tests {
         assert!(result.contains("composefs=ab01cd23ef45"));
         // composefs arg must NOT have sha512: prefix
         assert!(!result.contains("sha512:"));
+    }
+
+    /// Debug kernel args are emitted when ci=true and suppressed otherwise.
+    /// Calls the pure helper directly — no env manipulation needed.
+    #[test]
+    fn ci_debug_args_gated_by_flag() {
+        // (ci_flag, expect_debug)
+        let cases: &[(bool, bool)] = &[(true, true), (false, false)];
+        for &(ci, expect_debug) in cases {
+            let args = super::ci_debug_kernel_args(ci);
+            if expect_debug {
+                assert!(
+                    args.iter().any(|a| a == "systemd.log_level=debug"),
+                    "ci={ci}: expected debug args, got {args:?}"
+                );
+                assert!(args.iter().any(|a| a == "systemd.log_target=console"));
+                assert!(args
+                    .iter()
+                    .any(|a| a == "systemd.journald.forward_to_console=1"));
+            } else {
+                assert!(
+                    args.is_empty(),
+                    "ci={ci}: expected no debug args, got {args:?}"
+                );
+            }
+        }
     }
 }
