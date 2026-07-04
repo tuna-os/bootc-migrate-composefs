@@ -31,9 +31,10 @@ jobs:
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
             filesystem: ext4
-            # 20G default has intermittently ENOSPC'd mid Phase-2 image pull
-            # (issue #42) — the guest's own virtual disk, not the runner's.
-            disk_size: 30G
+            # 20G default has intermittently ENOSPC'd (#42) — no XFS loopback
+            # is involved here (ext4 natively supports fs-verity), so this is
+            # just the outer disk being tight; match the LUKS scenario's 40G.
+            disk_size: 40G
           - name: bluefin LTS -> dakota (LUKS + systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
