@@ -188,9 +188,21 @@ fn setup_composefs_loopback_if_needed(report: &PreflightReport) -> Result<Option
             let _ = fs::remove_file(img_path);
         }
 
-        // Calculate size: 1.5× ostree repo + 5 GB buffer, min 10 GB, max 30 GB.
+        // Sizing this off the *source* ostree repo alone badly undersizes it:
+        // Phase 2 pulls the *target* image into this same loopback regardless
+        // of whether Phase 1's reflink import (the only thing ostree_gb
+        // actually measures) runs at all — with --skip-import, or a small
+        // source migrating to a much larger target, the old 10-30 GB clamp
+        // left no room for the pull and ENOSPC'd mid-Phase-2 (#42). The
+        // loopback is a sparse file (ext4 allocates blocks on demand), so a
+        // generous nominal size is free — bound only by what the underlying
+        // filesystem actually has (composefs_free_bytes, already measured by
+        // preflight), not by an arbitrary fixed ceiling.
         let ostree_gb = report.ostree_repo_size_bytes as f64 / 1e9;
-        let size_gb = ((ostree_gb * 1.5 + 5.0).ceil() as u64).clamp(10, 30);
+        let free_gb = report.composefs_free_bytes as f64 / 1e9;
+        let desired_gb = (ostree_gb * 1.5 + 25.0).ceil() as u64;
+        let max_gb = ((free_gb * 0.9) as u64).max(30);
+        let size_gb = desired_gb.clamp(30, max_gb);
         println!(
             "XFS detected — setting up {size_gb} GB ext4 loopback for composefs verity support.",
         );
