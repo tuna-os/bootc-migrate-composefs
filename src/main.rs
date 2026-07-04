@@ -1079,5 +1079,8 @@ fn run_undo(dry_run: bool, full: bool) -> Result<()> {
         println!("The system is now in its pre-migration OSTree state.");
         println!("Run 'bootc-migrate-composefs --target-image <image>' to try again.");
     }
+    if !dry_run && let Err(e) = motd::clear_migration_reminder() {
+        eprintln!("Warning: failed to clear login reminder: {e:#}");
+    }
     Ok(())
 }
