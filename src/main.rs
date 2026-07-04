@@ -9,6 +9,7 @@ mod migration;
 mod ostree;
 mod preflight;
 mod reflink;
+mod tui;
 mod types;
 mod xattr;
 
@@ -79,6 +80,9 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Launch the interactive TUI wizard.
+    #[command(name = "tui")]
+    Tui,
 }
 
 fn check_root_privilege() -> Result<()> {
@@ -211,6 +215,22 @@ fn main() {
     // Handle --undo subcommand
     if let Some(Command::Undo { dry_run, full }) = args.command {
         let result = run_undo(dry_run, full);
+        if let Err(e) = result {
+            eprintln!("Error: {}", e);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        return;
+    }
+
+    // Handle explicit `tui` subcommand, or fall into the wizard automatically
+    // when no target image was given on the command line. Root isn't required
+    // just to browse the wizard — the migration subprocess it spawns on Run
+    // enforces that itself.
+    if matches!(args.command, Some(Command::Tui)) || args.target_image.is_none() {
+        let result = tui::run_tui();
         if let Err(e) = result {
             eprintln!("Error: {}", e);
             exit_flushed!(1);
