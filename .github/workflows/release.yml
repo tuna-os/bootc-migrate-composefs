@@ -16,9 +16,11 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/${{ github.repository_owner }}/bootc-migrate-composefs
 
 jobs:
   build:
@@ -79,3 +81,42 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes
+
+  container:
+    name: Publish container image
+    needs: build
+    runs-on: ubuntu-latest
+    # Builds (but doesn't push) on workflow_dispatch so the Containerfile
+    # stays validated between releases; only pushes on an actual tag.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist/
+      - name: Stage per-arch binaries for the multi-platform build context
+        run: |
+          set -euo pipefail
+          mkdir -p ctx/linux/amd64 ctx/linux/arm64
+          tar -xzf dist/bootc-migrate-composefs-x86_64-unknown-linux-gnu.tar.gz -C ctx/linux/amd64
+          tar -xzf dist/bootc-migrate-composefs-aarch64-unknown-linux-gnu.tar.gz -C ctx/linux/arm64
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to ghcr
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest

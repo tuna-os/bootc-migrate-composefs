@@ -1,0 +1,1752 @@
+//! Interactive TUI wizard for bootc-migrate-composefs.
+//!
+//! Entry point: [`run_tui`].  Invoke as `sudo bootc-migrate-composefs tui`
+//! or automatically when `--target-image` is omitted.
+
+use anyhow::{Context, Result};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
+};
+use std::{
+    fmt,
+    io::{BufRead, BufReader},
+    process::Stdio,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
+
+// ─── Colour palette ───────────────────────────────────────────────────────────
+const TEAL: Color = Color::Rgb(0, 180, 180);
+const AMBER: Color = Color::Rgb(220, 160, 0);
+const DARK_BG: Color = Color::Rgb(18, 20, 24);
+const SURFACE: Color = Color::Rgb(30, 34, 42);
+const SUBTLE: Color = Color::Rgb(90, 100, 115);
+const SUCCESS: Color = Color::Rgb(80, 200, 100);
+const DANGER: Color = Color::Rgb(220, 60, 60);
+const TEXT: Color = Color::Rgb(210, 215, 225);
+
+// ─── Spinner ──────────────────────────────────────────────────────────────────
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+// ─── Preset images ────────────────────────────────────────────────────────────
+const PRESET_IMAGES: &[(&str, &str)] = &[
+    (
+        "Bluefin stable  →  Dakota stable",
+        "ghcr.io/projectbluefin/dakota:stable",
+    ),
+    (
+        "Bluefin LTS     →  Dakota stable",
+        "ghcr.io/projectbluefin/dakota:stable",
+    ),
+    (
+        "Aurora          →  Dakota stable",
+        "ghcr.io/projectbluefin/dakota:stable",
+    ),
+    ("Custom…", ""),
+];
+
+// ─── Phase information ────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PhaseStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone)]
+struct PhaseInfo {
+    label: &'static str,
+    status: PhaseStatus,
+}
+
+fn default_phases() -> Vec<PhaseInfo> {
+    vec![
+        PhaseInfo {
+            label: "Phase 0 · Preflight",
+            status: PhaseStatus::Pending,
+        },
+        PhaseInfo {
+            label: "Phase 1 · OSTree import",
+            status: PhaseStatus::Pending,
+        },
+        PhaseInfo {
+            label: "Phase 2 · OCI pull",
+            status: PhaseStatus::Pending,
+        },
+        PhaseInfo {
+            label: "Phase 3 · EROFS seal",
+            status: PhaseStatus::Pending,
+        },
+        PhaseInfo {
+            label: "Phase 4 · Stage deployment",
+            status: PhaseStatus::Pending,
+        },
+        PhaseInfo {
+            label: "Phase 5 · Bootloader",
+            status: PhaseStatus::Pending,
+        },
+    ]
+}
+
+// ─── Log line colours ─────────────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+enum LogKind {
+    Header,
+    Phase,
+    Error,
+    Success,
+    Normal,
+}
+
+#[derive(Debug, Clone)]
+struct LogLine {
+    text: String,
+    kind: LogKind,
+}
+
+impl LogLine {
+    fn classify(raw: &str) -> Self {
+        let kind = if raw.starts_with("===") {
+            LogKind::Header
+        } else if raw.starts_with("[phase")
+            || raw.starts_with("[phase2]")
+            || raw.starts_with("[phase4]")
+            || raw.starts_with("[phase5]")
+        {
+            LogKind::Phase
+        } else if raw.to_lowercase().contains("error")
+            || raw.to_lowercase().contains("failed")
+            || raw.to_lowercase().contains("fatal")
+        {
+            LogKind::Error
+        } else if raw.contains("✓")
+            || raw.contains("COMPLETED")
+            || raw.contains("success")
+            || raw.starts_with("Reclaimed")
+        {
+            LogKind::Success
+        } else {
+            LogKind::Normal
+        };
+        Self {
+            text: raw.to_owned(),
+            kind,
+        }
+    }
+}
+
+// ─── Migration process messages ───────────────────────────────────────────────
+#[derive(Debug)]
+enum MigMsg {
+    Line(String),
+    Done(bool), // true = success
+}
+
+// ─── Wizard screen ────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Screen {
+    Welcome,
+    SelectImage,
+    ConfigureOptions,
+    Review,
+    Running,
+    Complete,
+    Failed,
+}
+
+// ─── Bootloader choice ────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Bootloader {
+    SystemdBoot,
+    Grub2,
+}
+
+// ─── App state ────────────────────────────────────────────────────────────────
+/// Top-level application state for the TUI wizard.
+pub struct App {
+    screen: Screen,
+
+    // SelectImage
+    image_list_state: ListState,
+    custom_image: String,
+    custom_image_editing: bool,
+
+    // ConfigureOptions
+    opt_dry_run: bool,
+    opt_skip_import: bool,
+    opt_bootloader: Bootloader,
+    opt_skip_preflight: bool,
+    opt_force: bool,
+    options_cursor: usize,
+
+    // Running
+    phases: Vec<PhaseInfo>,
+    log_lines: Vec<LogLine>,
+    log_scroll: usize,
+    spinner_tick: usize,
+    last_tick: Instant,
+    rx: Option<mpsc::Receiver<MigMsg>>,
+    migration_done: bool,
+    migration_success: bool,
+
+    // Quit confirmation dialog
+    show_quit_dialog: bool,
+    quit_dialog_yes: bool,
+
+    // Terminal size for scrollbar
+    term_height: u16,
+}
+
+impl fmt::Debug for App {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("App")
+            .field("screen", &self.screen)
+            .field("opt_dry_run", &self.opt_dry_run)
+            .finish_non_exhaustive()
+    }
+}
+
+impl App {
+    fn new() -> Self {
+        let mut image_list_state = ListState::default();
+        image_list_state.select(Some(0));
+        Self {
+            screen: Screen::Welcome,
+            image_list_state,
+            custom_image: String::new(),
+            custom_image_editing: false,
+            opt_dry_run: true,
+            opt_skip_import: false,
+            opt_bootloader: Bootloader::SystemdBoot,
+            opt_skip_preflight: false,
+            opt_force: false,
+            options_cursor: 0,
+            phases: default_phases(),
+            log_lines: Vec::new(),
+            log_scroll: 0,
+            spinner_tick: 0,
+            last_tick: Instant::now(),
+            rx: None,
+            migration_done: false,
+            migration_success: false,
+            show_quit_dialog: false,
+            quit_dialog_yes: false,
+            term_height: 40,
+        }
+    }
+
+    fn selected_image(&self) -> String {
+        let idx = self.image_list_state.selected().unwrap_or(0);
+        if idx == PRESET_IMAGES.len() - 1 {
+            self.custom_image.clone()
+        } else {
+            PRESET_IMAGES[idx].1.to_owned()
+        }
+    }
+
+    fn is_custom_selected(&self) -> bool {
+        self.image_list_state.selected().unwrap_or(0) == PRESET_IMAGES.len() - 1
+    }
+
+    fn build_command_args(&self) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("bootc-migrate-composefs"));
+        args.push(exe.display().to_string());
+        args.push("--target-image".to_owned());
+        args.push(self.selected_image());
+        if self.opt_dry_run {
+            args.push("--dry-run".to_owned());
+        }
+        if self.opt_skip_import {
+            args.push("--skip-import".to_owned());
+        }
+        match self.opt_bootloader {
+            Bootloader::SystemdBoot => {
+                args.push("--bootloader".to_owned());
+                args.push("systemd-boot".to_owned());
+            }
+            Bootloader::Grub2 => {
+                args.push("--bootloader".to_owned());
+                args.push("grub2".to_owned());
+            }
+        }
+        if self.opt_skip_preflight {
+            args.push("--skip-preflight".to_owned());
+        }
+        if self.opt_force {
+            args.push("--force".to_owned());
+        }
+        args
+    }
+
+    fn command_display(&self) -> String {
+        self.build_command_args().join(" ")
+    }
+
+    /// Spawn the migration binary in a background thread, piping stdout/stderr
+    /// through an mpsc channel as [`MigMsg`] values.
+    fn start_migration(&mut self) {
+        let args = self.build_command_args();
+        // args[0] is the executable path; args[1..] are the arguments.
+        let exe = args[0].clone();
+        let rest: Vec<String> = args[1..].to_vec();
+
+        let (tx, rx) = mpsc::channel::<MigMsg>();
+        self.rx = Some(rx);
+        self.phases = default_phases();
+        self.log_lines.clear();
+        self.log_scroll = 0;
+        self.migration_done = false;
+        self.migration_success = false;
+
+        std::thread::spawn(move || {
+            let result = std::process::Command::new(&exe)
+                .args(&rest)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            let mut child = match result {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(MigMsg::Line(format!("ERROR: failed to spawn: {e}")));
+                    let _ = tx.send(MigMsg::Done(false));
+                    return;
+                }
+            };
+
+            // Merge stdout + stderr by reading stdout first (common pattern),
+            // then stderr.  We use two threads to avoid deadlock.
+            let stdout = child.stdout.take().expect("stdout piped");
+            let stderr = child.stderr.take().expect("stderr piped");
+
+            let tx2 = tx.clone();
+            let stdout_thread = std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().map_while(Result::ok) {
+                    if tx2.send(MigMsg::Line(line)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let tx3 = tx.clone();
+            let stderr_thread = std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    if tx3.send(MigMsg::Line(line)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+
+            let success = child.wait().map(|s| s.success()).unwrap_or(false);
+            let _ = tx.send(MigMsg::Done(success));
+        });
+    }
+
+    /// Parse a log line to update phase statuses.
+    fn update_phases_from_line(&mut self, line: &str) {
+        if line.contains("Phase 0") || line.contains("=== Phase 0") {
+            self.set_phase_running(0);
+        } else if line.contains("=== Phase 1: Skipped") {
+            self.set_phase_done(0);
+            self.set_phase_skipped(1);
+        } else if line.contains("=== Phase 1") {
+            self.set_phase_done(0);
+            self.set_phase_running(1);
+        } else if line.contains("[phase2]") {
+            self.set_phase_done(1);
+            self.set_phase_running(2);
+        } else if line.contains("=== Phase 3") {
+            self.set_phase_done(2);
+            self.set_phase_running(3);
+        } else if line.contains("=== Phase 4") || line.contains("[phase4]") {
+            self.set_phase_done(3);
+            self.set_phase_running(4);
+        } else if line.contains("[phase5]") {
+            self.set_phase_done(4);
+            self.set_phase_running(5);
+        } else if line.contains("=== MIGRATION COMPLETED") {
+            for p in &mut self.phases {
+                if p.status == PhaseStatus::Running {
+                    p.status = PhaseStatus::Done;
+                }
+                if p.status == PhaseStatus::Pending {
+                    p.status = PhaseStatus::Done;
+                }
+            }
+        }
+    }
+
+    fn set_phase_running(&mut self, idx: usize) {
+        for (i, p) in self.phases.iter_mut().enumerate() {
+            if i < idx && p.status == PhaseStatus::Pending {
+                p.status = PhaseStatus::Done;
+            }
+            if i < idx && p.status == PhaseStatus::Running {
+                p.status = PhaseStatus::Done;
+            }
+        }
+        if let Some(p) = self.phases.get_mut(idx)
+            && p.status == PhaseStatus::Pending
+        {
+            p.status = PhaseStatus::Running;
+        }
+    }
+
+    fn set_phase_done(&mut self, idx: usize) {
+        if let Some(p) = self.phases.get_mut(idx)
+            && (p.status == PhaseStatus::Running || p.status == PhaseStatus::Pending)
+        {
+            p.status = PhaseStatus::Done;
+        }
+    }
+
+    fn set_phase_skipped(&mut self, idx: usize) {
+        if let Some(p) = self.phases.get_mut(idx) {
+            p.status = PhaseStatus::Skipped;
+        }
+    }
+
+    fn mark_phases_failed(&mut self) {
+        for p in &mut self.phases {
+            if p.status == PhaseStatus::Running {
+                p.status = PhaseStatus::Failed;
+            }
+        }
+    }
+
+    /// Drain available messages from the migration channel without blocking.
+    fn drain_migration_channel(&mut self) {
+        let msgs: Vec<MigMsg> = {
+            if let Some(ref rx) = self.rx {
+                let mut v = Vec::new();
+                while let Ok(m) = rx.try_recv() {
+                    v.push(m);
+                }
+                v
+            } else {
+                Vec::new()
+            }
+        };
+
+        for msg in msgs {
+            match msg {
+                MigMsg::Line(line) => {
+                    self.update_phases_from_line(&line);
+                    self.log_lines.push(LogLine::classify(&line));
+                    // Auto-scroll to bottom
+                    if !self.log_lines.is_empty() {
+                        self.log_scroll = self.log_lines.len().saturating_sub(1);
+                    }
+                }
+                MigMsg::Done(success) => {
+                    self.migration_done = true;
+                    self.migration_success = success;
+                    if success {
+                        for p in &mut self.phases {
+                            if p.status == PhaseStatus::Running || p.status == PhaseStatus::Pending
+                            {
+                                p.status = PhaseStatus::Done;
+                            }
+                        }
+                    } else {
+                        self.mark_phases_failed();
+                    }
+                }
+            }
+        }
+    }
+
+    fn advance_spinner(&mut self) {
+        if self.last_tick.elapsed() >= Duration::from_millis(80) {
+            self.spinner_tick = (self.spinner_tick + 1) % SPINNER.len();
+            self.last_tick = Instant::now();
+        }
+    }
+
+    fn spinner_char(&self) -> char {
+        SPINNER[self.spinner_tick]
+    }
+
+    // ── Navigation helpers ────────────────────────────────────────────────────
+
+    fn next_screen(&mut self) {
+        self.screen = match self.screen {
+            Screen::Welcome => Screen::SelectImage,
+            Screen::SelectImage => Screen::ConfigureOptions,
+            Screen::ConfigureOptions => Screen::Review,
+            Screen::Review => {
+                self.start_migration();
+                Screen::Running
+            }
+            Screen::Running => {
+                if self.migration_success {
+                    Screen::Complete
+                } else {
+                    Screen::Failed
+                }
+            }
+            Screen::Complete | Screen::Failed => Screen::Welcome,
+        };
+    }
+
+    fn prev_screen(&mut self) {
+        self.screen = match self.screen {
+            Screen::Welcome => Screen::Welcome,
+            Screen::SelectImage => Screen::Welcome,
+            Screen::ConfigureOptions => Screen::SelectImage,
+            Screen::Review => Screen::ConfigureOptions,
+            Screen::Running | Screen::Complete | Screen::Failed => Screen::Running,
+        };
+    }
+
+    fn total_wizard_steps() -> usize {
+        4 // Welcome, Image, Options, Review
+    }
+
+    fn current_step(&self) -> usize {
+        match self.screen {
+            Screen::Welcome => 1,
+            Screen::SelectImage => 2,
+            Screen::ConfigureOptions => 3,
+            Screen::Review => 4,
+            Screen::Running | Screen::Complete | Screen::Failed => 4,
+        }
+    }
+
+    // ── Key handling per screen ───────────────────────────────────────────────
+
+    fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> bool {
+        // Quit dialog overrides everything
+        if self.show_quit_dialog {
+            return self.handle_quit_dialog_key(key);
+        }
+
+        // Ctrl-C / Ctrl-Q always opens quit confirmation
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && (key == KeyCode::Char('c') || key == KeyCode::Char('q'))
+        {
+            self.show_quit_dialog = true;
+            return false;
+        }
+
+        match &self.screen {
+            Screen::Welcome => self.handle_welcome_key(key),
+            Screen::SelectImage => self.handle_select_image_key(key),
+            Screen::ConfigureOptions => self.handle_options_key(key),
+            Screen::Review => self.handle_review_key(key),
+            Screen::Running => self.handle_running_key(key),
+            Screen::Complete | Screen::Failed => self.handle_end_key(key),
+        }
+    }
+
+    fn handle_quit_dialog_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.quit_dialog_yes = true;
+                false
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.quit_dialog_yes = false;
+                false
+            }
+            KeyCode::Enter => {
+                if self.quit_dialog_yes {
+                    true // signal exit
+                } else {
+                    self.show_quit_dialog = false;
+                    false
+                }
+            }
+            KeyCode::Esc => {
+                self.show_quit_dialog = false;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_welcome_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Enter | KeyCode::Char('n') => self.next_screen(),
+            KeyCode::Char('q') | KeyCode::Esc => self.show_quit_dialog = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_select_image_key(&mut self, key: KeyCode) -> bool {
+        if self.custom_image_editing {
+            match key {
+                KeyCode::Enter | KeyCode::Esc => {
+                    self.custom_image_editing = false;
+                }
+                KeyCode::Backspace => {
+                    self.custom_image.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.custom_image.push(c);
+                }
+                _ => {}
+            }
+            return false;
+        }
+
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let cur = self.image_list_state.selected().unwrap_or(0);
+                if cur > 0 {
+                    self.image_list_state.select(Some(cur - 1));
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let cur = self.image_list_state.selected().unwrap_or(0);
+                if cur < PRESET_IMAGES.len() - 1 {
+                    self.image_list_state.select(Some(cur + 1));
+                }
+            }
+            KeyCode::Enter => {
+                if self.is_custom_selected() && self.custom_image.is_empty() {
+                    self.custom_image_editing = true;
+                } else {
+                    self.next_screen();
+                }
+            }
+            KeyCode::Tab => {
+                if self.is_custom_selected() {
+                    self.custom_image_editing = true;
+                }
+            }
+            KeyCode::Char('e') => {
+                if self.is_custom_selected() {
+                    self.custom_image_editing = true;
+                }
+            }
+            KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
+            KeyCode::Char('q') => self.show_quit_dialog = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_options_key(&mut self, key: KeyCode) -> bool {
+        // 5 options: dry_run(0), skip_import(1), bootloader(2), skip_preflight(3), force(4)
+        const NUM_OPTIONS: usize = 5;
+        match key {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                if self.options_cursor > 0 {
+                    self.options_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                if self.options_cursor < NUM_OPTIONS - 1 {
+                    self.options_cursor += 1;
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                self.toggle_option(self.options_cursor);
+                if key == KeyCode::Enter && self.options_cursor == NUM_OPTIONS - 1 {
+                    self.next_screen();
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.options_cursor == 2 {
+                    self.opt_bootloader = Bootloader::Grub2;
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.options_cursor == 2 {
+                    self.opt_bootloader = Bootloader::SystemdBoot;
+                }
+            }
+            KeyCode::Char('n') => self.next_screen(),
+            KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
+            KeyCode::Char('q') => self.show_quit_dialog = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn toggle_option(&mut self, idx: usize) {
+        match idx {
+            0 => self.opt_dry_run = !self.opt_dry_run,
+            1 => self.opt_skip_import = !self.opt_skip_import,
+            2 => {
+                self.opt_bootloader = match self.opt_bootloader {
+                    Bootloader::SystemdBoot => Bootloader::Grub2,
+                    Bootloader::Grub2 => Bootloader::SystemdBoot,
+                };
+            }
+            3 => self.opt_skip_preflight = !self.opt_skip_preflight,
+            4 => self.opt_force = !self.opt_force,
+            _ => {}
+        }
+    }
+
+    fn handle_review_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Enter | KeyCode::Char('r') => self.next_screen(),
+            KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
+            KeyCode::Char('q') => self.show_quit_dialog = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_running_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.log_scroll > 0 {
+                    self.log_scroll -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.log_scroll = self
+                    .log_scroll
+                    .saturating_add(1)
+                    .min(self.log_lines.len().saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                self.log_scroll = self.log_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                self.log_scroll = self
+                    .log_scroll
+                    .saturating_add(10)
+                    .min(self.log_lines.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                if self.migration_done {
+                    self.next_screen();
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.show_quit_dialog = true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_end_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Char('q') | KeyCode::Enter | KeyCode::Esc => {
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────────────
+
+fn render(f: &mut ratatui::Frame, app: &mut App) {
+    let area = f.area();
+    app.term_height = area.height;
+
+    // Base background
+    f.render_widget(Block::default().style(Style::default().bg(DARK_BG)), area);
+
+    // Vertical split: title bar / content / status bar
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    render_title(f, app, chunks[0]);
+    render_screen(f, app, chunks[1]);
+    render_statusbar(f, app, chunks[2]);
+
+    if app.show_quit_dialog {
+        render_quit_dialog(f, area);
+    }
+}
+
+fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let is_dry = app.opt_dry_run && app.screen != Screen::Welcome;
+    let mode_tag = if is_dry {
+        Span::styled(
+            " ⚠ DRY-RUN ",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        )
+    } else if app.screen == Screen::Welcome {
+        Span::raw("")
+    } else {
+        Span::styled(
+            " ⚠ LIVE MIGRATION ",
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let step_str = match app.screen {
+        Screen::Welcome | Screen::SelectImage | Screen::ConfigureOptions | Screen::Review => {
+            format!(
+                "  Step {} of {}",
+                app.current_step(),
+                App::total_wizard_steps()
+            )
+        }
+        Screen::Running => "  Migration running…".to_owned(),
+        Screen::Complete => "  Migration complete".to_owned(),
+        Screen::Failed => "  Migration failed".to_owned(),
+    };
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            " 🚀 bootc-migrate-composefs",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(step_str, Style::default().fg(SUBTLE)),
+        Span::raw("  "),
+        mode_tag,
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .style(Style::default().bg(SURFACE));
+
+    let para = Paragraph::new(title_line)
+        .block(block)
+        .alignment(Alignment::Left);
+    f.render_widget(para, area);
+}
+
+fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let hints: &[(&str, &str)] = match app.screen {
+        Screen::Welcome => &[("Enter", "Next"), ("q", "Quit")],
+        Screen::SelectImage => &[
+            ("↑↓", "Move"),
+            ("Enter", "Select / Next"),
+            ("e / Tab", "Edit custom"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
+        Screen::ConfigureOptions => &[
+            ("↑↓", "Move"),
+            ("Space", "Toggle"),
+            ("←→", "Bootloader"),
+            ("n", "Next"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
+        Screen::Review => &[("Enter / r", "RUN"), ("b", "Back"), ("q", "Quit")],
+        Screen::Running => &[
+            ("↑↓ / PgUp/Dn", "Scroll log"),
+            ("Enter", "Continue (when done)"),
+            ("q", "Quit"),
+        ],
+        Screen::Complete | Screen::Failed => &[("q / Enter", "Exit")],
+    };
+
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default()));
+        }
+        spans.push(Span::styled(
+            format!("[{key}]"),
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(format!(" {desc}"), Style::default().fg(TEXT)));
+    }
+
+    let bar = Paragraph::new(Line::from(spans))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(SUBTLE))
+                .style(Style::default().bg(SURFACE)),
+        )
+        .alignment(Alignment::Left);
+    f.render_widget(bar, area);
+}
+
+fn render_screen(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    match app.screen.clone() {
+        Screen::Welcome => render_welcome(f, area),
+        Screen::SelectImage => render_select_image(f, app, area),
+        Screen::ConfigureOptions => render_configure_options(f, app, area),
+        Screen::Review => render_review(f, app, area),
+        Screen::Running => render_running(f, app, area),
+        Screen::Complete => render_complete(f, area),
+        Screen::Failed => render_failed(f, app, area),
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+// ── Welcome ───────────────────────────────────────────────────────────────────
+
+fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Welcome ",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .style(Style::default().bg(DARK_BG));
+
+    let text = Text::from(vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  bootc-migrate-composefs",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  This wizard guides you through an in-place migration from an",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "  OSTree-backed bootc system to a ComposeFS-backed system.",
+            Style::default().fg(TEXT),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Prerequisites",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  ─────────────────────────────────────────────────────",
+            Style::default().fg(SUBTLE),
+        )),
+        Line::from(Span::styled(
+            "  • This tool must be run as root (sudo).",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "  • Your system must currently be booted in OSTree mode.",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "  • At least 1.5× the OSTree repo size in free disk space.",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "  • Network connectivity to pull the target OCI image.",
+            Style::default().fg(TEXT),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  ⚠  BACKUP WARNING",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  ─────────────────────────────────────────────────────",
+            Style::default().fg(SUBTLE),
+        )),
+        Line::from(Span::styled(
+            "  This migration modifies bootloader configuration and",
+            Style::default().fg(AMBER),
+        )),
+        Line::from(Span::styled(
+            "  staged deployments on your system.  Back up important",
+            Style::default().fg(AMBER),
+        )),
+        Line::from(Span::styled(
+            "  data before proceeding.  The first run uses --dry-run",
+            Style::default().fg(AMBER),
+        )),
+        Line::from(Span::styled(
+            "  by default so no changes are actually made.",
+            Style::default().fg(AMBER),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Press [Enter] to begin  →",
+            Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+        )),
+    ]);
+
+    let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+// ── Select image ──────────────────────────────────────────────────────────────
+
+fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(5)])
+        .split(area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Step 2 · Select Target Image ",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .style(Style::default().bg(DARK_BG));
+
+    let items: Vec<ListItem> = PRESET_IMAGES
+        .iter()
+        .enumerate()
+        .map(|(i, (label, image))| {
+            let selected = app.image_list_state.selected() == Some(i);
+            let is_custom = i == PRESET_IMAGES.len() - 1;
+            let prefix = if selected { "▶ " } else { "  " };
+            let target_display = if is_custom {
+                if app.custom_image.is_empty() {
+                    "<type your image reference>".to_owned()
+                } else {
+                    app.custom_image.clone()
+                }
+            } else {
+                image.to_string()
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default().fg(if selected { TEAL } else { SUBTLE }),
+                ),
+                Span::styled(
+                    format!("{:<34}", label),
+                    Style::default()
+                        .fg(if selected { TEXT } else { SUBTLE })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled("  →  ", Style::default().fg(SUBTLE)),
+                Span::styled(
+                    target_display,
+                    Style::default().fg(if selected { TEAL } else { SUBTLE }),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().bg(SURFACE));
+
+    f.render_stateful_widget(list, chunks[0], &mut app.image_list_state);
+
+    // Custom input box
+    if app.is_custom_selected() {
+        let input_block = Block::default()
+            .title(Span::styled(
+                " Custom image reference ",
+                Style::default()
+                    .fg(if app.custom_image_editing {
+                        TEAL
+                    } else {
+                        SUBTLE
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if app.custom_image_editing {
+                TEAL
+            } else {
+                SUBTLE
+            }))
+            .style(Style::default().bg(SURFACE));
+
+        let cursor = if app.custom_image_editing { "█" } else { "" };
+        let input_text = format!("  {}{}", app.custom_image, cursor);
+        let input_para =
+            Paragraph::new(Span::styled(input_text, Style::default().fg(TEXT))).block(input_block);
+        f.render_widget(input_para, chunks[1]);
+    } else {
+        let hint = Paragraph::new(Span::styled(
+            "  Select an image with ↑↓ then press Enter.",
+            Style::default().fg(SUBTLE),
+        ))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(SUBTLE))
+                .style(Style::default().bg(SURFACE)),
+        );
+        f.render_widget(hint, chunks[1]);
+    }
+}
+
+// ── Configure options ─────────────────────────────────────────────────────────
+
+fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Step 3 · Configure Options ",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let options: Vec<(&str, String, bool)> = vec![
+        (
+            "Dry-run (recommended first run)",
+            if app.opt_dry_run {
+                "[x]".to_owned()
+            } else {
+                "[ ]".to_owned()
+            },
+            app.opt_dry_run,
+        ),
+        (
+            "Skip Phase 1 OSTree import (faster, less dedup)",
+            if app.opt_skip_import {
+                "[x]".to_owned()
+            } else {
+                "[ ]".to_owned()
+            },
+            app.opt_skip_import,
+        ),
+        (
+            "Bootloader",
+            match app.opt_bootloader {
+                Bootloader::SystemdBoot => "[systemd-boot ●] [grub2 ○]".to_owned(),
+                Bootloader::Grub2 => "[systemd-boot ○] [grub2 ●]".to_owned(),
+            },
+            false,
+        ),
+        (
+            "Skip preflight checks (⚠ not recommended)",
+            if app.opt_skip_preflight {
+                "[x]".to_owned()
+            } else {
+                "[ ]".to_owned()
+            },
+            app.opt_skip_preflight,
+        ),
+        (
+            "Force (ignore non-fatal warnings)",
+            if app.opt_force {
+                "[x]".to_owned()
+            } else {
+                "[ ]".to_owned()
+            },
+            app.opt_force,
+        ),
+    ];
+
+    let mut lines: Vec<Line> = vec![Line::raw("")];
+    for (i, (label, value, _active)) in options.iter().enumerate() {
+        let selected = i == app.options_cursor;
+        let prefix = if selected { "▶ " } else { "  " };
+        let fg = if selected { TEXT } else { SUBTLE };
+        let value_fg = if selected { TEAL } else { SUBTLE };
+        let is_warning = label.contains('⚠');
+        let label_fg = if is_warning { AMBER } else { fg };
+
+        let line = Line::from(vec![
+            Span::styled(
+                prefix,
+                Style::default().fg(if selected { TEAL } else { SUBTLE }),
+            ),
+            Span::styled(
+                format!("{:<48}", label),
+                Style::default().fg(label_fg).add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+            ),
+            Span::styled(
+                value.as_str(),
+                Style::default().fg(value_fg).add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        lines.push(line);
+        lines.push(Line::raw(""));
+    }
+
+    let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
+}
+
+// ── Review ────────────────────────────────────────────────────────────────────
+
+fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Step 4 · Review & Run ",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .style(Style::default().bg(DARK_BG));
+
+    let mode_label = if app.opt_dry_run {
+        Line::from(vec![
+            Span::raw("  Mode:  "),
+            Span::styled(
+                "⚠ DRY-RUN",
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  — no changes will actually be made",
+                Style::default().fg(SUBTLE),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("  Mode:  "),
+            Span::styled(
+                "⚠ LIVE MIGRATION",
+                Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  — system will be modified!", Style::default().fg(AMBER)),
+        ])
+    };
+
+    let cmd = app.command_display();
+    let summary_lines = build_review_summary(app);
+
+    let mut text_lines: Vec<Line> = vec![
+        Line::raw(""),
+        mode_label,
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Command to be executed:",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("  $ {}", cmd),
+            Style::default()
+                .fg(TEAL)
+                .bg(SURFACE)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  What will happen:",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    for l in summary_lines {
+        text_lines.push(l);
+    }
+
+    text_lines.push(Line::raw(""));
+    text_lines.push(Line::from(Span::styled(
+        "  ╔═══════════════════╗",
+        Style::default().fg(SUCCESS),
+    )));
+    text_lines.push(Line::from(Span::styled(
+        "  ║   Press Enter to   ║",
+        Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+    )));
+    text_lines.push(Line::from(Span::styled(
+        "  ║        RUN         ║",
+        Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+    )));
+    text_lines.push(Line::from(Span::styled(
+        "  ╚═══════════════════╝",
+        Style::default().fg(SUCCESS),
+    )));
+
+    let para = Paragraph::new(Text::from(text_lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn build_review_summary(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let img = app.selected_image();
+    lines.push(Line::from(Span::styled(
+        format!("  • Migrate to image: {img}"),
+        Style::default().fg(TEXT),
+    )));
+    if app.opt_skip_import {
+        lines.push(Line::from(Span::styled(
+            "  • Phase 1 OSTree import will be skipped",
+            Style::default().fg(AMBER),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  • Phase 1: Import OSTree objects into ComposeFS store",
+            Style::default().fg(TEXT),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  • Phase 2: Pull OCI image layers",
+        Style::default().fg(TEXT),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  • Phase 3: Seal EROFS ComposeFS image",
+        Style::default().fg(TEXT),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  • Phase 4: Stage deployment state",
+        Style::default().fg(TEXT),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  • Phase 5: Configure bootloader",
+        Style::default().fg(TEXT),
+    )));
+    let bl = match app.opt_bootloader {
+        Bootloader::SystemdBoot => "systemd-boot",
+        Bootloader::Grub2 => "grub2",
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  • Bootloader: {bl}"),
+        Style::default().fg(TEXT),
+    )));
+    if app.opt_force {
+        lines.push(Line::from(Span::styled(
+            "  • ⚠ Force mode: non-fatal warnings will be ignored",
+            Style::default().fg(AMBER),
+        )));
+    }
+    if app.opt_skip_preflight {
+        lines.push(Line::from(Span::styled(
+            "  • ⚠ Preflight checks are SKIPPED",
+            Style::default().fg(DANGER),
+        )));
+    }
+    lines
+}
+
+// ── Running ───────────────────────────────────────────────────────────────────
+
+fn render_running(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(area);
+
+    render_phase_list(f, app, chunks[0]);
+    render_log_panel(f, app, chunks[1]);
+}
+
+fn render_phase_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Phases ",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .style(Style::default().bg(DARK_BG));
+
+    let spinner_ch = app.spinner_char();
+
+    let items: Vec<ListItem> = app
+        .phases
+        .iter()
+        .map(|p| {
+            let (icon, fg) = match p.status {
+                PhaseStatus::Pending => ("○", SUBTLE),
+                PhaseStatus::Running => ("⟳", TEAL),
+                PhaseStatus::Done => ("✓", SUCCESS),
+                PhaseStatus::Failed => ("✗", DANGER),
+                PhaseStatus::Skipped => ("⊘", AMBER),
+            };
+
+            let mut spans = vec![
+                Span::styled(
+                    format!(" {} ", icon),
+                    Style::default().fg(fg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(p.label, Style::default().fg(fg)),
+            ];
+
+            if p.status == PhaseStatus::Running {
+                spans.push(Span::styled(
+                    format!(" {}", spinner_ch),
+                    Style::default().fg(TEAL),
+                ));
+            }
+
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let footer_text = if app.migration_done {
+        if app.migration_success {
+            Span::styled(
+                " ✓ Complete — press Enter ",
+                Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(
+                " ✗ Failed ",
+                Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+            )
+        }
+    } else {
+        Span::styled(" Running… ", Style::default().fg(TEAL))
+    };
+
+    let list = List::new(items).block(block);
+    f.render_widget(list, area);
+
+    // Overlay footer at bottom of the phase panel
+    let footer_area = Rect {
+        x: area.x + 1,
+        y: area.y + area.height - 2,
+        width: area.width - 2,
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(Line::from(footer_text)), footer_area);
+}
+
+fn render_log_panel(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Live Output ",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SUBTLE))
+        .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let visible_height = inner.height as usize;
+    let total = app.log_lines.len();
+
+    // Clamp scroll
+    if app.log_scroll >= total && total > 0 {
+        app.log_scroll = total - 1;
+    }
+
+    let start = if total > visible_height {
+        app.log_scroll.min(total - visible_height)
+    } else {
+        0
+    };
+    let end = (start + visible_height).min(total);
+
+    let lines: Vec<Line> = app.log_lines[start..end]
+        .iter()
+        .map(|l| {
+            let style = match l.kind {
+                LogKind::Header => Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+                LogKind::Phase => Style::default().fg(SUBTLE),
+                LogKind::Error => Style::default().fg(DANGER),
+                LogKind::Success => Style::default().fg(SUCCESS),
+                LogKind::Normal => Style::default().fg(TEXT),
+            };
+            Line::from(Span::styled(l.text.as_str(), style))
+        })
+        .collect();
+
+    let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
+
+    // Scrollbar
+    if total > visible_height {
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        let mut scrollbar_state = ScrollbarState::new(total).position(start);
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+}
+
+// ── Complete ──────────────────────────────────────────────────────────────────
+
+fn render_complete(f: &mut ratatui::Frame, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " ✓ Migration Complete! ",
+            Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SUCCESS))
+        .style(Style::default().bg(DARK_BG));
+
+    let text = Text::from(vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  ✓  Migration completed successfully!",
+            Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  What to do next:",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  1. Reboot to boot into the new ComposeFS deployment:",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "       sudo systemctl reboot",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  2. After reboot, validate ComposeFS is active:",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "       cat /proc/cmdline | grep composefs=",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  3. Check bootc status:",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "       bootc status",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  4. Commit the migration (removes OSTree artifacts):",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "       sudo bootc-migrate-composefs commit",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  ─────────────────────────────────────────────────────────",
+            Style::default().fg(SUBTLE),
+        )),
+        Line::from(Span::styled(
+            "  If the dry-run completed: re-run without --dry-run",
+            Style::default().fg(AMBER),
+        )),
+        Line::from(Span::styled(
+            "  to perform the actual migration.",
+            Style::default().fg(AMBER),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Press [q] or [Enter] to exit.",
+            Style::default().fg(SUBTLE),
+        )),
+    ]);
+
+    let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+// ── Failed ────────────────────────────────────────────────────────────────────
+
+fn render_failed(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " ✗ Migration Failed ",
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DANGER))
+        .style(Style::default().bg(DARK_BG));
+
+    // Show last 10 log lines as excerpt
+    let excerpt_start = app.log_lines.len().saturating_sub(10);
+    let mut text_lines: Vec<Line> = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  ✗  Migration did not complete successfully.",
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Last log output:",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+
+    for ll in &app.log_lines[excerpt_start..] {
+        let fg = match ll.kind {
+            LogKind::Error => DANGER,
+            LogKind::Header => TEAL,
+            _ => SUBTLE,
+        };
+        text_lines.push(Line::from(Span::styled(
+            format!("  {}", ll.text),
+            Style::default().fg(fg),
+        )));
+    }
+
+    text_lines.push(Line::raw(""));
+    text_lines.push(Line::from(Span::styled(
+        "  To undo partial migration artifacts, run:",
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+    )));
+    text_lines.push(Line::from(Span::styled(
+        "    sudo bootc-migrate-composefs undo",
+        Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+    )));
+    text_lines.push(Line::raw(""));
+    text_lines.push(Line::from(Span::styled(
+        "  Check the log at /var/log/bootc-migrate-composefs.log for details.",
+        Style::default().fg(SUBTLE),
+    )));
+    text_lines.push(Line::raw(""));
+    text_lines.push(Line::from(Span::styled(
+        "  Press [q] or [Enter] to exit.",
+        Style::default().fg(SUBTLE),
+    )));
+
+    let para = Paragraph::new(Text::from(text_lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+// ── Quit dialog ───────────────────────────────────────────────────────────────
+
+fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
+    let popup = centered_rect(40, 30, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Quit? ",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(AMBER))
+        .style(Style::default().bg(SURFACE));
+
+    let text = Text::from(vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Are you sure you want to quit?",
+            Style::default().fg(TEXT),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  If migration is running, it will",
+            Style::default().fg(AMBER),
+        )),
+        Line::from(Span::styled(
+            "  be abandoned (run 'undo' afterwards).",
+            Style::default().fg(AMBER),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(
+                "  [Yes — Quit]",
+                Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "[No — Keep going]",
+                Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  ← Yes / No →    Esc = cancel",
+            Style::default().fg(SUBTLE),
+        )),
+    ]);
+
+    let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    f.render_widget(para, popup);
+}
+
+// ─── Main event loop ──────────────────────────────────────────────────────────
+
+/// Entry point for the interactive TUI wizard.
+pub fn run_tui() -> Result<()> {
+    // Setup terminal
+    enable_raw_mode().context("enable raw mode")?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).context("create terminal")?;
+
+    let mut app = App::new();
+    let result = event_loop(&mut terminal, &mut app);
+
+    // Restore terminal
+    disable_raw_mode().context("disable raw mode")?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen).context("leave alternate screen")?;
+    terminal.show_cursor().context("show cursor")?;
+
+    result
+}
+
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    loop {
+        // Drain migration channel first
+        if app.screen == Screen::Running {
+            app.drain_migration_channel();
+            app.advance_spinner();
+
+            // Auto-advance when done
+            if app.migration_done && !app.show_quit_dialog {
+                // Let user press Enter themselves; we just stop draining
+            }
+        }
+
+        terminal.draw(|f| render(f, app))?;
+
+        // Poll with short timeout to animate spinner and drain channel
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            let should_quit = app.handle_key(key.code, key.modifiers);
+            if should_quit {
+                break;
+            }
+        }
+    }
+    Ok(())
+}

@@ -711,6 +711,13 @@ pub fn run_migration(
     println!(
         "After successful boot, run 'bootc-migrate-composefs commit' to make composefs permanent."
     );
+    if !dry_run {
+        // Best-effort: a login reminder is a courtesy, not a migration
+        // requirement — don't fail an otherwise-successful migration over it.
+        if let Err(e) = crate::motd::write_migration_reminder(verity.as_hex()) {
+            eprintln!("Warning: failed to write login reminder: {e:#}");
+        }
+    }
     Ok(())
 }
 
@@ -875,8 +882,11 @@ fn phase3_create_image(
             config_digest
         );
         return Ok((
+            // "dryrun..." isn't valid hex (r/y/u/n) — from_hex asserts hex-only,
+            // so a placeholder digest must actually be hex. deadbeef is the
+            // traditional obviously-fake stand-in.
             VerityDigest::from_hex(
-                "dryrun0000000000000000000000000000000000000000000000000000000000",
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             ),
             config_digest.to_string(),
         ));

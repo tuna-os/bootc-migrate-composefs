@@ -6,9 +6,11 @@ use std::process;
 mod composefs;
 mod mergetc;
 mod migration;
+mod motd;
 mod ostree;
 mod preflight;
 mod reflink;
+mod tui;
 mod types;
 mod xattr;
 
@@ -79,6 +81,9 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Launch the interactive TUI wizard.
+    #[command(name = "tui")]
+    Tui,
 }
 
 fn check_root_privilege() -> Result<()> {
@@ -211,6 +216,22 @@ fn main() {
     // Handle --undo subcommand
     if let Some(Command::Undo { dry_run, full }) = args.command {
         let result = run_undo(dry_run, full);
+        if let Err(e) = result {
+            eprintln!("Error: {}", e);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        return;
+    }
+
+    // Handle explicit `tui` subcommand, or fall into the wizard automatically
+    // when no target image was given on the command line. Root isn't required
+    // just to browse the wizard — the migration subprocess it spawns on Run
+    // enforces that itself.
+    if matches!(args.command, Some(Command::Tui)) || args.target_image.is_none() {
+        let result = tui::run_tui();
         if let Err(e) = result {
             eprintln!("Error: {}", e);
             exit_flushed!(1);
@@ -727,6 +748,9 @@ fn run_commit(dry_run: bool) -> Result<()> {
         let _ = std::process::Command::new("umount").arg(alt_root).status();
         let _ = std::fs::remove_dir(alt_root);
     }
+    if !dry_run && let Err(e) = motd::clear_migration_reminder() {
+        eprintln!("Warning: failed to clear login reminder: {e:#}");
+    }
     Ok(())
 }
 
@@ -1054,6 +1078,9 @@ fn run_undo(dry_run: bool, full: bool) -> Result<()> {
         }
         println!("The system is now in its pre-migration OSTree state.");
         println!("Run 'bootc-migrate-composefs --target-image <image>' to try again.");
+    }
+    if !dry_run && let Err(e) = motd::clear_migration_reminder() {
+        eprintln!("Warning: failed to clear login reminder: {e:#}");
     }
     Ok(())
 }
