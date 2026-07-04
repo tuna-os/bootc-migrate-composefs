@@ -28,6 +28,18 @@ tar xzf bmc.tar.gz
 sudo install -m755 bootc-migrate-composefs /usr/local/bin/
 ```
 
+<details><summary>…or pull the container image</summary>
+
+A minimal image ships the same binary, useful when GitHub Releases is rate-limited/blocked, or to `COPY --from=` it into another Containerfile:
+
+```bash
+podman create --name bmc-extract ghcr.io/tuna-os/bootc-migrate-composefs:latest
+podman cp bmc-extract:/usr/local/bin/bootc-migrate-composefs .
+podman rm bmc-extract
+sudo install -m755 bootc-migrate-composefs /usr/local/bin/
+```
+</details>
+
 <details><summary>…or build from source (needs Rust)</summary>
 
 ```bash
@@ -83,6 +95,23 @@ partition**, the tool handles those automatically — see
 > `bootc status` / `upgrade --check` all green). Prebuilt binaries are on the
 > [Releases](../../releases) page. Don't point this at a machine you can't
 > reinstall, but the core path is stable.
+
+## Interactive wizard (TUI)
+
+Prefer a guided walkthrough over flags? Run the tool with no `--target-image`
+(or `tui` explicitly) to launch a terminal wizard that walks through target
+image selection, options, a plain-English review of what's about to happen,
+and a live phase-by-phase progress view with scrollable logs:
+
+```bash
+sudo bootc-migrate-composefs tui
+```
+
+![bootc-migrate-composefs TUI wizard](docs/images/tui-review.png)
+
+The wizard defaults to `--dry-run` and only builds the equivalent CLI
+invocation shown on the Review screen — it doesn't need root just to browse;
+root is required once you press Enter to actually run a migration.
 
 ## Architecture
 
