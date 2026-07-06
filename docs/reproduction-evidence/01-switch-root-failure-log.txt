@@ -1,0 +1,50 @@
+Switch-Root Failure Reproduction Log
+======================================
+Date: 2026-07-05
+VM: repro-bluefin (Bluefin stable, XFS, 80Gi disk, KubeVirt)
+Migration tool: bootc-migrate-composefs vunknown (unfixed — WITHOUT --add bootc dracut flag)
+Target image: ghcr.io/projectbluefin/dakota:stable
+Kernel cmdline: composefs=11d1770438335d9d90d34b64a2aad3adbcebb1ab179e99802aa92f3fc8858b247c2b5cc13557e6c0fcb1c015e965a0aed849afd5667d3d202eba3e4809c23c3d
+
+Boot Sequence (extracted from KubeVirt serial console):
+----------------------------------------------------------------------
+[  OK  ] Mounted sysroot.mount - /sysroot.                          (XFS root)
+[  OK  ] Mounted sysroot-composefs.mount - ComposeFS Loopback Mount. (ext4 loopback)
+[  OK  ] Reached target initrd-root-fs.target.
+[  OK  ] Reached target initrd-fs.target.
+[  OK  ] Reached target initrd-switch-root.target.
+         Starting initrd-switch-root.service - Switch Root...
+[FAILED] Failed to start initrd-switch-root.service - Switch Root.
+         See 'systemctl status initrd-switch-root.service' for details.
+Entering emergency mode.
+
+Emergency shell diagnostics (via virtctl console):
+----------------------------------------------------------------------
+# journalctl | grep -i switch-root
+Jul 05 17:25:08 bluefin systemctl[436]: Failed to switch root:
+  Specified switch root path '/sysroot' does not seem to be an OS tree.
+  os-release file is missing.
+
+# journalctl -u bootc-root-setup.service --no-pager
+-- No entries --
+(bootc-root-setup.service never executed in the initramfs)
+
+# ls /sysroot/
+boot  composefs  composefs-loopback.ext4  ostree  state
+(/sysroot is the raw XFS partition — composefs EROFS overlay was NOT assembled)
+
+# ls /esp/loader/entries/
+bootc_bluefin_dakota-20260629-1.conf
+(only the composefs entry — no OSTree fallback on ESP for systemd-boot path)
+
+Root Cause
+----------------------------------------------------------------------
+The initrd was rebuilt by dracut --rebuild but WITHOUT --add bootc.
+The bootc dracut module (51bootc) has check() { return 255; }, meaning
+dracut NEVER includes it automatically. Without the module:
+  - bootc-root-setup.service is absent from the initramfs
+  - The composefs EROFS overlay is never assembled
+  - /sysroot remains the raw XFS partition (no /etc/os-release)
+  - systemctl switch-root /sysroot fails with "os-release file is missing"
+
+This was confirmed via lsinitrd on the ESP initrd — zero bootc-related files.

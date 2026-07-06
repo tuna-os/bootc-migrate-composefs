@@ -277,6 +277,7 @@ fn main() {
             }
             preflight::PreflightReport {
                 is_bootc_ostree: true,
+                pending_transaction: preflight::PendingTransactionStatus::Clean,
                 is_uefi: true,
                 nvram_writable: true,
                 esp_path: Some("/boot/efi".to_string()),
@@ -301,6 +302,13 @@ fn main() {
         "  - Booted OSTree backend: {}",
         if report.is_bootc_ostree { "Yes" } else { "No" }
     );
+    match report.pending_transaction {
+        preflight::PendingTransactionStatus::Clean => {}
+        ref other => println!(
+            "  ⚠ Pending OSTree transaction: {} — aborting (run `ostree admin undeploy` or complete the update first)",
+            other
+        ),
+    }
     println!(
         "  - UEFI Boot Mode:        {}",
         if report.is_uefi {
@@ -445,6 +453,24 @@ fn main() {
     if !report.is_bootc_ostree && !args.force {
         eprintln!(
             "Error: System is not booted into an OSTree deployment. Cannot perform migration."
+        );
+        exit_flushed!(1);
+    }
+
+    // Block on pending transactions — they cause incomplete composefs images
+    // and switch-root-os-release-errors on next boot.
+    if report.pending_transaction != preflight::PendingTransactionStatus::Clean && !args.force {
+        eprintln!(
+            "Error: Pending OSTree transaction detected: {}.\n\
+             The OSTree repo has uncommitted state from a previous update. The migration\n\
+             would produce an incomplete composefs image that cannot boot.\n\
+             \n\
+             To resolve:\n\
+               - If you ran `bootc upgrade` or `rpm-ostree upgrade`, complete it first.\n\
+               - If the update was interrupted, run `ostree admin undeploy <index>`\n\
+                 to remove the pending deployment.\n\
+               - Or run `bootc upgrade` to finish/finalize the pending transaction.\n",
+            report.pending_transaction
         );
         exit_flushed!(1);
     }

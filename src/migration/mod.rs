@@ -539,12 +539,20 @@ fn rebuild_initrd_with_lvm_if_needed(
 
         // /lib/modules/<kver> now resolves to the target modules (valid
         // modules.dep.bin); `--rebuild` preserves composefs and adds xfs.
+        //
+        // CRITICAL: the bootc dracut module has check() { return 255; } which
+        // means `dracut --rebuild` will NOT include it unless we explicitly ask.
+        // Without bootc-root-setup.service in the initrd, the composefs EROFS
+        // image is never assembled and systemd tries to switch-root to the raw
+        // /sysroot partition — which fails with "os-release file is missing".
         let mut cmd = Command::new(dracut_path);
         cmd.arg("--rebuild")
             .arg(initrd_dst)
             .arg("--kver")
             .arg(kver)
-            .arg("--force");
+            .arg("--force")
+            .arg("--add")
+            .arg("bootc");
         if needs_dm {
             cmd.arg("--add").arg("lvm dm crypt");
         }
@@ -783,6 +791,28 @@ fn phase1_import_objects(report: &PreflightReport, dry_run: bool) -> Result<()> 
         }
     }
     println!("Imported {} objects ({} reflinked).", count, reflink_count);
+
+    // Post-Phase-1 completeness verification: count objects in the composefs
+    // store and compare with the expected total. A significant shortfall means
+    // the source ostree repo had incomplete state (e.g. a pending transaction).
+    let composefs_objects_dir = Path::new("/sysroot/composefs/objects");
+    if composefs_objects_dir.exists() {
+        let stored = crate::preflight::count_composefs_files(composefs_objects_dir);
+        if stored < total_objects.saturating_sub(100) {
+            // More than 100 objects short — likely a pending-transaction issue.
+            eprintln!(
+                "[phase1] WARNING: composefs object store has {} objects but {} were expected.\
+                 The source ostree repo may have had incomplete state (e.g. an interrupted update).\
+                 The resulting composefs image may not boot correctly.",
+                stored, total_objects
+            );
+        } else {
+            println!(
+                "[phase1] composefs object completeness OK: {} stored, {} expected.",
+                stored, total_objects
+            );
+        }
+    }
     Ok(())
 }
 

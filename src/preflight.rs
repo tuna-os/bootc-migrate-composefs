@@ -27,8 +27,116 @@ pub struct BootedStatus {
     pub composefs: Option<serde_json::Value>,
 }
 
+/// Result of checking for a pending OSTree transaction.
+///
+/// A pending transaction means an update (rpm-ostree / bootc upgrade) was
+/// started but not completed, or a staged deployment is waiting for the next
+/// boot. Running the migration in this state can produce an incomplete
+/// composefs image — objects referenced by the EROFS may be missing or stale,
+/// causing switch-root failure on the next boot.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingTransactionStatus {
+    /// No pending transaction detected — migration is safe to proceed.
+    Clean,
+    /// A staged deployment exists (prepared by bootc upgrade for next boot).
+    StagedDeployment,
+    /// A pending deployment exists (created by rpm-ostree but not yet booted).
+    PendingDeployment,
+    /// Stale transaction temp files found in the OSTree repo.
+    StaleTransactionFiles,
+}
+
+impl std::fmt::Display for PendingTransactionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PendingTransactionStatus::Clean => write!(f, "no pending transaction"),
+            PendingTransactionStatus::StagedDeployment => {
+                write!(f, "staged deployment (next boot will apply)")
+            }
+            PendingTransactionStatus::PendingDeployment => {
+                write!(f, "pending deployment (update in progress)")
+            }
+            PendingTransactionStatus::StaleTransactionFiles => {
+                write!(f, "stale transaction temp files in OSTree repo")
+            }
+        }
+    }
+}
+
+/// Parse the output of `ostree admin status` to detect pending or staged
+/// deployments. Pure function — no I/O, trivially testable.
+///
+/// Looks for lines containing "(staged)" (a deployment prepared for next boot)
+/// or "(pending)" (an update in progress that hasn't been booted).
+pub fn parse_ostree_status_for_pending(status_output: &str) -> PendingTransactionStatus {
+    for line in status_output.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("(staged)") {
+            return PendingTransactionStatus::StagedDeployment;
+        }
+        if trimmed.contains("(pending)") {
+            return PendingTransactionStatus::PendingDeployment;
+        }
+    }
+    PendingTransactionStatus::Clean
+}
+
+/// Count the number of files in a composefs object store directory (two-level
+/// hex prefix layout: `objects/<xx>/<rest>`). Pure function — caller provides
+/// the directory path.
+pub fn count_composefs_files(objects_dir: &Path) -> usize {
+    let mut total = 0usize;
+    if let Ok(rd) = fs::read_dir(objects_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && let Ok(sub) = fs::read_dir(&path)
+            {
+                total += sub.flatten().filter(|e| e.path().is_file()).count();
+            }
+        }
+    }
+    total
+}
+
+/// Detect a pending OSTree transaction by checking:
+/// 1. `/run/ostree/staged-deployment` — staged deployment file
+/// 2. `ostree admin status` output for "(pending)" or "(staged)" markers
+/// 3. Stale temp files in `/sysroot/ostree/repo/tmp/`
+pub fn check_pending_ostree_transaction() -> PendingTransactionStatus {
+    // 1. Check for staged deployment file first (most definitive).
+    if Path::new("/run/ostree/staged-deployment").exists() {
+        return PendingTransactionStatus::StagedDeployment;
+    }
+
+    // 2. Parse ostree admin status for (pending) or (staged).
+    if let Ok(output) = Command::new("ostree").args(["admin", "status"]).output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed = parse_ostree_status_for_pending(&stdout);
+        if parsed != PendingTransactionStatus::Clean {
+            return parsed;
+        }
+    }
+
+    // 3. Check for stale repo temp files.
+    let repo_tmp = Path::new("/sysroot/ostree/repo/tmp");
+    if repo_tmp.exists()
+        && let Ok(rd) = fs::read_dir(repo_tmp)
+    {
+        let count = rd.filter_map(|e| e.ok()).count();
+        if count > 0 {
+            return PendingTransactionStatus::StaleTransactionFiles;
+        }
+    }
+
+    PendingTransactionStatus::Clean
+}
+
 pub struct PreflightReport {
     pub is_bootc_ostree: bool,
+    pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
     pub nvram_writable: bool,
     pub esp_path: Option<String>,
@@ -238,6 +346,7 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
 
     // 7. Free-space data
     let ostree_repo_size_bytes = get_ostree_repo_size();
+    let pending_transaction = check_pending_ostree_transaction();
     let composefs_free_bytes = {
         let base = if Path::new("/sysroot/composefs").exists() {
             "/sysroot/composefs"
@@ -251,6 +360,7 @@ pub fn run_preflight_checks() -> Result<PreflightReport> {
 
     Ok(PreflightReport {
         is_bootc_ostree,
+        pending_transaction,
         is_uefi,
         nvram_writable,
         esp_path,
@@ -285,6 +395,7 @@ mod tests {
     fn preflight_report_has_all_fields() {
         let report = PreflightReport {
             is_bootc_ostree: true,
+            pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
             nvram_writable: true,
             esp_path: Some("/boot/efi".into()),
@@ -303,5 +414,164 @@ mod tests {
         };
         assert!(report.esp_ready_for_systemd_boot);
         assert!(report.grub_tools_available);
+    }
+
+    // ---- Pending-transaction detection tests ----
+
+    #[test]
+    fn parse_clean_status() {
+        let out = concat!(
+            "* default abcdef1234567890.0\n",
+            "    origin: <unknown origin type>\n",
+        );
+        assert_eq!(
+            parse_ostree_status_for_pending(out),
+            PendingTransactionStatus::Clean
+        );
+    }
+
+    #[test]
+    fn parse_staged_deployment() {
+        let out = concat!(
+            "* default abcdef1234567890.0\n",
+            "  default abcdef1234567891.0 (staged)\n",
+        );
+        assert_eq!(
+            parse_ostree_status_for_pending(out),
+            PendingTransactionStatus::StagedDeployment
+        );
+    }
+
+    #[test]
+    fn parse_pending_deployment() {
+        let out = concat!(
+            "* default abcdef1234567890.0\n",
+            "  default abcdef1234567892.0 (pending)\n",
+            "  default abcdef1234567891.0 (rollback)\n",
+        );
+        assert_eq!(
+            parse_ostree_status_for_pending(out),
+            PendingTransactionStatus::PendingDeployment
+        );
+    }
+
+    #[test]
+    fn parse_staged_takes_priority() {
+        // Both (staged) and (pending) present; (staged) comes first.
+        let out = concat!(
+            "* default abcdef1234567890.0\n",
+            "  default abcdef1234567892.0 (staged)\n",
+            "  default abcdef1234567893.0 (pending)\n",
+        );
+        assert_eq!(
+            parse_ostree_status_for_pending(out),
+            PendingTransactionStatus::StagedDeployment
+        );
+    }
+
+    #[test]
+    fn parse_empty_output() {
+        assert_eq!(
+            parse_ostree_status_for_pending(""),
+            PendingTransactionStatus::Clean
+        );
+    }
+
+    #[test]
+    fn parse_no_deployments() {
+        assert_eq!(
+            parse_ostree_status_for_pending("No deployments.\n"),
+            PendingTransactionStatus::Clean
+        );
+    }
+
+    #[test]
+    fn parse_rollback_only() {
+        let out = concat!(
+            "* default abcdef1234567890.0\n",
+            "  default abcdef1234567891.0 (rollback)\n",
+        );
+        assert_eq!(
+            parse_ostree_status_for_pending(out),
+            PendingTransactionStatus::Clean
+        );
+    }
+
+    #[test]
+    fn pending_status_display_clean() {
+        assert_eq!(
+            format!("{}", PendingTransactionStatus::Clean),
+            "no pending transaction"
+        );
+    }
+
+    #[test]
+    fn pending_status_display_staged() {
+        assert_eq!(
+            format!("{}", PendingTransactionStatus::StagedDeployment),
+            "staged deployment (next boot will apply)"
+        );
+    }
+
+    #[test]
+    fn pending_status_display_pending() {
+        assert_eq!(
+            format!("{}", PendingTransactionStatus::PendingDeployment),
+            "pending deployment (update in progress)"
+        );
+    }
+
+    #[test]
+    fn pending_status_display_stale() {
+        assert_eq!(
+            format!("{}", PendingTransactionStatus::StaleTransactionFiles),
+            "stale transaction temp files in OSTree repo"
+        );
+    }
+
+    // ---- composefs object counting tests ----
+
+    #[test]
+    fn count_composefs_empty_dir() {
+        let dir = tempdir().unwrap();
+        assert_eq!(count_composefs_files(dir.path()), 0);
+    }
+
+    #[test]
+    fn count_composefs_no_objects() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("ab")).unwrap();
+        fs::create_dir_all(dir.path().join("cd")).unwrap();
+        // Two hex prefix dirs but no files
+        assert_eq!(count_composefs_files(dir.path()), 0);
+    }
+
+    #[test]
+    fn count_composefs_with_objects() {
+        let dir = tempdir().unwrap();
+        let d1 = dir.path().join("ab");
+        let d2 = dir.path().join("cd");
+        fs::create_dir_all(&d1).unwrap();
+        fs::create_dir_all(&d2).unwrap();
+        fs::write(d1.join("cdef1234567890"), b"obj1").unwrap();
+        fs::write(d1.join("cdef1234567891"), b"obj2").unwrap();
+        fs::write(d2.join("ef1234567890ab"), b"obj3").unwrap();
+        assert_eq!(count_composefs_files(dir.path()), 3);
+    }
+
+    #[test]
+    fn count_composefs_ignores_root_files() {
+        // Files at the root of the objects dir (e.g. meta.json) are not counted;
+        // only files inside subdirectories (the two-level prefix layout) are.
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("ab")).unwrap();
+        fs::write(dir.path().join("meta.json"), b"meta").unwrap();
+        fs::write(dir.path().join("ab/cdef1234567890"), b"obj1").unwrap();
+        assert_eq!(count_composefs_files(dir.path()), 1);
+    }
+
+    #[test]
+    fn count_composefs_nonexistent_dir() {
+        assert_eq!(count_composefs_files(Path::new("/nonexistent/path")), 0);
     }
 }

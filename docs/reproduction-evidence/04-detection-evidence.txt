@@ -1,0 +1,25 @@
+Pending-Transaction Detection Verification
+=============================================
+Date: 2026-07-05
+VM: repro-fixed (composefs backend after successful migration)
+
+1. ostree admin status: not available on composefs backend (expected)
+2. /run/ostree/staged-deployment: absent (no pending staged deployment)
+3. /sysroot/ostree/repo/tmp/: only 'cache' subdirectory exists (no stale tx files)
+   → Detection would return Clean
+
+Unit tests for parse_ostree_status_for_pending:
+  - parse_clean_status: ✓ single deployment, no pending/staged
+  - parse_staged_deployment: ✓ "(staged)" detected
+  - parse_pending_deployment: ✓ "(pending)" detected
+  - parse_staged_takes_priority: ✓ "(staged)" before "(pending)"
+  - parse_empty_output: ✓ empty string = Clean
+  - parse_no_deployments: ✓ "No deployments." = Clean
+  - parse_rollback_only: ✓ "(rollback)" = Clean
+
+Unit tests for count_composefs_files:
+  - count_composefs_empty_dir: ✓ returns 0
+  - count_composefs_no_objects: ✓ empty prefix dirs = 0
+  - count_composefs_ignores_root_files: ✓ meta.json not counted
+  - count_composefs_nonexistent_dir: ✓ returns 0 on missing path
+  - count_composefs_with_objects: ✓ counts 3 objects correctly

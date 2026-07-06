@@ -1,0 +1,49 @@
+Fix Verification Log
+=====================
+Date: 2026-07-05
+VM: repro-fixed (Bluefin stable, XFS, 80Gi disk, KubeVirt)
+Migration tool: bootc-migrate-composefs (FIXED — WITH --add bootc dracut flag)
+Target image: ghcr.io/projectbluefin/dakota:stable
+
+Fix #1: --add bootc in dracut rebuild
+----------------------------------------------------------------------
+Source: src/migration/mod.rs lines 550-552
+  .arg("--add")
+  .arg("bootc");
+
+Initrd rebuild confirmation from lsinitrd output:
+  Arguments: --kver '7.0.11' --force --add 'bootc'
+             --add-drivers 'xfs ext4 loop'
+             --include '/var/tmp/bootc-cfsloop-...' '/'
+  bootc files in initrd: 471 files including:
+    - etc/systemd/system/bootc-root-setup.service.d/RequiresLoopback.conf
+    - etc/systemd/system/initrd-root-fs.target.wants/bootc-root-setup.service
+    - usr/lib/bootc/initramfs-setup
+    - usr/lib/systemd/system/bootc-root-setup.service
+
+Composefs boot result:
+  # bootc status --json
+  Image: {'image': 'ghcr.io/projectbluefin/dakota:stable', ...}
+  ComposeFS: yes
+  OSTree: no
+
+Fix #2: Pending-transaction detection
+----------------------------------------------------------------------
+Source: src/preflight.rs
+  check_pending_ostree_transaction() checks:
+    1. /run/ostree/staged-deployment file existence
+    2. ostree admin status output for (staged)/(pending) markers
+    3. Stale files in /sysroot/ostree/repo/tmp/
+
+When detected (and --force is NOT passed), main.rs aborts with:
+  "Error: Pending OSTree transaction detected: ...
+   The OSTree repo has uncommitted state from a previous update.
+   The migration would produce an incomplete composefs image
+   that cannot boot."
+
+Fix #3: Composefs object completeness verification
+----------------------------------------------------------------------
+Source: src/migration/mod.rs
+  count_composefs_objects() counts files in /sysroot/composefs/objects/
+  After Phase 1 import, compares stored count vs expected.
+  Warns if >100 objects short (potential pending-transaction issue).

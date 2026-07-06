@@ -1,0 +1,29 @@
+Live VM Verification (repro-fixed)
+====================================
+Date: 2026-07-05
+VM: repro-fixed (KubeVirt, 80Gi, XFS)
+State: Running on composefs backend after migration
+
+# bootc status --json
+Backend: composefs ✓
+Image: ghcr.io/projectbluefin/dakota:stable
+
+# cat /proc/cmdline
+Kernel cmdline includes: composefs=11d1770438335d9d90d34b64a2aad3adbcebb1ab179e99802aa92f3fc8858b247c2b5cc13557e6c0fcb1c015e965a0aed849afd5667d3d202eba3e4809c23c3d
+
+# /sysroot/state/deploy/
+Contains: 11d1770438335d9d90d34b64a2aad3adbcebb1ab179e99802aa92f3fc8858b247c2b5cc13557e6c0fcb1c015e965a0aed849afd5667d3d202eba3e4809c23c3d
+(composefs deployment active)
+
+# Initrd was rebuilt with --add bootc (confirmed via lsinitrd):
+Arguments: --kver '7.0.11' --force --add 'bootc' --add-drivers 'xfs ext4 loop'
+bootc-related files in initrd: 471
+Key services present:
+  - bootc-root-setup.service
+  - initramfs-setup binary
+  - RequiresLoopback.conf dependency
+
+Conclusion: The --add bootc fix enables bootc-root-setup.service to run
+in the initramfs, which assembles the composefs EROFS overlay. Without it,
+switch-root fails with "os-release file is missing" because /sysroot is a
+raw XFS partition.
