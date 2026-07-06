@@ -12,13 +12,12 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    buffer::Buffer,
-    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Clear, LineGauge, List, ListItem, ListState, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Widget, Wrap,
+        Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 use std::{
@@ -42,116 +41,6 @@ const TEXT: Color = Color::Rgb(210, 215, 225);
 
 // ─── Spinner ──────────────────────────────────────────────────────────────────
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-// ─── Button widget (inspired by ratatui/examples/custom_widget) ───────────────
-
-/// A themed button with 3D highlight/shadow effects.
-#[derive(Debug, Clone)]
-struct Button<'a> {
-    label: Line<'a>,
-    theme: ButtonTheme,
-    state: ButtonState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-enum ButtonState {
-    Normal,
-    Selected,
-    Active,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ButtonTheme {
-    text: Color,
-    background: Color,
-    highlight: Color,
-    shadow: Color,
-}
-
-const BTN_PRIMARY: ButtonTheme = ButtonTheme {
-    text: Color::Rgb(18, 20, 24),
-    background: Color::Rgb(0, 160, 160),
-    highlight: Color::Rgb(0, 200, 200),
-    shadow: Color::Rgb(0, 100, 100),
-};
-
-const BTN_DANGER: ButtonTheme = ButtonTheme {
-    text: Color::Rgb(255, 240, 240),
-    background: Color::Rgb(180, 40, 40),
-    highlight: Color::Rgb(220, 60, 60),
-    shadow: Color::Rgb(120, 20, 20),
-};
-
-const BTN_MUTED: ButtonTheme = ButtonTheme {
-    text: Color::Rgb(210, 215, 225),
-    background: Color::Rgb(50, 55, 65),
-    highlight: Color::Rgb(70, 78, 92),
-    shadow: Color::Rgb(30, 34, 42),
-};
-
-impl<'a> Button<'a> {
-    fn new<T: Into<Line<'a>>>(label: T) -> Self {
-        Self {
-            label: label.into(),
-            theme: BTN_PRIMARY,
-            state: ButtonState::Normal,
-        }
-    }
-
-    fn theme(mut self, theme: ButtonTheme) -> Self {
-        self.theme = theme;
-        self
-    }
-
-    fn state(mut self, state: ButtonState) -> Self {
-        self.state = state;
-        self
-    }
-
-    fn colors(&self) -> (Color, Color, Color, Color) {
-        let t = self.theme;
-        match self.state {
-            ButtonState::Normal => (t.background, t.text, t.shadow, t.highlight),
-            ButtonState::Selected => (t.highlight, t.text, t.shadow, t.highlight),
-            ButtonState::Active => (t.background, t.text, t.highlight, t.shadow),
-        }
-    }
-}
-
-impl Widget for Button<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let (background, text, shadow, highlight) = self.colors();
-        buf.set_style(area, Style::new().bg(background).fg(text));
-
-        // Top highlight edge
-        if area.height > 2 {
-            buf.set_string(
-                area.x,
-                area.y,
-                "▔".repeat(area.width as usize),
-                Style::new().fg(highlight).bg(background),
-            );
-        }
-        // Bottom shadow edge
-        if area.height > 1 {
-            buf.set_string(
-                area.x,
-                area.y + area.height - 1,
-                "▁".repeat(area.width as usize),
-                Style::new().fg(shadow).bg(background),
-            );
-        }
-        // Centered label
-        let label_width = self.label.width() as u16;
-        buf.set_line(
-            area.x + area.width.saturating_sub(label_width) / 2,
-            area.y + area.height.saturating_sub(1) / 2,
-            &self.label,
-            area.width,
-        );
-    }
-}
 
 // ─── Preset images ────────────────────────────────────────────────────────────
 /// (display_label, target_image, source_hint).
@@ -1415,7 +1304,7 @@ fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
     let para = Paragraph::new(text).wrap(Wrap { trim: false });
     f.render_widget(para, chunks[3]);
 
-    // ── Start button ──
+    // ── Start button (gitui style: inverted color block) ──
     let btn_area = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -1423,14 +1312,15 @@ fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
             Constraint::Length(24),
             Constraint::Min(0),
         ])
-        .flex(Flex::Center)
         .split(chunks[4]);
-    let btn = Button::new(Line::from(Span::styled(
-        "▶  Begin Migration",
-        Style::default().add_modifier(Modifier::BOLD),
+    let btn = Paragraph::new(Line::from(Span::styled(
+        "  ▶ Begin Migration   ",
+        Style::default()
+            .fg(DARK_BG)
+            .bg(TEAL)
+            .add_modifier(Modifier::BOLD),
     )))
-    .theme(BTN_PRIMARY)
-    .state(ButtonState::Selected);
+    .alignment(Alignment::Center);
     f.render_widget(btn, btn_area[1]);
 }
 
@@ -1623,11 +1513,7 @@ fn render_disk_gauge(
 
     let lines = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Length(2)])
         .split(area);
 
     // Label line
@@ -1641,21 +1527,20 @@ fn render_disk_gauge(
     ]));
     f.render_widget(label_line, lines[0]);
 
-    // Gauge line — indent by 2
+    // Gauge
     let gauge_area = Rect {
         x: area.x + 2,
         y: lines[1].y,
         width: area.width.saturating_sub(4),
         height: 1,
     };
-    let gauge = LineGauge::default()
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(color).bg(SURFACE))
         .ratio(ratio)
-        .filled_style(Style::default().fg(color))
-        .unfilled_style(Style::default().fg(SURFACE))
-        .label(Line::from(Span::styled(
-            format!(" {:>3}%", (ratio * 100.0) as u32),
-            Style::default().fg(color),
-        )));
+        .label(Span::styled(
+            format!("{:>3}%", (ratio * 100.0) as u32),
+            Style::default().fg(DARK_BG).add_modifier(Modifier::BOLD),
+        ));
     f.render_widget(gauge, gauge_area);
 }
 
@@ -1679,11 +1564,7 @@ fn render_disk_gauge_with_threshold(
 
     let lines = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Length(2)])
         .split(area);
 
     // Label line with icon
@@ -1700,21 +1581,20 @@ fn render_disk_gauge_with_threshold(
     ]));
     f.render_widget(label_line, lines[0]);
 
-    // Gauge line
+    // Gauge
     let gauge_area = Rect {
         x: area.x + 4,
         y: lines[1].y,
         width: area.width.saturating_sub(6),
         height: 1,
     };
-    let gauge = LineGauge::default()
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(color).bg(SURFACE))
         .ratio(ratio)
-        .filled_style(Style::default().fg(color))
-        .unfilled_style(Style::default().fg(SURFACE))
-        .label(Line::from(Span::styled(
-            format!(" {:>3}%", (ratio * 100.0) as u32),
-            Style::default().fg(color),
-        )));
+        .label(Span::styled(
+            format!("{:>3}%", (ratio * 100.0) as u32),
+            Style::default().fg(DARK_BG).add_modifier(Modifier::BOLD),
+        ));
     f.render_widget(gauge, gauge_area);
 }
 
@@ -1723,8 +1603,7 @@ fn render_projected_usage(f: &mut ratatui::Frame, state: &PreflightTuiState, are
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // title
-            Constraint::Length(1), // gauge
-            Constraint::Length(1), // legend
+            Constraint::Length(2), // gauge
             Constraint::Length(1), // padding
         ])
         .split(area);
@@ -1759,31 +1638,19 @@ fn render_projected_usage(f: &mut ratatui::Frame, state: &PreflightTuiState, are
         width: area.width.saturating_sub(6),
         height: 1,
     };
-    let gauge = LineGauge::default()
+    let label_text = format!(
+        "/composefs  {:.1} GB used → {:.1} GB free",
+        state.projected_composefs_used as f64 / 1_073_741_824.0,
+        state.projected_composefs_free as f64 / 1_073_741_824.0,
+    );
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(proj_color).bg(SURFACE))
         .ratio(ratio)
-        .filled_style(Style::default().fg(proj_color))
-        .unfilled_style(Style::default().fg(SURFACE))
-        .label(Line::from(vec![
-            Span::styled(" /composefs  ", Style::default().fg(TEXT)),
-            Span::styled(
-                format!(
-                    "{:.1} GB used → {:.1} GB free",
-                    state.projected_composefs_used as f64 / 1_073_741_824.0,
-                    state.projected_composefs_free as f64 / 1_073_741_824.0,
-                ),
-                Style::default().fg(proj_color),
-            ),
-        ]));
+        .label(Span::styled(
+            label_text,
+            Style::default().fg(DARK_BG).add_modifier(Modifier::BOLD),
+        ));
     f.render_widget(gauge, gauge_area);
-
-    // Legend
-    let legend = Paragraph::new(Line::from(vec![
-        Span::styled("    ━", Style::default().fg(proj_color)),
-        Span::styled(" projected store  ", Style::default().fg(SUBTLE)),
-        Span::styled("─", Style::default().fg(SURFACE)),
-        Span::styled(" remaining free", Style::default().fg(SUBTLE)),
-    ]));
-    f.render_widget(legend, lines[2]);
 }
 
 fn render_readiness_checklist(f: &mut ratatui::Frame, state: &PreflightTuiState, area: Rect) {
@@ -2139,33 +2006,24 @@ fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(20),
+            Constraint::Length(22),
             Constraint::Min(0),
         ])
-        .flex(Flex::Center)
         .split(chunks[1]);
 
-    let btn_theme = if app.opt_dry_run {
-        BTN_PRIMARY
+    let (btn_label, btn_bg) = if app.opt_dry_run {
+        ("  ▶ Run Dry-Run     ", TEAL)
     } else {
-        ButtonTheme {
-            text: Color::Rgb(255, 255, 255),
-            background: Color::Rgb(40, 160, 60),
-            highlight: Color::Rgb(60, 200, 80),
-            shadow: Color::Rgb(20, 100, 30),
-        }
+        ("  ⚡ Run Migration   ", Color::Rgb(40, 180, 70))
     };
-    let btn_label = if app.opt_dry_run {
-        "▶  Run Dry-Run"
-    } else {
-        "⚡ Run Migration"
-    };
-    let btn = Button::new(Line::from(Span::styled(
+    let btn = Paragraph::new(Line::from(Span::styled(
         btn_label,
-        Style::default().add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(DARK_BG)
+            .bg(btn_bg)
+            .add_modifier(Modifier::BOLD),
     )))
-    .theme(btn_theme)
-    .state(ButtonState::Selected);
+    .alignment(Alignment::Center);
     f.render_widget(btn, btn_layout[1]);
 }
 
@@ -2569,20 +2427,24 @@ fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
         ])
         .split(chunks[3]);
 
-    let quit_btn = Button::new(Line::from(Span::styled(
-        "Quit",
-        Style::default().add_modifier(Modifier::BOLD),
+    let quit_btn = Paragraph::new(Line::from(Span::styled(
+        "    Quit    ",
+        Style::default()
+            .fg(Color::Rgb(255, 240, 240))
+            .bg(DANGER)
+            .add_modifier(Modifier::BOLD),
     )))
-    .theme(BTN_DANGER)
-    .state(ButtonState::Selected);
+    .alignment(Alignment::Center);
     f.render_widget(quit_btn, btn_row[1]);
 
-    let stay_btn = Button::new(Line::from(Span::styled(
-        "Keep going",
-        Style::default().add_modifier(Modifier::BOLD),
+    let stay_btn = Paragraph::new(Line::from(Span::styled(
+        "  Keep going  ",
+        Style::default()
+            .fg(TEXT)
+            .bg(SURFACE)
+            .add_modifier(Modifier::BOLD),
     )))
-    .theme(BTN_MUTED)
-    .state(ButtonState::Normal);
+    .alignment(Alignment::Center);
     f.render_widget(stay_btn, btn_row[3]);
 
     let hint = Paragraph::new(Line::from(Span::styled(
