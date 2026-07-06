@@ -62,3 +62,47 @@ jobs:
             echo "The following jobs did not succeed: $FAILED"
             exit 1
           fi
+
+  # Gate PRs on E2E passing. This job waits for the e2e-tests.yml workflow
+  # (which runs in parallel) and blocks merge if any scenario failed.
+  e2e-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: [validate]
+    steps:
+      - name: Wait for E2E workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Wait up to 50 minutes for the E2E workflow to complete
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sha = context.payload.pull_request.head.sha;
+            const maxWait = 50 * 60 * 1000;
+            const start = Date.now();
+
+            while (Date.now() - start < maxWait) {
+              const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner, repo,
+                head_sha: sha,
+                event: 'pull_request',
+              });
+
+              const e2eRun = runs.workflow_runs.find(r => r.name === 'E2E Migration Tests');
+              if (e2eRun) {
+                if (e2eRun.status === 'completed') {
+                  if (e2eRun.conclusion === 'success') {
+                    core.info(`E2E passed: ${e2eRun.html_url}`);
+                    return;
+                  } else {
+                    core.setFailed(`E2E failed (${e2eRun.conclusion}): ${e2eRun.html_url}`);
+                    return;
+                  }
+                }
+                core.info(`E2E status: ${e2eRun.status}... waiting`);
+              } else {
+                core.info('E2E workflow not found yet, waiting...');
+              }
+              await new Promise(r => setTimeout(r, 30000));
+            }
+            core.setFailed('Timed out waiting for E2E workflow');

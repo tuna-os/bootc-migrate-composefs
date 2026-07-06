@@ -459,7 +459,10 @@ fn main() {
 
     // Block on pending transactions — they cause incomplete composefs images
     // and switch-root-os-release-errors on next boot.
-    if report.pending_transaction != preflight::PendingTransactionStatus::Clean && !args.force {
+    if report.pending_transaction != preflight::PendingTransactionStatus::Clean
+        && !args.force
+        && !args.skip_preflight
+    {
         eprintln!(
             "Error: Pending OSTree transaction detected: {}.\n\
              The OSTree repo has uncommitted state from a previous update. The migration\n\

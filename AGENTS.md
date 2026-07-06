@@ -64,6 +64,36 @@ When evaluating competing implementations (e.g. monolith M vs modular P), push
 both branches and dispatch CI on each. The watcher script can monitor any local
 run; for CI use `gh run view --json jobs` to poll per-scenario results.
 
+## Interactive testing with Corral VMs
+
+[Corral](https://github.com/hanthor/corral) manages KubeVirt/QEMU VMs
+provisioned from bootc container images. Use it for interactive TUI testing,
+exploratory debugging, and validating changes on real OSTree systems without
+running the full scripted E2E harness.
+
+Key commands:
+
+```bash
+corral list                              # show all VMs
+corral ssh tui-e2e --user root           # interactive shell
+corral ssh tui-e2e --user root -c "CMD"  # run a command
+```
+
+To deploy a local build to a corral VM:
+
+```bash
+# Tar + base64 source over SSH, build on the VM
+tar czf /tmp/src.tar.gz --exclude=target --exclude=.git .
+base64 /tmp/src.tar.gz | corral ssh <vm> --user root -c \
+  "base64 -d > /tmp/src.tar.gz && mkdir -p /tmp/bmc && \
+   tar xzf /tmp/src.tar.gz -C /tmp/bmc && cd /tmp/bmc && \
+   cargo build --release && cp target/release/bootc-migrate-composefs /usr/local/bin/"
+```
+
+The `tui-e2e` VM (Bluefin stable, UEFI, XFS) is pre-provisioned for TUI
+development and pending-transaction testing. Note: corral VMs are for developer
+convenience; CI uses the scripted `tests/run-e2e.sh` harness.
+
 ## Follow other guidelines
 
 Read [README.md](README.md) and [CONTRIBUTING.md](CONTRIBUTING.md) and follow

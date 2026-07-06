@@ -12,12 +12,13 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    buffer::Buffer,
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Wrap,
+        Block, Borders, Clear, LineGauge, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Widget, Wrap,
     },
 };
 use std::{
@@ -27,6 +28,7 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+use tui_big_text::{BigText, PixelSize};
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
 const TEAL: Color = Color::Rgb(0, 180, 180);
@@ -41,22 +43,379 @@ const TEXT: Color = Color::Rgb(210, 215, 225);
 // ─── Spinner ──────────────────────────────────────────────────────────────────
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+// ─── Button widget (inspired by ratatui/examples/custom_widget) ───────────────
+
+/// A themed button with 3D highlight/shadow effects.
+#[derive(Debug, Clone)]
+struct Button<'a> {
+    label: Line<'a>,
+    theme: ButtonTheme,
+    state: ButtonState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ButtonState {
+    Normal,
+    Selected,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ButtonTheme {
+    text: Color,
+    background: Color,
+    highlight: Color,
+    shadow: Color,
+}
+
+const BTN_PRIMARY: ButtonTheme = ButtonTheme {
+    text: Color::Rgb(18, 20, 24),
+    background: Color::Rgb(0, 160, 160),
+    highlight: Color::Rgb(0, 200, 200),
+    shadow: Color::Rgb(0, 100, 100),
+};
+
+const BTN_DANGER: ButtonTheme = ButtonTheme {
+    text: Color::Rgb(255, 240, 240),
+    background: Color::Rgb(180, 40, 40),
+    highlight: Color::Rgb(220, 60, 60),
+    shadow: Color::Rgb(120, 20, 20),
+};
+
+const BTN_MUTED: ButtonTheme = ButtonTheme {
+    text: Color::Rgb(210, 215, 225),
+    background: Color::Rgb(50, 55, 65),
+    highlight: Color::Rgb(70, 78, 92),
+    shadow: Color::Rgb(30, 34, 42),
+};
+
+impl<'a> Button<'a> {
+    fn new<T: Into<Line<'a>>>(label: T) -> Self {
+        Self {
+            label: label.into(),
+            theme: BTN_PRIMARY,
+            state: ButtonState::Normal,
+        }
+    }
+
+    fn theme(mut self, theme: ButtonTheme) -> Self {
+        self.theme = theme;
+        self
+    }
+
+    fn state(mut self, state: ButtonState) -> Self {
+        self.state = state;
+        self
+    }
+
+    fn colors(&self) -> (Color, Color, Color, Color) {
+        let t = self.theme;
+        match self.state {
+            ButtonState::Normal => (t.background, t.text, t.shadow, t.highlight),
+            ButtonState::Selected => (t.highlight, t.text, t.shadow, t.highlight),
+            ButtonState::Active => (t.background, t.text, t.highlight, t.shadow),
+        }
+    }
+}
+
+impl Widget for Button<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let (background, text, shadow, highlight) = self.colors();
+        buf.set_style(area, Style::new().bg(background).fg(text));
+
+        // Top highlight edge
+        if area.height > 2 {
+            buf.set_string(
+                area.x,
+                area.y,
+                "▔".repeat(area.width as usize),
+                Style::new().fg(highlight).bg(background),
+            );
+        }
+        // Bottom shadow edge
+        if area.height > 1 {
+            buf.set_string(
+                area.x,
+                area.y + area.height - 1,
+                "▁".repeat(area.width as usize),
+                Style::new().fg(shadow).bg(background),
+            );
+        }
+        // Centered label
+        let label_width = self.label.width() as u16;
+        buf.set_line(
+            area.x + area.width.saturating_sub(label_width) / 2,
+            area.y + area.height.saturating_sub(1) / 2,
+            &self.label,
+            area.width,
+        );
+    }
+}
+
 // ─── Preset images ────────────────────────────────────────────────────────────
-const PRESET_IMAGES: &[(&str, &str)] = &[
+/// (display_label, target_image, source_hint).
+/// The source_hint is matched against the detected OS to highlight the recommended preset.
+const PRESET_IMAGES: &[(&str, &str, &str)] = &[
     (
-        "Bluefin stable  →  Dakota stable",
+        "Dakota stable (default)",
         "ghcr.io/projectbluefin/dakota:stable",
+        "bluefin",
     ),
     (
-        "Bluefin LTS     →  Dakota stable",
+        "Dakota stable (from LTS/XFS)",
         "ghcr.io/projectbluefin/dakota:stable",
+        "lts",
     ),
     (
-        "Aurora          →  Dakota stable",
+        "Dakota stable (from Aurora)",
         "ghcr.io/projectbluefin/dakota:stable",
+        "aurora",
     ),
-    ("Custom…", ""),
+    ("Custom…", "", ""),
 ];
+
+// ─── Preflight visualization state ────────────────────────────────────────────
+
+/// Three-tier readiness for preflight checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Readiness {
+    Pass,
+    Tight,
+    Fail,
+}
+
+impl Readiness {
+    fn icon(&self) -> &'static str {
+        match self {
+            Readiness::Pass => "✓",
+            Readiness::Tight => "⚠",
+            Readiness::Fail => "✗",
+        }
+    }
+
+    fn color(&self) -> Color {
+        match self {
+            Readiness::Pass => SUCCESS,
+            Readiness::Tight => AMBER,
+            Readiness::Fail => DANGER,
+        }
+    }
+}
+
+/// Holds preflight data formatted for TUI display.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct PreflightTuiState {
+    /// OSTree repo size in bytes.
+    ostree_repo_bytes: u64,
+    /// Total space on the partition holding /sysroot (or /sysroot/composefs).
+    composefs_total: u64,
+    /// Free space available for composefs store.
+    composefs_free_bytes: u64,
+    /// Needed composefs space (1.1× repo with reflink, 1.5× without).
+    composefs_needed_bytes: u64,
+    /// ESP free space in bytes.
+    esp_free_bytes: u64,
+    /// ESP total space (estimated).
+    esp_total_bytes: u64,
+    /// Filesystem type ("btrfs", "xfs", etc.)
+    fs_type: String,
+    /// Whether the system supports reflink.
+    supports_reflink: bool,
+    /// Projected composefs usage after migration (= repo size for reflink case).
+    projected_composefs_used: u64,
+    /// Projected remaining free after migration.
+    projected_composefs_free: u64,
+    /// Individual readiness checks: (label, readiness).
+    checks: Vec<(String, Readiness)>,
+    /// Overall readiness.
+    overall: Readiness,
+}
+
+impl PreflightTuiState {
+    fn from_report(report: &crate::preflight::PreflightReport) -> Self {
+        let multiplier: f64 = if report.supports_reflink { 1.1 } else { 1.5 };
+        let composefs_needed = (report.ostree_repo_size_bytes as f64 * multiplier) as u64;
+
+        // Total = free + needed (approximate: we assume current usage is small).
+        let composefs_total = report.composefs_free_bytes + composefs_needed;
+
+        let projected_used = composefs_needed;
+        let projected_free = report.composefs_free_bytes.saturating_sub(composefs_needed);
+
+        // ESP total estimate (free + 150MB typical usage).
+        let esp_total = report.esp_free_space_bytes + 150 * 1024 * 1024;
+
+        let mut checks: Vec<(String, Readiness)> = Vec::new();
+
+        // OSTree backend
+        checks.push((
+            "Booted OSTree backend".to_string(),
+            if report.is_bootc_ostree {
+                Readiness::Pass
+            } else {
+                Readiness::Fail
+            },
+        ));
+
+        // UEFI boot mode
+        checks.push((
+            "UEFI boot mode".to_string(),
+            if report.is_uefi {
+                Readiness::Pass
+            } else {
+                Readiness::Tight
+            },
+        ));
+
+        // NVRAM writable
+        checks.push((
+            "NVRAM writable".to_string(),
+            if report.nvram_writable {
+                Readiness::Pass
+            } else if report.is_uefi {
+                Readiness::Fail
+            } else {
+                Readiness::Tight
+            },
+        ));
+
+        // Reflink support
+        checks.push((
+            format!(
+                "Reflink (CoW) support ({})",
+                report.fs_type.as_deref().unwrap_or("unknown")
+            ),
+            if report.supports_reflink {
+                Readiness::Pass
+            } else {
+                Readiness::Tight
+            },
+        ));
+
+        // ESP detected
+        checks.push((
+            "ESP partition detected".to_string(),
+            if report.esp_detected {
+                Readiness::Pass
+            } else {
+                Readiness::Tight
+            },
+        ));
+
+        // ESP space
+        let esp_mb = report.esp_free_space_bytes / (1024 * 1024);
+        checks.push((
+            format!("ESP ≥ 150 MB free ({} MB)", esp_mb),
+            if report.esp_ready_for_systemd_boot {
+                if esp_mb < 200 {
+                    Readiness::Tight
+                } else {
+                    Readiness::Pass
+                }
+            } else {
+                Readiness::Fail
+            },
+        ));
+
+        // ComposeFS space
+        let needed_gb = composefs_needed as f64 / 1_073_741_824.0;
+        checks.push((
+            format!(
+                "ComposeFS space ≥ {:.1}× repo ({:.1} GB)",
+                multiplier, needed_gb
+            ),
+            if report.composefs_free_bytes >= composefs_needed {
+                if report.composefs_free_bytes < (composefs_needed as f64 * 1.2) as u64 {
+                    Readiness::Tight
+                } else {
+                    Readiness::Pass
+                }
+            } else {
+                Readiness::Fail
+            },
+        ));
+
+        // Pending transaction
+        checks.push((
+            match &report.pending_transaction {
+                crate::preflight::PendingTransactionStatus::Clean => {
+                    "No pending OSTree transaction".to_string()
+                }
+                other => format!("Pending transaction: {}", other),
+            },
+            if report.pending_transaction == crate::preflight::PendingTransactionStatus::Clean {
+                Readiness::Pass
+            } else {
+                Readiness::Fail
+            },
+        ));
+
+        // systemd-boot binaries
+        checks.push((
+            "systemd-boot binaries present".to_string(),
+            if report.systemd_boot_binaries_present {
+                Readiness::Pass
+            } else {
+                Readiness::Tight
+            },
+        ));
+
+        // Overall
+        let overall = if checks.iter().any(|(_, r)| *r == Readiness::Fail) {
+            Readiness::Fail
+        } else if checks.iter().any(|(_, r)| *r == Readiness::Tight) {
+            Readiness::Tight
+        } else {
+            Readiness::Pass
+        };
+
+        Self {
+            ostree_repo_bytes: report.ostree_repo_size_bytes,
+            composefs_total,
+            composefs_free_bytes: report.composefs_free_bytes,
+            composefs_needed_bytes: composefs_needed,
+            esp_free_bytes: report.esp_free_space_bytes,
+            esp_total_bytes: esp_total,
+            fs_type: report
+                .fs_type
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            supports_reflink: report.supports_reflink,
+            projected_composefs_used: projected_used,
+            projected_composefs_free: projected_free,
+            checks,
+            overall,
+        }
+    }
+}
+
+// ─── Source OS detection ──────────────────────────────────────────────────────
+
+/// Detect the currently running OS from /etc/os-release.
+fn detect_source_os() -> String {
+    let os_release = std::fs::read_to_string("/etc/os-release")
+        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+        .unwrap_or_default();
+    let mut name = String::new();
+    let mut variant = String::new();
+    for line in os_release.lines() {
+        if let Some(val) = line.strip_prefix("NAME=") {
+            name = val.trim_matches('"').to_string();
+        } else if let Some(val) = line.strip_prefix("VARIANT_ID=") {
+            variant = val.trim_matches('"').to_string();
+        }
+    }
+    if name.is_empty() {
+        return "Unknown OS".to_string();
+    }
+    if variant.is_empty() {
+        name
+    } else {
+        format!("{} ({})", name, variant)
+    }
+}
 
 // ─── Phase information ────────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +520,7 @@ enum MigMsg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Screen {
     Welcome,
+    Preflight,
     SelectImage,
     ConfigureOptions,
     Review,
@@ -180,6 +540,10 @@ enum Bootloader {
 /// Top-level application state for the TUI wizard.
 pub struct App {
     screen: Screen,
+
+    // Preflight
+    preflight_state: Option<PreflightTuiState>,
+    detected_os: String,
 
     // SelectImage
     image_list_state: ListState,
@@ -225,8 +589,11 @@ impl App {
     fn new() -> Self {
         let mut image_list_state = ListState::default();
         image_list_state.select(Some(0));
+        let detected_os = detect_source_os();
         Self {
             screen: Screen::Welcome,
+            preflight_state: None,
+            detected_os,
             image_list_state,
             custom_image: String::new(),
             custom_image_editing: false,
@@ -493,7 +860,20 @@ impl App {
 
     fn next_screen(&mut self) {
         self.screen = match self.screen {
-            Screen::Welcome => Screen::SelectImage,
+            Screen::Welcome => {
+                // Run preflight checks and show results.
+                match crate::preflight::run_preflight_checks() {
+                    Ok(report) => {
+                        self.preflight_state = Some(PreflightTuiState::from_report(&report));
+                    }
+                    Err(_) => {
+                        // If preflight fails (e.g. not root), show a minimal state.
+                        self.preflight_state = None;
+                    }
+                }
+                Screen::Preflight
+            }
+            Screen::Preflight => Screen::SelectImage,
             Screen::SelectImage => Screen::ConfigureOptions,
             Screen::ConfigureOptions => Screen::Review,
             Screen::Review => {
@@ -514,7 +894,8 @@ impl App {
     fn prev_screen(&mut self) {
         self.screen = match self.screen {
             Screen::Welcome => Screen::Welcome,
-            Screen::SelectImage => Screen::Welcome,
+            Screen::Preflight => Screen::Welcome,
+            Screen::SelectImage => Screen::Preflight,
             Screen::ConfigureOptions => Screen::SelectImage,
             Screen::Review => Screen::ConfigureOptions,
             Screen::Running | Screen::Complete | Screen::Failed => Screen::Running,
@@ -522,16 +903,17 @@ impl App {
     }
 
     fn total_wizard_steps() -> usize {
-        4 // Welcome, Image, Options, Review
+        5 // Welcome, Preflight, Image, Options, Review
     }
 
     fn current_step(&self) -> usize {
         match self.screen {
             Screen::Welcome => 1,
-            Screen::SelectImage => 2,
-            Screen::ConfigureOptions => 3,
-            Screen::Review => 4,
-            Screen::Running | Screen::Complete | Screen::Failed => 4,
+            Screen::Preflight => 2,
+            Screen::SelectImage => 3,
+            Screen::ConfigureOptions => 4,
+            Screen::Review => 5,
+            Screen::Running | Screen::Complete | Screen::Failed => 5,
         }
     }
 
@@ -553,6 +935,7 @@ impl App {
 
         match &self.screen {
             Screen::Welcome => self.handle_welcome_key(key),
+            Screen::Preflight => self.handle_preflight_key(key),
             Screen::SelectImage => self.handle_select_image_key(key),
             Screen::ConfigureOptions => self.handle_options_key(key),
             Screen::Review => self.handle_review_key(key),
@@ -591,6 +974,22 @@ impl App {
         match key {
             KeyCode::Enter | KeyCode::Char('n') => self.next_screen(),
             KeyCode::Char('q') | KeyCode::Esc => self.show_quit_dialog = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_preflight_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Enter | KeyCode::Char('n') => self.next_screen(),
+            KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
+            KeyCode::Char('q') => self.show_quit_dialog = true,
+            KeyCode::Char('r') => {
+                // Re-run preflight
+                if let Ok(report) = crate::preflight::run_preflight_checks() {
+                    self.preflight_state = Some(PreflightTuiState::from_report(&report));
+                }
+            }
             _ => {}
         }
         false
@@ -805,7 +1204,11 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
     };
 
     let step_str = match app.screen {
-        Screen::Welcome | Screen::SelectImage | Screen::ConfigureOptions | Screen::Review => {
+        Screen::Welcome
+        | Screen::Preflight
+        | Screen::SelectImage
+        | Screen::ConfigureOptions
+        | Screen::Review => {
             format!(
                 "  Step {} of {}",
                 app.current_step(),
@@ -841,6 +1244,12 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
 fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let hints: &[(&str, &str)] = match app.screen {
         Screen::Welcome => &[("Enter", "Next"), ("q", "Quit")],
+        Screen::Preflight => &[
+            ("Enter", "Continue"),
+            ("r", "Re-check"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
         Screen::SelectImage => &[
             ("↑↓", "Move"),
             ("Enter", "Select / Next"),
@@ -891,6 +1300,7 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
 fn render_screen(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     match app.screen.clone() {
         Screen::Welcome => render_welcome(f, area),
+        Screen::Preflight => render_preflight(f, app, area),
         Screen::SelectImage => render_select_image(f, app, area),
         Screen::ConfigureOptions => render_configure_options(f, app, area),
         Screen::Review => render_review(f, app, area),
@@ -923,29 +1333,50 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
     let block = Block::default()
-        .title(Span::styled(
-            " Welcome ",
-            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
-        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(TEAL))
         .style(Style::default().bg(DARK_BG));
 
-    let text = Text::from(vec![
-        Line::raw(""),
-        Line::from(Span::styled(
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Layout: BigText header, spacer, description, button
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // BigText "BMC"
+            Constraint::Length(1), // subtitle
+            Constraint::Length(1), // spacer
+            Constraint::Min(10),   // description + prerequisites
+            Constraint::Length(3), // Start button
+        ])
+        .split(inner);
+
+    // ── BigText logo ──
+    let big_text = BigText::builder()
+        .pixel_size(PixelSize::HalfHeight)
+        .style(Style::default().fg(TEAL))
+        .lines(vec!["BMC".into()])
+        .centered()
+        .build();
+    f.render_widget(big_text, chunks[0]);
+
+    // ── Subtitle ──
+    let subtitle = Paragraph::new(Line::from(vec![
+        Span::styled(
             "  bootc-migrate-composefs",
-            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  This wizard guides you through an in-place migration from an",
-            Style::default().fg(TEXT),
-        )),
-        Line::from(Span::styled(
-            "  OSTree-backed bootc system to a ComposeFS-backed system.",
-            Style::default().fg(TEXT),
-        )),
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  — OSTree → ComposeFS in-place migration",
+            Style::default().fg(SUBTLE),
+        ),
+    ]))
+    .alignment(Alignment::Center);
+    f.render_widget(subtitle, chunks[1]);
+
+    // ── Description ──
+    let text = Text::from(vec![
         Line::raw(""),
         Line::from(Span::styled(
             "  Prerequisites",
@@ -956,55 +1387,432 @@ fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(SUBTLE),
         )),
         Line::from(Span::styled(
-            "  • This tool must be run as root (sudo).",
+            "  • Root privileges (sudo)",
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "  • Your system must currently be booted in OSTree mode.",
+            "  • Booted OSTree-backed system (Bluefin, Aurora, Silverblue…)",
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "  • At least 1.5× the OSTree repo size in free disk space.",
+            "  • ≥ 1.1× OSTree repo size in free disk space",
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "  • Network connectivity to pull the target OCI image.",
+            "  • Network access (OCI image pull)",
             Style::default().fg(TEXT),
         )),
         Line::raw(""),
         Line::from(Span::styled(
-            "  ⚠  BACKUP WARNING",
-            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            "  ⚠  This modifies bootloader state. Back up first!",
+            Style::default().fg(AMBER),
         )),
         Line::from(Span::styled(
-            "  ─────────────────────────────────────────────────────",
+            "  Default mode is --dry-run (no changes made).",
             Style::default().fg(SUBTLE),
         )),
-        Line::from(Span::styled(
-            "  This migration modifies bootloader configuration and",
-            Style::default().fg(AMBER),
-        )),
-        Line::from(Span::styled(
-            "  staged deployments on your system.  Back up important",
-            Style::default().fg(AMBER),
-        )),
-        Line::from(Span::styled(
-            "  data before proceeding.  The first run uses --dry-run",
-            Style::default().fg(AMBER),
-        )),
-        Line::from(Span::styled(
-            "  by default so no changes are actually made.",
-            Style::default().fg(AMBER),
-        )),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  Press [Enter] to begin  →",
-            Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
-        )),
     ]);
+    let para = Paragraph::new(text).wrap(Wrap { trim: false });
+    f.render_widget(para, chunks[3]);
 
-    let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    // ── Start button ──
+    let btn_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(24),
+            Constraint::Min(0),
+        ])
+        .flex(Flex::Center)
+        .split(chunks[4]);
+    let btn = Button::new(Line::from(Span::styled(
+        "▶  Begin Migration",
+        Style::default().add_modifier(Modifier::BOLD),
+    )))
+    .theme(BTN_PRIMARY)
+    .state(ButtonState::Selected);
+    f.render_widget(btn, btn_area[1]);
+}
+
+// ── Preflight ─────────────────────────────────────────────────────────────────
+
+fn render_preflight(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Step 2 · System Preflight ",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    match &app.preflight_state {
+        Some(state) => render_preflight_content(f, state, inner),
+        None => {
+            let text = Paragraph::new(Text::from(vec![
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "  ⚠  Preflight checks could not run.",
+                    Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "  This usually means the tool is not running as root, or",
+                    Style::default().fg(TEXT),
+                )),
+                Line::from(Span::styled(
+                    "  the system is not an OSTree-backed bootc deployment.",
+                    Style::default().fg(TEXT),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "  Press [Enter] to continue anyway, or [r] to retry.",
+                    Style::default().fg(SUBTLE),
+                )),
+            ]))
+            .wrap(Wrap { trim: false });
+            f.render_widget(text, inner);
+        }
+    }
+}
+
+fn render_preflight_content(f: &mut ratatui::Frame, state: &PreflightTuiState, area: Rect) {
+    // Layout: overall banner, disk gauges, projected usage, checklist
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Overall status banner
+            Constraint::Length(3), // OSTree repo gauge
+            Constraint::Length(3), // ComposeFS gauge
+            Constraint::Length(3), // ESP gauge
+            Constraint::Length(1), // Separator
+            Constraint::Length(4), // Projected usage
+            Constraint::Length(1), // Separator
+            Constraint::Min(4),    // Readiness checklist
+        ])
+        .split(area);
+
+    // ── Overall status banner ──
+    let (banner_icon, banner_text, banner_color) = match state.overall {
+        Readiness::Pass => ("✓", "System ready for migration", SUCCESS),
+        Readiness::Tight => ("⚠", "System ready (with warnings)", AMBER),
+        Readiness::Fail => ("✗", "System NOT ready — resolve issues below", DANGER),
+    };
+    let banner = Paragraph::new(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("{} ", banner_icon),
+            Style::default()
+                .fg(banner_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            banner_text,
+            Style::default()
+                .fg(banner_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    f.render_widget(banner, chunks[0]);
+
+    // ── OSTree Repo gauge ──
+    render_disk_gauge(
+        f,
+        chunks[1],
+        "OSTree Repo",
+        state.ostree_repo_bytes,
+        state.composefs_total,
+        None, // no threshold
+        &format!(
+            "{:.1} GB on disk",
+            state.ostree_repo_bytes as f64 / 1_073_741_824.0
+        ),
+    );
+
+    // ── ComposeFS free space gauge ──
+    let cfs_readiness = if state.composefs_free_bytes >= state.composefs_needed_bytes {
+        if state.composefs_free_bytes < (state.composefs_needed_bytes as f64 * 1.2) as u64 {
+            Readiness::Tight
+        } else {
+            Readiness::Pass
+        }
+    } else {
+        Readiness::Fail
+    };
+    render_disk_gauge_with_threshold(
+        f,
+        chunks[2],
+        "ComposeFS Space",
+        state.composefs_needed_bytes,
+        state.composefs_free_bytes,
+        &cfs_readiness,
+        &format!(
+            "{:.1} GB needed / {:.1} GB free",
+            state.composefs_needed_bytes as f64 / 1_073_741_824.0,
+            state.composefs_free_bytes as f64 / 1_073_741_824.0,
+        ),
+    );
+
+    // ── ESP gauge ──
+    let esp_readiness = if state.esp_free_bytes >= 200 * 1024 * 1024 {
+        Readiness::Pass
+    } else if state.esp_free_bytes >= 150 * 1024 * 1024 {
+        Readiness::Tight
+    } else {
+        Readiness::Fail
+    };
+    render_disk_gauge_with_threshold(
+        f,
+        chunks[3],
+        "ESP Partition",
+        150 * 1024 * 1024,
+        state.esp_free_bytes,
+        &esp_readiness,
+        &format!(
+            "{} MB free (150 MB required)",
+            state.esp_free_bytes / (1024 * 1024)
+        ),
+    );
+
+    // ── Separator ──
+    let sep1 = Paragraph::new(Line::from(Span::styled(
+        "  ─────────────────────────────────────────────────────────────",
+        Style::default().fg(SUBTLE),
+    )));
+    f.render_widget(sep1, chunks[4]);
+
+    // ── Projected usage ──
+    render_projected_usage(f, state, chunks[5]);
+
+    // ── Separator ──
+    let sep2 = Paragraph::new(Line::from(Span::styled(
+        "  ─────────────────────────────────────────────────────────────",
+        Style::default().fg(SUBTLE),
+    )));
+    f.render_widget(sep2, chunks[6]);
+
+    // ── Readiness checklist ──
+    render_readiness_checklist(f, state, chunks[7]);
+}
+
+fn render_disk_gauge(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    label: &str,
+    used: u64,
+    total: u64,
+    _threshold: Option<u64>,
+    detail: &str,
+) {
+    let ratio = if total > 0 {
+        (used as f64 / total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let color = if ratio < 0.6 {
+        SUCCESS
+    } else if ratio < 0.85 {
+        AMBER
+    } else {
+        DANGER
+    };
+
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    // Label line
+    let label_line = Paragraph::new(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("{:<18}", label),
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(detail, Style::default().fg(color)),
+    ]));
+    f.render_widget(label_line, lines[0]);
+
+    // Gauge line — indent by 2
+    let gauge_area = Rect {
+        x: area.x + 2,
+        y: lines[1].y,
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+    let gauge = LineGauge::default()
+        .ratio(ratio)
+        .filled_style(Style::default().fg(color))
+        .unfilled_style(Style::default().fg(SURFACE))
+        .label(Line::from(Span::styled(
+            format!(" {:>3}%", (ratio * 100.0) as u32),
+            Style::default().fg(color),
+        )));
+    f.render_widget(gauge, gauge_area);
+}
+
+fn render_disk_gauge_with_threshold(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    label: &str,
+    needed: u64,
+    available: u64,
+    readiness: &Readiness,
+    detail: &str,
+) {
+    let ratio = if available > 0 {
+        (needed as f64 / available as f64).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    let color = readiness.color();
+    let icon = readiness.icon();
+
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    // Label line with icon
+    let label_line = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!("  {} ", icon),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<16}", label),
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(detail, Style::default().fg(color)),
+    ]));
+    f.render_widget(label_line, lines[0]);
+
+    // Gauge line
+    let gauge_area = Rect {
+        x: area.x + 4,
+        y: lines[1].y,
+        width: area.width.saturating_sub(6),
+        height: 1,
+    };
+    let gauge = LineGauge::default()
+        .ratio(ratio)
+        .filled_style(Style::default().fg(color))
+        .unfilled_style(Style::default().fg(SURFACE))
+        .label(Line::from(Span::styled(
+            format!(" {:>3}%", (ratio * 100.0) as u32),
+            Style::default().fg(color),
+        )));
+    f.render_widget(gauge, gauge_area);
+}
+
+fn render_projected_usage(f: &mut ratatui::Frame, state: &PreflightTuiState, area: Rect) {
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // gauge
+            Constraint::Length(1), // legend
+            Constraint::Length(1), // padding
+        ])
+        .split(area);
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            "Projected After Migration",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    f.render_widget(title, lines[0]);
+
+    let projected_total = state.projected_composefs_used + state.projected_composefs_free;
+    let ratio = if projected_total > 0 {
+        (state.projected_composefs_used as f64 / projected_total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let proj_color = if state.projected_composefs_free > state.projected_composefs_used {
+        SUCCESS
+    } else if state.projected_composefs_free > 0 {
+        AMBER
+    } else {
+        DANGER
+    };
+
+    let gauge_area = Rect {
+        x: area.x + 4,
+        y: lines[1].y,
+        width: area.width.saturating_sub(6),
+        height: 1,
+    };
+    let gauge = LineGauge::default()
+        .ratio(ratio)
+        .filled_style(Style::default().fg(proj_color))
+        .unfilled_style(Style::default().fg(SURFACE))
+        .label(Line::from(vec![
+            Span::styled(" /composefs  ", Style::default().fg(TEXT)),
+            Span::styled(
+                format!(
+                    "{:.1} GB used → {:.1} GB free",
+                    state.projected_composefs_used as f64 / 1_073_741_824.0,
+                    state.projected_composefs_free as f64 / 1_073_741_824.0,
+                ),
+                Style::default().fg(proj_color),
+            ),
+        ]));
+    f.render_widget(gauge, gauge_area);
+
+    // Legend
+    let legend = Paragraph::new(Line::from(vec![
+        Span::styled("    ━", Style::default().fg(proj_color)),
+        Span::styled(" projected store  ", Style::default().fg(SUBTLE)),
+        Span::styled("─", Style::default().fg(SURFACE)),
+        Span::styled(" remaining free", Style::default().fg(SUBTLE)),
+    ]));
+    f.render_widget(legend, lines[2]);
+}
+
+fn render_readiness_checklist(f: &mut ratatui::Frame, state: &PreflightTuiState, area: Rect) {
+    let items: Vec<ListItem> = state
+        .checks
+        .iter()
+        .map(|(label, readiness)| {
+            let icon = readiness.icon();
+            let color = readiness.color();
+            let suffix = match readiness {
+                Readiness::Pass => "",
+                Readiness::Tight => "  (warning)",
+                Readiness::Fail => "  (BLOCKER)",
+            };
+            let content = Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("{} ", icon),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(label.as_str(), Style::default().fg(TEXT)),
+                Span::styled(suffix, Style::default().fg(color)),
+            ]);
+            ListItem::new(content)
+        })
+        .collect();
+
+    let list = List::new(items).style(Style::default().bg(DARK_BG));
+    f.render_widget(list, area);
 }
 
 // ── Select image ──────────────────────────────────────────────────────────────
@@ -1012,24 +1820,55 @@ fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
 fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(5)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(5),
+        ])
         .split(area);
+
+    // Source OS context header
+    let os_hint_block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(SUBTLE))
+        .style(Style::default().bg(DARK_BG));
+    let os_line = Paragraph::new(Line::from(vec![
+        Span::styled("  Detected source: ", Style::default().fg(SUBTLE)),
+        Span::styled(
+            app.detected_os.as_str(),
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  — all presets migrate to Dakota (composefs-backed)",
+            Style::default().fg(SUBTLE),
+        ),
+    ]))
+    .block(os_hint_block);
+    f.render_widget(os_line, chunks[0]);
 
     let block = Block::default()
         .title(Span::styled(
-            " Step 2 · Select Target Image ",
+            " Step 3 · Select Target Image ",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(TEAL))
         .style(Style::default().bg(DARK_BG));
 
+    // Determine which preset matches the detected OS
+    let detected_lower = app.detected_os.to_lowercase();
+    let recommended_idx = PRESET_IMAGES
+        .iter()
+        .position(|(_, _, hint)| !hint.is_empty() && detected_lower.contains(hint))
+        .unwrap_or(0);
+
     let items: Vec<ListItem> = PRESET_IMAGES
         .iter()
         .enumerate()
-        .map(|(i, (label, image))| {
+        .map(|(i, (label, image, _hint))| {
             let selected = app.image_list_state.selected() == Some(i);
             let is_custom = i == PRESET_IMAGES.len() - 1;
+            let is_recommended = i == recommended_idx;
             let prefix = if selected { "▶ " } else { "  " };
             let target_display = if is_custom {
                 if app.custom_image.is_empty() {
@@ -1040,13 +1879,18 @@ fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             } else {
                 image.to_string()
             };
+            let rec_tag = if is_recommended && !is_custom {
+                " ★"
+            } else {
+                ""
+            };
             let line = Line::from(vec![
                 Span::styled(
                     prefix,
                     Style::default().fg(if selected { TEAL } else { SUBTLE }),
                 ),
                 Span::styled(
-                    format!("{:<34}", label),
+                    format!("{:<28}", label),
                     Style::default()
                         .fg(if selected { TEXT } else { SUBTLE })
                         .add_modifier(if selected {
@@ -1054,6 +1898,10 @@ fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                         } else {
                             Modifier::empty()
                         }),
+                ),
+                Span::styled(
+                    rec_tag,
+                    Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("  →  ", Style::default().fg(SUBTLE)),
                 Span::styled(
@@ -1069,7 +1917,7 @@ fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .block(block)
         .highlight_style(Style::default().bg(SURFACE));
 
-    f.render_stateful_widget(list, chunks[0], &mut app.image_list_state);
+    f.render_stateful_widget(list, chunks[1], &mut app.image_list_state);
 
     // Custom input box
     if app.is_custom_selected() {
@@ -1096,10 +1944,10 @@ fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         let input_text = format!("  {}{}", app.custom_image, cursor);
         let input_para =
             Paragraph::new(Span::styled(input_text, Style::default().fg(TEXT))).block(input_block);
-        f.render_widget(input_para, chunks[1]);
+        f.render_widget(input_para, chunks[2]);
     } else {
         let hint = Paragraph::new(Span::styled(
-            "  Select an image with ↑↓ then press Enter.",
+            "  Select an image with ↑↓ then press Enter.  ★ = recommended for your system",
             Style::default().fg(SUBTLE),
         ))
         .block(
@@ -1108,7 +1956,7 @@ fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 .border_style(Style::default().fg(SUBTLE))
                 .style(Style::default().bg(SURFACE)),
         );
-        f.render_widget(hint, chunks[1]);
+        f.render_widget(hint, chunks[2]);
     }
 }
 
@@ -1117,7 +1965,7 @@ fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
-            " Step 3 · Configure Options ",
+            " Step 4 · Configure Options ",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -1214,12 +2062,21 @@ fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
 fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
-            " Step 4 · Review & Run ",
+            " Step 5 · Review & Run ",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(TEAL))
         .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split: text content above, button at bottom
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(3)])
+        .split(inner);
 
     let mode_label = if app.opt_dry_run {
         Line::from(vec![
@@ -1274,28 +2131,42 @@ fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
         text_lines.push(l);
     }
 
-    text_lines.push(Line::raw(""));
-    text_lines.push(Line::from(Span::styled(
-        "  ╔═══════════════════╗",
-        Style::default().fg(SUCCESS),
-    )));
-    text_lines.push(Line::from(Span::styled(
-        "  ║   Press Enter to   ║",
-        Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
-    )));
-    text_lines.push(Line::from(Span::styled(
-        "  ║        RUN         ║",
-        Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
-    )));
-    text_lines.push(Line::from(Span::styled(
-        "  ╚═══════════════════╝",
-        Style::default().fg(SUCCESS),
-    )));
+    let para = Paragraph::new(Text::from(text_lines)).wrap(Wrap { trim: false });
+    f.render_widget(para, chunks[0]);
 
-    let para = Paragraph::new(Text::from(text_lines))
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    // ── RUN button ──
+    let btn_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(20),
+            Constraint::Min(0),
+        ])
+        .flex(Flex::Center)
+        .split(chunks[1]);
+
+    let btn_theme = if app.opt_dry_run {
+        BTN_PRIMARY
+    } else {
+        ButtonTheme {
+            text: Color::Rgb(255, 255, 255),
+            background: Color::Rgb(40, 160, 60),
+            highlight: Color::Rgb(60, 200, 80),
+            shadow: Color::Rgb(20, 100, 30),
+        }
+    };
+    let btn_label = if app.opt_dry_run {
+        "▶  Run Dry-Run"
+    } else {
+        "⚡ Run Migration"
+    };
+    let btn = Button::new(Line::from(Span::styled(
+        btn_label,
+        Style::default().add_modifier(Modifier::BOLD),
+    )))
+    .theme(btn_theme)
+    .state(ButtonState::Selected);
+    f.render_widget(btn, btn_layout[1]);
 }
 
 fn build_review_summary(app: &App) -> Vec<Line<'static>> {
@@ -1647,7 +2518,7 @@ fn render_failed(f: &mut ratatui::Frame, app: &App, area: Rect) {
 // ── Quit dialog ───────────────────────────────────────────────────────────────
 
 fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
-    let popup = centered_rect(40, 30, area);
+    let popup = centered_rect(40, 35, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -1659,42 +2530,66 @@ fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
         .border_style(Style::default().fg(AMBER))
         .style(Style::default().bg(SURFACE));
 
-    let text = Text::from(vec![
-        Line::raw(""),
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(3), // buttons
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let msg = Paragraph::new(vec![
         Line::from(Span::styled(
             "  Are you sure you want to quit?",
             Style::default().fg(TEXT),
         )),
-        Line::raw(""),
         Line::from(Span::styled(
-            "  If migration is running, it will",
+            "  Migration will be abandoned.",
             Style::default().fg(AMBER),
-        )),
-        Line::from(Span::styled(
-            "  be abandoned (run 'undo' afterwards).",
-            Style::default().fg(AMBER),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(
-                "  [Yes — Quit]",
-                Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                "[No — Keep going]",
-                Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  ← Yes / No →    Esc = cancel",
-            Style::default().fg(SUBTLE),
         )),
     ]);
+    f.render_widget(msg, chunks[1]);
 
-    let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
-    f.render_widget(para, popup);
+    // Button row
+    let btn_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(14),
+            Constraint::Length(2),
+            Constraint::Length(16),
+            Constraint::Min(0),
+        ])
+        .split(chunks[3]);
+
+    let quit_btn = Button::new(Line::from(Span::styled(
+        "Quit",
+        Style::default().add_modifier(Modifier::BOLD),
+    )))
+    .theme(BTN_DANGER)
+    .state(ButtonState::Selected);
+    f.render_widget(quit_btn, btn_row[1]);
+
+    let stay_btn = Button::new(Line::from(Span::styled(
+        "Keep going",
+        Style::default().add_modifier(Modifier::BOLD),
+    )))
+    .theme(BTN_MUTED)
+    .state(ButtonState::Normal);
+    f.render_widget(stay_btn, btn_row[3]);
+
+    let hint = Paragraph::new(Line::from(Span::styled(
+        "  ← / → to select, Enter to confirm, Esc to cancel",
+        Style::default().fg(SUBTLE),
+    )));
+    f.render_widget(hint, chunks[4]);
 }
 
 // ─── Main event loop ──────────────────────────────────────────────────────────

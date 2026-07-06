@@ -88,6 +88,78 @@ To reproduce a failure starting from after the migration (skipping setup):
 $ SKIP_SETUP=1 just e2e-reboot-test
 ```
 
+### Using Corral VMs for interactive testing
+
+[Corral](https://github.com/hanthor/corral) is a VM manager that provisions
+KubeVirt (or local QEMU) VMs from bootc container images. It's useful for
+interactive TUI testing and exploratory debugging where the scripted QEMU
+harness is too rigid.
+
+**Setup** — install the `corral` binary (see Corral's README), then create a
+Bluefin VM for testing:
+
+```console
+$ corral create tui-e2e --image ghcr.io/projectbluefin/bluefin:stable \
+    --cpu 2 --memory 4Gi --disk 40Gi --efi
+$ corral start tui-e2e
+```
+
+**SSH into the VM:**
+
+```console
+$ corral ssh tui-e2e --user root
+```
+
+**Deploy a local build to the VM** (cross-compile or build on the VM):
+
+```bash
+# Option 1: Build on the VM (Rust must be installed in the VM)
+tar czf /tmp/bmc-src.tar.gz --exclude=target --exclude=.git .
+base64 /tmp/bmc-src.tar.gz | corral ssh tui-e2e --user root -c \
+  "base64 -d > /tmp/src.tar.gz && mkdir -p /tmp/bmc && \
+   tar xzf /tmp/src.tar.gz -C /tmp/bmc && cd /tmp/bmc && \
+   cargo build --release && \
+   cp target/release/bootc-migrate-composefs /usr/local/bin/"
+
+# Option 2: If architectures match, just ship the binary
+base64 target/release/bootc-migrate-composefs | corral ssh tui-e2e --user root -c \
+  "base64 -d > /usr/local/bin/bootc-migrate-composefs && \
+   chmod +x /usr/local/bin/bootc-migrate-composefs"
+```
+
+**Capture TUI screenshots** (the VM won't have tmux on an immutable OS, but
+Python3 is available for PTY capture):
+
+```bash
+corral ssh tui-e2e --user root -c "python3 << 'EOF'
+import pty, os, time, select, re, struct, fcntl, termios, sys
+rows, cols = 30, 100
+pid, fd = pty.fork()
+if pid == 0:
+    ws = struct.pack('HHHH', rows, cols, 0, 0)
+    fcntl.ioctl(sys.stdout.fileno(), termios.TIOCSWINSZ, ws)
+    os.environ['TERM'] = 'xterm-256color'
+    os.execvp('bootc-migrate-composefs', ['bootc-migrate-composefs'])
+else:
+    ws = struct.pack('HHHH', rows, cols, 0, 0)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, ws)
+    time.sleep(2)
+    out = b''
+    while select.select([fd],[],[],1)[0]:
+        out += os.read(fd, 65536)
+    os.write(fd, b'q'); time.sleep(0.5)
+    os.write(fd, b'h'); time.sleep(0.3)
+    os.write(fd, b'\r'); time.sleep(0.5)
+    os.waitpid(pid, 0)
+    text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', out.decode('utf-8', errors='replace'))
+    print(text)
+EOF"
+```
+
+**Corral VMs in CI** — the CI matrix uses the scripted QEMU harness
+(`tests/run-e2e.sh`) for reproducibility. Corral VMs are for developer
+convenience only and are not required to contribute.
+
 ### Cleaning up after E2E
 
 ```console
