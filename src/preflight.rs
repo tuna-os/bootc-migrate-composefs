@@ -121,12 +121,28 @@ pub fn check_pending_ostree_transaction() -> PendingTransactionStatus {
     }
 
     // 3. Check for stale repo temp files.
+    // Only count files (not subdirectories like "cache") that look like
+    // transaction residue (e.g. `.stale-transaction-*`, `staging-*`).
     let repo_tmp = Path::new("/sysroot/ostree/repo/tmp");
     if repo_tmp.exists()
         && let Ok(rd) = fs::read_dir(repo_tmp)
     {
-        let count = rd.filter_map(|e| e.ok()).count();
-        if count > 0 {
+        let stale_count = rd
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                // Only count regular files, not subdirs like "cache".
+                if !e.path().is_file() {
+                    return false;
+                }
+                let name = e.file_name();
+                let name_str = name.to_string_lossy();
+                // Known stale-transaction patterns from OSTree internals.
+                name_str.starts_with(".stale-transaction")
+                    || name_str.starts_with("staging-")
+                    || name_str.starts_with("ostree-txn")
+            })
+            .count();
+        if stale_count > 0 {
             return PendingTransactionStatus::StaleTransactionFiles;
         }
     }
