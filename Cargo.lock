@@ -127,6 +127,7 @@ dependencies = [
  "anyhow",
  "bootc-migrate-core",
  "clap",
+ "rustix",
 ]
 
 [[package]]
