@@ -2,6 +2,7 @@ pub mod grub;
 pub mod systemd_boot;
 
 /// A BLS (Boot Loader Specification) Type 1 entry.
+#[derive(Debug)]
 pub struct BlsEntry {
     pub title: String,
     pub version: String,

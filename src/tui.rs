@@ -123,7 +123,7 @@ struct PreflightTuiState {
 }
 
 impl PreflightTuiState {
-    fn from_report(report: &crate::preflight::PreflightReport) -> Self {
+    fn from_report(report: &bootc_migrate_composefs::preflight::PreflightReport) -> Self {
         let multiplier: f64 = if report.supports_reflink { 1.1 } else { 1.5 };
         let composefs_needed = (report.ostree_repo_size_bytes as f64 * multiplier) as u64;
 
@@ -229,12 +229,14 @@ impl PreflightTuiState {
         // Pending transaction
         checks.push((
             match &report.pending_transaction {
-                crate::preflight::PendingTransactionStatus::Clean => {
+                bootc_migrate_composefs::preflight::PendingTransactionStatus::Clean => {
                     "No pending OSTree transaction".to_string()
                 }
                 other => format!("Pending transaction: {}", other),
             },
-            if report.pending_transaction == crate::preflight::PendingTransactionStatus::Clean {
+            if report.pending_transaction
+                == bootc_migrate_composefs::preflight::PendingTransactionStatus::Clean
+            {
                 Readiness::Pass
             } else {
                 Readiness::Fail
@@ -751,7 +753,7 @@ impl App {
         self.screen = match self.screen {
             Screen::Welcome => {
                 // Run preflight checks and show results.
-                match crate::preflight::run_preflight_checks() {
+                match bootc_migrate_composefs::preflight::run_preflight_checks() {
                     Ok(report) => {
                         self.preflight_state = Some(PreflightTuiState::from_report(&report));
                     }
@@ -875,7 +877,7 @@ impl App {
             KeyCode::Char('q') => self.show_quit_dialog = true,
             KeyCode::Char('r') => {
                 // Re-run preflight
-                if let Ok(report) = crate::preflight::run_preflight_checks() {
+                if let Ok(report) = bootc_migrate_composefs::preflight::run_preflight_checks() {
                     self.preflight_state = Some(PreflightTuiState::from_report(&report));
                 }
             }

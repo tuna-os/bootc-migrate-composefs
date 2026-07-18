@@ -47,7 +47,7 @@ pub fn copy_file_with_xattrs(src: &Path, dst: &Path) -> Result<()> {
 /// [`crate::mergetc`]. Best-effort: a destination filesystem without xattr
 /// support (`ENOTSUP`, e.g. a FAT32 ESP) is silently tolerated; other set
 /// failures are logged but do not abort the copy.
-pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
+pub fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
     let Some(names) = list_xattr_names(src)? else {
         return Ok(());
     };

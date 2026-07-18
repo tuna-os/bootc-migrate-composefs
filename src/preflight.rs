@@ -150,6 +150,7 @@ pub fn check_pending_ostree_transaction() -> PendingTransactionStatus {
     PendingTransactionStatus::Clean
 }
 
+#[derive(Debug)]
 pub struct PreflightReport {
     pub is_bootc_ostree: bool,
     pub pending_transaction: PendingTransactionStatus,

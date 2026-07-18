@@ -3001,7 +3001,7 @@ fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
 /// under /var/tmp/esp-migration if it is not already mounted. Does not
 /// require a PreflightReport — use from the commit/cleanup path where
 /// the preflight context is not available.
-pub(crate) fn find_esp_or_mount() -> Result<String> {
+pub fn find_esp_or_mount() -> Result<String> {
     // Check standard mount points first.
     for path in ["/boot/efi", "/efi"] {
         if Path::new(path).exists() && Path::new(path).join("EFI").exists() {

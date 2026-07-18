@@ -3,18 +3,9 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process;
 
-mod composefs;
-mod mergetc;
-mod migration;
-mod motd;
-mod ostree;
-mod preflight;
-mod reflink;
-mod tui;
-mod types;
-mod xattr;
+use bootc_migrate_composefs::{migration, motd, preflight};
 
-pub use types::VerityDigest;
+mod tui;
 
 #[derive(Parser, Debug)]
 #[command(name = "bootc-migrate-composefs")]
@@ -574,7 +565,7 @@ fn run_commit(dry_run: bool) -> Result<()> {
     // /var/tmp/esp-migration and the boot-time fstab doesn't know about
     // it). Try auto-mounting the ESP by partition type GUID.
     if composefs_entries.is_empty()
-        && let Ok(esp_path) = crate::migration::find_esp_or_mount()
+        && let Ok(esp_path) = migration::find_esp_or_mount()
     {
         let esp_entries = Path::new(&esp_path).join("loader/entries");
         if esp_entries.exists() {

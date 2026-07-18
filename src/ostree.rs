@@ -25,6 +25,7 @@ pub fn compute_sha512<P: AsRef<Path>>(path: P) -> Result<String> {
     Ok(format!("{:x}", result))
 }
 
+#[derive(Debug)]
 pub struct OstreeFileObject {
     pub path: PathBuf,
     #[allow(dead_code)]
