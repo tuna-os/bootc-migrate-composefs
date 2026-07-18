@@ -13,6 +13,7 @@
 //! - [`preflight`] — system introspection and migration readiness checks
 //! - [`migration`] — the phase 0–5 migration pipeline, bootloader/BLS handling,
 //!   kernel command-line construction, and os-release parsing
+//! - [`transaction`] — two-phase apply: `commit` / `undo` of a staged migration
 //! - [`types`] — shared types such as [`VerityDigest`]
 
 pub mod composefs;
@@ -23,6 +24,7 @@ pub mod ostree;
 pub mod preflight;
 pub mod reflink;
 pub mod registry;
+pub mod transaction;
 pub mod types;
 pub mod xattr;
 
