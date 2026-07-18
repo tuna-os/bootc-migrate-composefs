@@ -723,13 +723,20 @@ if [ "$IS_LUKS" = true ]; then
     QEMU_STDIN="$PW_FIFO"
     (
         # Answer the LUKS prompt on EVERY boot — the initial boot and the
-        # post-migration reboot both prompt — so follow the serial log and type
-        # the passphrase whenever the prompt appears (systemd re-prompts on a
-        # missed/failed attempt, which produces a new line and re-triggers us).
-        tail -F -n +1 qemu.log 2>/dev/null | while IFS= read -r line; do
-            if printf '%s' "$line" | grep -qia 'enter passphrase for disk root'; then
+        # post-migration reboot both prompt. Poll the serial log with grep
+        # instead of a line-buffered `tail | read` loop: the prompt has no
+        # trailing newline, so when boot stalls on it with no further output
+        # (the common case on the post-migration reboot), a read-line watcher
+        # never sees it and the VM hangs until the SSH-wait times out. grep
+        # counts an unterminated final line, so polling catches every prompt;
+        # systemd re-prompts on a failed attempt, raising the count again.
+        injected=0
+        while sleep 2; do
+            prompts=$(grep -aic 'enter passphrase for disk root' qemu.log 2>/dev/null) || prompts=0
+            if [ "$prompts" -gt "$injected" ]; then
                 printf '%s\n' "$LUKS_PASSPHRASE" >&9
-                echo "[luks] injected passphrase over serial console"
+                injected=$((injected + 1))
+                echo "[luks] injected passphrase over serial console (prompt #$injected)"
             fi
         done
     ) &
