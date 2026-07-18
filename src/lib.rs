@@ -9,6 +9,7 @@
 //! - [`xattr`] — xattr-preserving copy helpers
 //! - [`ostree`] — OSTree object scanning and hashing
 //! - [`composefs`] — composefs image operations (via `bootc internals cfs`)
+//! - [`registry`] — disk-bounded, layer-at-a-time file extraction from OCI images
 //! - [`preflight`] — system introspection and migration readiness checks
 //! - [`migration`] — the phase 0–5 migration pipeline, bootloader/BLS handling,
 //!   kernel command-line construction, and os-release parsing
@@ -21,6 +22,7 @@ pub mod motd;
 pub mod ostree;
 pub mod preflight;
 pub mod reflink;
+pub mod registry;
 pub mod types;
 pub mod xattr;
 
