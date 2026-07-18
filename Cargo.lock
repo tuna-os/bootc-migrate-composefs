@@ -99,16 +99,34 @@ name = "bootc-migrate-composefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bootc-migrate-core",
  "clap",
  "crossterm",
  "ratatui",
+ "rustix",
+ "tui-big-text",
+]
+
+[[package]]
+name = "bootc-migrate-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tini",
- "tui-big-text",
+]
+
+[[package]]
+name = "bootc-rebase"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bootc-migrate-core",
+ "clap",
 ]
 
 [[package]]

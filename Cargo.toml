@@ -1,14 +1,20 @@
-[package]
-name = "bootc-migrate-composefs"
+[workspace]
+resolver = "3"
+members = [
+    "crates/bootc-migrate-core",
+    "crates/bootc-migrate-composefs",
+    "crates/bootc-rebase",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "In-place migration from OSTree-backed to composefs-backed bootc systems"
 repository = "https://github.com/hanthor/bootc-migrate-composefs"
-readme = "README.md"
 rust-version = "1.88.0"
 
-[dependencies]
+[workspace.dependencies]
+bootc-migrate-core = { path = "crates/bootc-migrate-core" }
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,12 +27,12 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 crossterm = "0.29.0"
 tui-big-text = "0.8"
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"
 unused_must_use = "forbid"
 missing_debug_implementations = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
 

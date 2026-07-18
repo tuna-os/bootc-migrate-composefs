@@ -1,0 +1,21 @@
+[package]
+name = "bootc-migrate-composefs"
+description = "In-place migration from OSTree-backed to composefs-backed bootc systems"
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bootc-migrate-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+rustix.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tui-big-text.workspace = true
+
+[lints]
+workspace = true
