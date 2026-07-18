@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use std::process;
 
-use bootc_migrate_composefs::{migration, preflight, transaction};
+use bootc_migrate_core::{migration, preflight, transaction};
 
 mod tui;
 
