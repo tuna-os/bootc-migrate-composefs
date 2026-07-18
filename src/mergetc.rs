@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// Result of reading a file for 3-way merge. None means the file does not exist
 /// in that version.
+#[derive(Debug)]
 pub struct MergeContext {
     pub old_default: Option<Vec<u8>>,
     pub current: Option<Vec<u8>>,
