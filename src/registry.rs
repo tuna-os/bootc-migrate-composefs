@@ -1,0 +1,599 @@
+//! Disk-bounded extraction of files from OCI registry images.
+//!
+//! Downloads image layers one at a time — fetch → extract needed files →
+//! delete blob → repeat — so peak disk usage is bounded by the largest
+//! single layer instead of the whole image (see docs/architecture.md §1–2).
+//! This avoids `podman pull`-ing multi-GB images when only a few files
+//! (kernel, initrd, bootloader binaries, kernel modules) are needed, and
+//! works around composefs EROFS mounts zero-filling large file content.
+//!
+//! Base- and direction-agnostic: operates on any OCI image reference.
+
+use anyhow::{Context, Result, anyhow};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+pub fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> Result<()> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+
+    // Manifest list / OCI index → resolve to current-arch manifest.
+    let layers_manifest = if endpoint.is_manifest_index(&manifest_json) {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let entries = manifest_json
+            .get("manifests")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("manifest index has no manifests array"))?;
+        let pick = entries
+            .iter()
+            .find(|m| {
+                m.get("platform")
+                    .and_then(|p| p.get("architecture"))
+                    .and_then(|a| a.as_str())
+                    == Some(arch)
+            })
+            .ok_or_else(|| anyhow!("manifest index has no entry for arch {}", arch))?;
+        let digest = pick
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("manifest index entry has no digest"))?;
+        endpoint.fetch_manifest(digest)?
+    } else {
+        manifest_json
+    };
+
+    let layers = layers_manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-extract-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for layer streaming")?;
+
+    let mut remaining: Vec<(&Path, &Path)> = files.to_vec();
+    for layer in layers.iter().rev() {
+        if remaining.is_empty() {
+            break;
+        }
+        let digest = layer
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("layer entry has no digest"))?;
+
+        // Download just this one layer, extract from it, drop it.
+        let blob_path = scratch.path().join("layer.blob");
+        endpoint
+            .download_blob(digest, &blob_path)
+            .with_context(|| format!("failed to fetch layer {}", digest))?;
+
+        let mut still_needed: Vec<(&Path, &Path)> = Vec::new();
+        for (src, dst) in remaining.into_iter() {
+            if extract_one_from_layer(&blob_path, src, dst)? {
+                // satisfied
+            } else {
+                still_needed.push((src, dst));
+            }
+        }
+        remaining = still_needed;
+        let _ = fs::remove_file(&blob_path);
+    }
+
+    if !remaining.is_empty() {
+        let missing: Vec<String> = remaining
+            .iter()
+            .map(|(s, _)| s.display().to_string())
+            .collect();
+        return Err(anyhow!(
+            "target image is missing files: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+pub fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Path) -> Result<()> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    let layers_manifest = if endpoint.is_manifest_index(&manifest_json) {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let entries = manifest_json
+            .get("manifests")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("manifest index has no manifests array"))?;
+        let pick = entries
+            .iter()
+            .find(|m| {
+                m.get("platform")
+                    .and_then(|p| p.get("architecture"))
+                    .and_then(|a| a.as_str())
+                    == Some(arch)
+            })
+            .ok_or_else(|| anyhow!("manifest index has no entry for arch {}", arch))?;
+        let digest = pick
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("manifest index entry has no digest"))?;
+        endpoint.fetch_manifest(digest)?
+    } else {
+        manifest_json
+    };
+    let layers = layers_manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-subtree-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for subtree streaming")?;
+
+    fs::create_dir_all(dst_dir)
+        .with_context(|| format!("failed to create subtree destination {}", dst_dir.display()))?;
+
+    // Iterate oldest → newest so later writes win.
+    for layer in layers.iter() {
+        let digest = layer
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("layer entry has no digest"))?;
+
+        let blob_path = scratch.path().join("layer.blob");
+        endpoint
+            .download_blob(digest, &blob_path)
+            .with_context(|| format!("failed to fetch layer {}", digest))?;
+
+        // tar will silently produce no output if the prefix is absent in this layer.
+        // --strip-components=1 drops the leading directory we asked for so the
+        // contents land directly under dst_dir (we want dst_dir to be the merged
+        // /etc, not dst_dir/etc).
+        let normalized = subtree.trim_end_matches('/');
+        for candidate in [format!("./{}", normalized), normalized.to_string()] {
+            let _ = Command::new("tar")
+                .args([
+                    "-xaf",
+                    blob_path
+                        .to_str()
+                        .ok_or_else(|| anyhow!("invalid blob path"))?,
+                    "-C",
+                    dst_dir
+                        .to_str()
+                        .ok_or_else(|| anyhow!("invalid dst path"))?,
+                    "--overwrite",
+                    "--no-same-owner",
+                    "--strip-components=1",
+                    &candidate,
+                ])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = fs::remove_file(&blob_path);
+    }
+    Ok(())
+}
+
+/// Extract the target image's kernel modules for `kver` from the registry into a
+/// fresh /var/tmp directory, returning the tempdir guard plus the path to the
+/// extracted `usr/lib/modules/<kver>` tree.
+///
+/// The composefs cfs mount used elsewhere in Phase 5 can fall back to a raw
+/// EROFS mount, where files past the inline threshold (xfs.ko, modules.dep.bin,
+/// …) read back as zeros — so dracut cannot rebuild an initrd from that mount.
+/// The registry layer stream returns real bytes, so we source the modules tree
+/// from there instead (the same mechanism that extracts vmlinuz + initrd).
+pub fn extract_kernel_modules_via_registry(
+    image_ref: &str,
+    kver: &str,
+) -> Result<(tempfile::TempDir, PathBuf)> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    let layers_manifest = endpoint.arch_layers_manifest(manifest_json)?;
+    let layers = layers_manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-kmods-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for kernel module streaming")?;
+    let blob_path = scratch.path().join("layer.blob");
+    let want = format!("usr/lib/modules/{kver}");
+
+    // Newest → oldest with --skip-old-files so the newest copy of each file
+    // wins (overlay semantics). The module tree is split across layers — bootc
+    // images regenerate modules.dep.bin in a later layer than the kernel's .ko
+    // files — so we can't stop at the first layer; we keep going until the
+    // filesystem drivers the composefs+LUKS+XFS initrd actually needs (xfs,
+    // erofs, overlay — shipped together in the kernel-modules layer) are present.
+    // Full paths (no --strip-components) land the tree deterministically at
+    // <scratch>/usr/lib/modules/<kver> regardless of the layer's leading `./`.
+    let mods = scratch.path().join(&want);
+    let needed_kos = [
+        mods.join("kernel/fs/xfs/xfs.ko"),
+        mods.join("kernel/fs/erofs/erofs.ko"),
+        mods.join("kernel/fs/overlayfs/overlay.ko"),
+    ];
+    for layer in layers.iter().rev() {
+        let digest = layer
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("layer entry has no digest"))?;
+        endpoint
+            .download_blob(digest, &blob_path)
+            .with_context(|| format!("failed to fetch layer {}", digest))?;
+        for candidate in [format!("./{want}"), want.clone()] {
+            let _ = Command::new("tar")
+                .arg("-xaf")
+                .arg(&blob_path)
+                .arg("-C")
+                .arg(scratch.path())
+                .args(["--skip-old-files", "--no-same-owner"])
+                .arg(&candidate)
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = fs::remove_file(&blob_path);
+        if needed_kos.iter().all(|p| p.exists()) {
+            break;
+        }
+    }
+
+    let missing: Vec<String> = needed_kos
+        .iter()
+        .filter(|p| !p.exists())
+        .map(|p| p.display().to_string())
+        .collect();
+    if !mods.join("modules.dep.bin").exists() || !missing.is_empty() {
+        return Err(anyhow!(
+            "incomplete kernel modules for {kver} from {image_ref} via registry \
+             (missing: {})",
+            if missing.is_empty() {
+                "modules.dep.bin".to_string()
+            } else {
+                missing.join(", ")
+            }
+        ));
+    }
+    Ok((scratch, mods))
+}
+
+/// Resolved registry endpoint: base URL (scheme + host), repository, reference, and
+/// optional Bearer token. Built once per image and reused for the manifest + every
+/// blob fetch.
+struct RegistryEndpoint {
+    base_url: String,
+    repo: String,
+    reference: String,
+    bearer: Option<String>,
+}
+
+impl RegistryEndpoint {
+    fn resolve(image_ref: &str) -> Result<Self> {
+        let (host, repo, reference) = parse_image_ref(image_ref)?;
+
+        // Pick http for plain non-standard ports (local dev registries), https otherwise.
+        // We probe /v2/ to confirm and to discover any bearer challenge.
+        let candidates: &[&str] = if host_is_plain_http(&host) {
+            &["http"]
+        } else {
+            &["https", "http"]
+        };
+
+        for scheme in candidates {
+            let base = format!("{}://{}", scheme, host);
+            match probe_v2(&base, &repo) {
+                Ok(bearer) => {
+                    return Ok(RegistryEndpoint {
+                        base_url: base,
+                        repo,
+                        reference,
+                        bearer,
+                    });
+                }
+                Err(_) => continue,
+            }
+        }
+        Err(anyhow!(
+            "could not reach registry {} (tried {:?})",
+            host,
+            candidates
+        ))
+    }
+
+    fn fetch_manifest(&self, reference: &str) -> Result<serde_json::Value> {
+        let url = format!("{}/v2/{}/manifests/{}", self.base_url, self.repo, reference);
+        let mut args: Vec<String> = vec![
+            "-sSL".into(),
+            "--fail".into(),
+            "-H".into(),
+            "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json".into(),
+        ];
+        if let Some(token) = &self.bearer {
+            args.push("-H".into());
+            args.push(format!("Authorization: Bearer {}", token));
+        }
+        args.push(url);
+        let out = Command::new("curl")
+            .args(&args)
+            .output()
+            .context("failed to invoke curl for manifest fetch")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "curl manifest fetch failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        serde_json::from_slice(&out.stdout).context("failed to parse manifest JSON")
+    }
+
+    fn is_manifest_index(&self, m: &serde_json::Value) -> bool {
+        match m.get("mediaType").and_then(|v| v.as_str()) {
+            Some(mt) => mt.contains("manifest.list") || mt.contains("image.index"),
+            None => m.get("manifests").is_some(),
+        }
+    }
+
+    fn download_blob(&self, digest: &str, dst: &Path) -> Result<()> {
+        let url = format!("{}/v2/{}/blobs/{}", self.base_url, self.repo, digest);
+        let mut args: Vec<String> = vec![
+            "-sSL".into(),
+            "--fail".into(),
+            "-o".into(),
+            dst.to_string_lossy().into_owned(),
+        ];
+        if let Some(token) = &self.bearer {
+            args.push("-H".into());
+            args.push(format!("Authorization: Bearer {}", token));
+        }
+        args.push(url);
+        let status = Command::new("curl")
+            .args(&args)
+            .status()
+            .context("failed to invoke curl for blob fetch")?;
+        if !status.success() {
+            return Err(anyhow!("curl blob fetch failed for {}", digest));
+        }
+        Ok(())
+    }
+
+    /// Resolve a (possibly multi-arch) manifest to the concrete image manifest
+    /// for the current architecture.
+    fn arch_layers_manifest(&self, manifest_json: serde_json::Value) -> Result<serde_json::Value> {
+        if !self.is_manifest_index(&manifest_json) {
+            return Ok(manifest_json);
+        }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let entries = manifest_json
+            .get("manifests")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("manifest index has no manifests array"))?;
+        let pick = entries
+            .iter()
+            .find(|m| {
+                m.get("platform")
+                    .and_then(|p| p.get("architecture"))
+                    .and_then(|a| a.as_str())
+                    == Some(arch)
+            })
+            .ok_or_else(|| anyhow!("manifest index has no entry for arch {}", arch))?;
+        let digest = pick
+            .get("digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("manifest index entry has no digest"))?;
+        self.fetch_manifest(digest)
+    }
+}
+
+/// Hosts that should always use plain HTTP: bare IPv4 with a port, or `localhost`.
+fn host_is_plain_http(host: &str) -> bool {
+    if host.starts_with("localhost") {
+        return true;
+    }
+    // IPv4-with-port like 10.0.2.2:5000
+    let host_only = host.split(':').next().unwrap_or(host);
+    host_only
+        .split('.')
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && host_only.split('.').count() == 4
+}
+
+/// Probe `/v2/` (or `/v2/<repo>/tags/list`) to determine if the registry is reachable
+/// and whether it requires a Bearer token. Returns Ok(Some(token)) if a Bearer
+/// challenge was issued and we obtained a token, Ok(None) for anonymous access, Err
+/// on transport failure.
+fn probe_v2(base_url: &str, repo: &str) -> Result<Option<String>> {
+    let url = format!("{}/v2/", base_url);
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-D",
+            "-",
+            "--max-time",
+            "10",
+            &url,
+        ])
+        .output()
+        .context("curl probe failed")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "curl probe to {} failed: {}",
+            url,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let headers = String::from_utf8_lossy(&out.stdout);
+    // First line: HTTP/1.1 <code> ...
+    let status_code = headers
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("");
+    if status_code.starts_with("2") {
+        return Ok(None);
+    }
+    if status_code == "401" {
+        // Parse Www-Authenticate: Bearer realm="...",service="...",scope="..."
+        let challenge = headers
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("www-authenticate:"))
+            .ok_or_else(|| anyhow!("registry returned 401 with no Www-Authenticate header"))?;
+        let token = fetch_bearer_token(challenge, repo)?;
+        return Ok(Some(token));
+    }
+    Err(anyhow!("unexpected status from {}: {}", url, status_code))
+}
+
+/// Parse a `Www-Authenticate: Bearer realm="...",service="...",scope="..."` line and
+/// fetch an anonymous token. If the challenge didn't include a scope, build one for
+/// pull access to `repo`.
+fn fetch_bearer_token(challenge: &str, repo: &str) -> Result<String> {
+    let bearer_part = challenge
+        .split_once(':')
+        .map(|x| x.1)
+        .map(|s| s.trim())
+        .unwrap_or("");
+    let bearer_part = bearer_part
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| anyhow!("Www-Authenticate is not a Bearer challenge: {}", challenge))?;
+
+    let mut realm: Option<String> = None;
+    let mut service: Option<String> = None;
+    let mut scope: Option<String> = None;
+    for kv in bearer_part.split(',') {
+        let mut it = kv.splitn(2, '=');
+        let k = it.next().unwrap_or("").trim();
+        let v = it.next().unwrap_or("").trim().trim_matches('"');
+        match k {
+            "realm" => realm = Some(v.to_string()),
+            "service" => service = Some(v.to_string()),
+            "scope" => scope = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    let realm = realm.ok_or_else(|| anyhow!("Bearer challenge missing realm"))?;
+    let scope = scope.unwrap_or_else(|| format!("repository:{}:pull", repo));
+
+    let mut url = format!("{}?scope={}", realm, urlencode(&scope));
+    if let Some(svc) = service {
+        url.push_str(&format!("&service={}", urlencode(&svc)));
+    }
+
+    let out = Command::new("curl")
+        .args(["-sSL", "--fail", &url])
+        .output()
+        .context("curl token fetch failed")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "token fetch failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("token endpoint did not return JSON")?;
+    let token = body
+        .get("token")
+        .or_else(|| body.get("access_token"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("token endpoint response has no token field"))?;
+    Ok(token.to_string())
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Parse `host[:port]/repo[:tag|@digest]` into (host, repo, reference).
+/// Reference is the digest if `@` was present, otherwise the tag (default `latest`).
+fn parse_image_ref(image_ref: &str) -> Result<(String, String, String)> {
+    let trimmed = image_ref
+        .strip_prefix("docker://")
+        .unwrap_or(image_ref)
+        .trim_start_matches('/');
+    let (host, rest) = trimmed
+        .split_once('/')
+        .ok_or_else(|| anyhow!("image ref {} has no repository component", image_ref))?;
+
+    // Split reference. `@` (digest) takes priority over `:` (tag) since digest contains `:`.
+    let (repo, reference) = if let Some((r, d)) = rest.split_once('@') {
+        (r.to_string(), d.to_string())
+    } else if let Some((r, t)) = rest.rsplit_once(':') {
+        (r.to_string(), t.to_string())
+    } else {
+        (rest.to_string(), "latest".to_string())
+    };
+    Ok((host.to_string(), repo, reference))
+}
+
+/// Try to extract a single file from one OCI layer blob to `dst`. Returns Ok(true)
+/// if found, Ok(false) if the path wasn't in this layer (caller continues to the
+/// next layer), Err on unexpected tar/IO failure.
+///
+/// OCI layer tarballs are gzip- or zstd-compressed and may store paths with or
+/// without a leading `./`, so we try both forms. `tar -xaf` autodetects compression.
+fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
+    let src_no_leading = src
+        .strip_prefix("/")
+        .unwrap_or(src)
+        .to_string_lossy()
+        .into_owned();
+    let candidates = [format!("./{}", src_no_leading), src_no_leading.clone()];
+
+    for candidate in &candidates {
+        // Stream directly to disk — initrds can be ~200 MB, no reason to buffer.
+        let dst_file = fs::File::create(dst).with_context(|| {
+            format!(
+                "failed to open destination {} for tar extract",
+                dst.display()
+            )
+        })?;
+        let status = Command::new("tar")
+            .args([
+                "-xaf",
+                blob.to_str().ok_or_else(|| anyhow!("invalid blob path"))?,
+                "-O",
+                candidate,
+            ])
+            .stdout(dst_file)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("failed to invoke tar for layer extraction")?;
+        if status.success() {
+            // tar emitted to stdout — verify we got actual bytes (some tar versions
+            // exit 0 even when the path isn't in the archive, just producing empty).
+            if let Ok(meta) = fs::metadata(dst)
+                && meta.len() > 0
+            {
+                return Ok(true);
+            }
+        }
+        // Clean the empty destination so the next attempt starts fresh.
+        let _ = fs::remove_file(dst);
+    }
+    Ok(false)
+}
