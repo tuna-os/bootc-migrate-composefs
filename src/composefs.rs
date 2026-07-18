@@ -8,10 +8,83 @@ use std::sync::OnceLock;
 /// here by `setup_composefs_loopback_if_needed`.
 const STORE: &str = "/sysroot/composefs";
 
-/// Remembers whether the store was (re)built with the TARGET image's bootc, so
-/// `create_image`/`seal` use the same bootc that wrote the store. Set by
-/// `pull_image`.
-static USE_TARGET_BOOTC: OnceLock<bool> = OnceLock::new();
+/// Operations on the system composefs store, abstracted behind a trait so
+/// library consumers can swap implementations: the real `bootc internals cfs`
+/// CLI ([`BootcCliStore`]), an in-memory mock for tests/dry-runs
+/// ([`MockComposefsStore`]), or eventually a native composefs-rs backend (#13).
+///
+/// Methods are the *logical* store operations, not a mirror of the bootc CLI
+/// surface, so alternative backends can implement them without shelling out.
+pub trait ComposefsStore: std::fmt::Debug {
+    /// Pull `image_ref` into the store; returns the pull output (digests).
+    fn pull_image(&self, target_image: &str, image_ref: &str) -> Result<String>;
+    /// Create the composefs EROFS image for `image_id`; returns its fs-verity digest.
+    fn create_image(&self, target_image: &str, image_id: &str) -> Result<String>;
+    /// Seal `image_id`; returns the seal output (sealed config digest).
+    fn seal_image(&self, target_image: &str, image_id: &str) -> Result<String>;
+    /// Confirm the finished store is readable by the target image's bootc.
+    fn verify_store_target_readable(&self, target_image: &str) -> Result<()>;
+}
+
+/// The real implementation: drives `bootc internals cfs` — natively when the
+/// host bootc is new enough, otherwise via the target image's own bootc in a
+/// podman container (see [`ComposefsStore::pull_image`]).
+#[derive(Debug, Default)]
+pub struct BootcCliStore {
+    /// Whether the store was (re)built with the TARGET image's bootc, so
+    /// `create_image`/`seal_image` use the same bootc that wrote the store.
+    /// Set by `pull_image`.
+    use_target_bootc: OnceLock<bool>,
+}
+
+/// In-memory store for unit tests and dry-run pipelines: records every call
+/// and returns canned digests without touching the system.
+#[derive(Debug, Default)]
+pub struct MockComposefsStore {
+    /// Call log: one entry per method invocation.
+    pub calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl ComposefsStore for MockComposefsStore {
+    fn pull_image(&self, _target_image: &str, image_ref: &str) -> Result<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("pull_image {image_ref}"));
+        Ok(
+            "manifest sha256:0000000000000000000000000000000000000000000000000000000000000000
+            config sha256:1111111111111111111111111111111111111111111111111111111111111111
+"
+            .to_string(),
+        )
+    }
+    fn create_image(&self, _target_image: &str, image_id: &str) -> Result<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("create_image {image_id}"));
+        Ok("2222222222222222222222222222222222222222222222222222222222222222            2222222222222222222222222222222222222222222222222222222222222222"
+            .to_string())
+    }
+    fn seal_image(&self, _target_image: &str, image_id: &str) -> Result<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("seal_image {image_id}"));
+        Ok(
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333
+"
+            .to_string(),
+        )
+    }
+    fn verify_store_target_readable(&self, _target_image: &str) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push("verify_store_target_readable".to_string());
+        Ok(())
+    }
+}
 
 /// Run `bootc internals cfs --system oci <args>` with the host (source) bootc.
 /// This is the fast path: it runs natively, so on btrfs it reflinks the image's
@@ -88,124 +161,120 @@ fn with_transport(image_ref: &str) -> String {
     }
 }
 
-pub fn pull_image(target_image: &str, image_ref: &str) -> Result<String> {
-    // Fast path: pull with the host (source) bootc. On a current source this
-    // reflinks blobs into the store and produces a target-readable deployment.
-    let docker_ref = with_transport(image_ref);
-    let host_out = host_cfs_oci(&["pull", &docker_ref])?;
-    if host_out.status.success() && manifest_stream_present() {
-        let _ = USE_TARGET_BOOTC.set(false);
-        return Ok(String::from_utf8_lossy(&host_out.stdout).to_string());
-    }
+impl ComposefsStore for BootcCliStore {
+    fn pull_image(&self, target_image: &str, image_ref: &str) -> Result<String> {
+        // Fast path: pull with the host (source) bootc. On a current source this
+        // reflinks blobs into the store and produces a target-readable deployment.
+        let docker_ref = with_transport(image_ref);
+        let host_out = host_cfs_oci(&["pull", &docker_ref])?;
+        if host_out.status.success() && manifest_stream_present() {
+            let _ = self.use_target_bootc.set(false);
+            return Ok(String::from_utf8_lossy(&host_out.stdout).to_string());
+        }
 
-    // The host bootc is too old: its pull either failed or produced no
-    // oci-manifest stream, which leaves `bootc status`/`upgrade` broken after an
-    // otherwise-successful migration. Rebuild the store with the target image's
-    // own bootc so it's written in the format the migrated system expects.
-    if host_out.status.success() {
-        eprintln!(
-            "[cfs] host bootc produced no oci-manifest stream (too old for the \
+        // The host bootc is too old: its pull either failed or produced no
+        // oci-manifest stream, which leaves `bootc status`/`upgrade` broken after an
+        // otherwise-successful migration. Rebuild the store with the target image's
+        // own bootc so it's written in the format the migrated system expects.
+        if host_out.status.success() {
+            eprintln!(
+                "[cfs] host bootc produced no oci-manifest stream (too old for the \
              target); rebuilding the store with the target image's bootc"
-        );
-    } else {
-        eprintln!(
-            "[cfs] host bootc pull failed ({}); rebuilding the store with the \
+            );
+        } else {
+            eprintln!(
+                "[cfs] host bootc pull failed ({}); rebuilding the store with the \
              target image's bootc",
-            String::from_utf8_lossy(&host_out.stderr).trim()
-        );
+                String::from_utf8_lossy(&host_out.stderr).trim()
+            );
+        }
+
+        wipe_store()?;
+        let init = target_cfs(target_image, &["init"])?;
+        if !init.status.success() {
+            return Err(anyhow!(
+                "target bootc repo init failed: {}",
+                String::from_utf8_lossy(&init.stderr)
+            ));
+        }
+
+        // Prefer the locally-cached image (Phase 2 `podman pull`) so we don't make a
+        // second on-disk copy; fall back to the registry transport.
+        let cs_ref = format!("containers-storage:{}", image_ref);
+        let mut out = target_cfs(target_image, &["oci", "pull", &cs_ref])?;
+        if !out.status.success() {
+            eprintln!(
+                "[cfs] containers-storage pull failed ({}); retrying via registry",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            out = target_cfs(target_image, &["oci", "pull", &docker_ref])?;
+        }
+        if !out.status.success() {
+            return Err(anyhow!(
+                "pull failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let _ = self.use_target_bootc.set(true);
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    wipe_store()?;
-    let init = target_cfs(target_image, &["init"])?;
-    if !init.status.success() {
-        return Err(anyhow!(
-            "target bootc repo init failed: {}",
-            String::from_utf8_lossy(&init.stderr)
-        ));
+    fn create_image(&self, target_image: &str, image_id: &str) -> Result<String> {
+        let output = if *self.use_target_bootc.get().unwrap_or(&false) {
+            target_cfs(target_image, &["oci", "create-image", image_id])?
+        } else {
+            host_cfs_oci(&["create-image", image_id])?
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("create-image failed: {}", stderr));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    // Prefer the locally-cached image (Phase 2 `podman pull`) so we don't make a
-    // second on-disk copy; fall back to the registry transport.
-    let cs_ref = format!("containers-storage:{}", image_ref);
-    let mut out = target_cfs(target_image, &["oci", "pull", &cs_ref])?;
-    if !out.status.success() {
-        eprintln!(
-            "[cfs] containers-storage pull failed ({}); retrying via registry",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        out = target_cfs(target_image, &["oci", "pull", &docker_ref])?;
-    }
-    if !out.status.success() {
-        return Err(anyhow!(
-            "pull failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let _ = USE_TARGET_BOOTC.set(true);
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-/// Whether `pull_image` rebuilt the store with the target bootc. `create_image`
-/// and `seal` must use the same bootc that wrote the store.
-fn use_target() -> bool {
-    *USE_TARGET_BOOTC.get().unwrap_or(&false)
-}
-
-pub fn create_image(target_image: &str, image_id: &str) -> Result<String> {
-    let output = if use_target() {
-        target_cfs(target_image, &["oci", "create-image", image_id])?
-    } else {
-        host_cfs_oci(&["create-image", image_id])?
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("create-image failed: {}", stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Post-build verification (#3): confirm the finished store is readable by the
-/// TARGET image's bootc — the binary that reads it at runtime — so a bootc
-/// format skew can never silently ship a migration that boots but breaks
-/// `bootc status`/`bootc upgrade`.
-///
-/// How we know it's readable:
-/// - In the rebuild path (`use_target()`), the **target bootc itself** wrote the
-///   store (its pull/create/seal succeeded), so it is target-readable by
-///   construction.
-/// - In the host path, we assert the `oci-manifest-*` stream is present — the
-///   exact artifact the target's status/upgrade open
-///   (`streams/oci-manifest-<digest>`). Its absence is the known symptom of an
-///   older source bootc and *guarantees* breakage.
-///
-/// Either way, a missing manifest stream here is a hard failure with a clear
-/// message — we refuse to declare success on a store the target can't read.
-/// This also future-proofs us: if a later bootc changes the format such that
-/// neither path produces the stream, the migration fails loudly instead of
-/// silently regressing updates.
-pub fn verify_store_target_readable(target_image: &str) -> Result<()> {
-    if manifest_stream_present() {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "post-build verification failed: the composefs store has no oci-manifest \
+    /// Post-build verification (#3): confirm the finished store is readable by the
+    /// TARGET image's bootc — the binary that reads it at runtime — so a bootc
+    /// format skew can never silently ship a migration that boots but breaks
+    /// `bootc status`/`bootc upgrade`.
+    ///
+    /// How we know it's readable:
+    /// - In the rebuild path (`use_target()`), the **target bootc itself** wrote the
+    ///   store (its pull/create/seal succeeded), so it is target-readable by
+    ///   construction.
+    /// - In the host path, we assert the `oci-manifest-*` stream is present — the
+    ///   exact artifact the target's status/upgrade open
+    ///   (`streams/oci-manifest-<digest>`). Its absence is the known symptom of an
+    ///   older source bootc and *guarantees* breakage.
+    ///
+    /// Either way, a missing manifest stream here is a hard failure with a clear
+    /// message — we refuse to declare success on a store the target can't read.
+    /// This also future-proofs us: if a later bootc changes the format such that
+    /// neither path produces the stream, the migration fails loudly instead of
+    /// silently regressing updates.
+    fn verify_store_target_readable(&self, target_image: &str) -> Result<()> {
+        if manifest_stream_present() {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "post-build verification failed: the composefs store has no oci-manifest \
          stream, so the target image's bootc ({target_image}) cannot read this \
          deployment — `bootc status`/`bootc upgrade` would break after reboot. \
          This is a bootc format incompatibility between the source bootc and the \
          target that was not resolved by rebuilding the store. Refusing to ship a \
          silently-broken migration; update the source system's bootc and retry."
-    ))
-}
-
-pub fn seal_image(target_image: &str, image_id: &str) -> Result<String> {
-    let output = if use_target() {
-        target_cfs(target_image, &["oci", "seal", image_id])?
-    } else {
-        host_cfs_oci(&["seal", image_id])?
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("seal failed: {}", stderr));
+        ))
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+
+    fn seal_image(&self, target_image: &str, image_id: &str) -> Result<String> {
+        let output = if *self.use_target_bootc.get().unwrap_or(&false) {
+            target_cfs(target_image, &["oci", "seal", image_id])?
+        } else {
+            host_cfs_oci(&["seal", image_id])?
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("seal failed: {}", stderr));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
 }

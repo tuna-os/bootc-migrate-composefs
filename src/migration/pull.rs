@@ -4,7 +4,11 @@ use super::*;
 
 // ---- Phase 2 ----
 
-pub fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, String)> {
+pub fn phase2_pull_image(
+    store: &dyn crate::composefs::ComposefsStore,
+    target_image: &str,
+    dry_run: bool,
+) -> Result<(String, String)> {
     println!("=== Phase 2: Pulling OCI image ===");
 
     if dry_run {
@@ -13,7 +17,8 @@ pub fn phase2_pull_image(target_image: &str, dry_run: bool) -> Result<(String, S
     }
 
     println!("Pulling target image: {}...", target_image);
-    let pull_output = crate::composefs::pull_image(target_image, target_image)
+    let pull_output = store
+        .pull_image(target_image, target_image)
         .context("failed to pull OCI image")?;
 
     // Also cache in podman storage so Phase 5 can fall back to podman artifact
@@ -126,5 +131,24 @@ mod tests {
         // passed through to corrupt the .origin ini.
         let (manifest, _) = parse_pull_digests("manifest sha256:x extra junk");
         assert_eq!(manifest, None);
+    }
+
+    #[test]
+    fn phase2_runs_against_mock_store() {
+        use crate::composefs::MockComposefsStore;
+        let store = MockComposefsStore::default();
+        // example.invalid never resolves, so the podman-cache side effect
+        // fails fast and the phase proceeds on the mock's pull output alone.
+        let (manifest, config) =
+            phase2_pull_image(&store, "example.invalid/mock:latest", false).unwrap();
+        assert!(manifest.starts_with("sha256:0000"));
+        assert!(config.starts_with("sha256:1111"));
+        let calls = store.calls.lock().unwrap();
+        assert_eq!(calls.as_slice(), ["pull_image example.invalid/mock:latest"]);
+        // dry_run never touches the store.
+        drop(calls);
+        let dry = MockComposefsStore::default();
+        let _ = phase2_pull_image(&dry, "example.invalid/mock:latest", true).unwrap();
+        assert!(dry.calls.lock().unwrap().is_empty());
     }
 }

@@ -712,10 +712,12 @@ pub fn run_migration(
     }
 
     // ---- Phase 2: Pull OCI image ----
-    let (_manifest_digest, config_digest) = phase2_pull_image(target_image, dry_run)?;
+    let store = crate::composefs::BootcCliStore::default();
+    let (_manifest_digest, config_digest) = phase2_pull_image(&store, target_image, dry_run)?;
 
     // ---- Phase 3: Create and seal EROFS image ----
-    let (verity, sealed_config) = phase3_create_image(target_image, &config_digest, dry_run)?;
+    let (verity, sealed_config) =
+        phase3_create_image(&store, target_image, &config_digest, dry_run)?;
 
     // ---- Phase 4: Stage deployment state ----
     let _deploy_dir = phase4_stage_deploy(
