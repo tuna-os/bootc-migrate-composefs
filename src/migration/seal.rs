@@ -12,6 +12,7 @@ use super::*;
 /// distinct: passing the rootfs verity to `mount` looks up a nonexistent
 /// `oci-config-<verity>` stream and forces the zero-filling raw-EROFS fallback.
 pub fn phase3_create_image(
+    store: &dyn crate::composefs::ComposefsStore,
     target_image: &str,
     config_digest: &str,
     dry_run: bool,
@@ -37,7 +38,8 @@ pub fn phase3_create_image(
     // Real idempotency — check if the image already exists AND is sealed.
     // We first need the verity hash to check, so we still call create_image (which
     // is typically a no-op if objects already exist), then skip seal if already done.
-    let sha512_verity_str = crate::composefs::create_image(target_image, config_digest)
+    let sha512_verity_str = store
+        .create_image(target_image, config_digest)
         .context("failed to create composefs image")?;
 
     let verity = VerityDigest::from_prefixed_or_hex(&sha512_verity_str);
@@ -54,7 +56,8 @@ pub fn phase3_create_image(
     // missing unit files like dbus.service and cascading boot failures).
     // Always seal — idempotency is handled inside bootc.
     println!("Sealing composefs image...");
-    let seal_out = crate::composefs::seal_image(target_image, config_digest)
+    let seal_out = store
+        .seal_image(target_image, config_digest)
         .context("failed to seal composefs image")?;
     let sealed_config = seal_out
         .lines()
@@ -66,7 +69,8 @@ pub fn phase3_create_image(
     // #3 — verify the finished store is readable by the target image's bootc, so
     // a bootc format skew fails loudly here instead of silently breaking
     // `bootc status`/`upgrade` after reboot.
-    crate::composefs::verify_store_target_readable(target_image)
+    store
+        .verify_store_target_readable(target_image)
         .context("composefs store is not readable by the target image's bootc")?;
     println!("Verified: composefs store is readable by the target's bootc.");
 
