@@ -1,6 +1,7 @@
 //! Preflight checks: generic system introspection ([`SystemInfo`]) plus
 //! per-direction validators ([`validate`]).
 
+pub mod readiness;
 pub mod system_info;
 pub mod validate;
 

@@ -287,202 +287,31 @@ fn main() {
         }
     };
 
-    // Output preflight details
-    println!(
-        "  - Booted OSTree backend: {}",
-        if report.is_bootc_ostree { "Yes" } else { "No" }
-    );
-    match report.pending_transaction {
-        preflight::PendingTransactionStatus::Clean => {}
-        ref other => println!(
-            "  ⚠ Pending OSTree transaction: {} — aborting (run `ostree admin undeploy` or complete the update first)",
-            other
-        ),
-    }
-    println!(
-        "  - UEFI Boot Mode:        {}",
-        if report.is_uefi {
-            "Yes"
-        } else {
-            "No (Legacy BIOS)"
-        }
-    );
-    println!(
-        "  - NVRAM writable:        {}",
-        if report.nvram_writable { "Yes" } else { "No" }
-    );
-    println!(
-        "  - ESP Mounted Path:      {}",
-        report
-            .esp_path
-            .as_deref()
-            .unwrap_or("None — GRUB2-only migration")
-    );
-    if let Some(ref fs) = report.esp_fs_type {
-        println!("  - ESP Filesystem:        {}", fs);
-    }
-    println!(
-        "  - ESP Free Space:        {:.2} MB",
-        report.esp_free_space_bytes as f64 / (1024.0 * 1024.0)
-    );
-    println!(
-        "  - Filesystem:            {}",
-        report.fs_type.as_deref().unwrap_or("unknown")
-    );
-    println!(
-        "  - Btrfs Filesystem:      {}",
-        if report.is_btrfs { "Yes" } else { "No" }
-    );
-    if report.sysroot_was_ro {
-        println!("  - /sysroot was RO:       Yes (remounted rw for reflink test)");
-    }
-    println!(
-        "  - Reflink (CoW) Support: {}",
-        if report.supports_reflink { "Yes" } else { "No" }
-    );
-    println!(
-        "  - OSTree repo size:      {:.2} GB",
-        report.ostree_repo_size_bytes as f64 / 1e9
-    );
-    println!(
-        "  - ComposeFS free space:  {:.2} GB",
-        report.composefs_free_bytes as f64 / 1e9
-    );
-    println!(
-        "  - GRUB tools available:  {}",
-        if report.grub_tools_available {
-            "Yes"
-        } else {
-            "No"
-        }
-    );
-    println!(
-        "  - ESP ready for sd-boot: {}",
-        if report.esp_ready_for_systemd_boot {
-            "Yes (>=150 MB)"
-        } else {
-            "No"
-        }
-    );
-    println!(
-        "  - systemd-boot binaries: {}",
-        if report.systemd_boot_binaries_present {
-            "Yes (/usr/lib/systemd/boot/efi)"
-        } else {
-            "No (bootctl install would fail)"
-        }
-    );
-    println!();
+    preflight::readiness::print_report(&report);
+    preflight::readiness::print_readiness(&report);
 
-    // Migration readiness summary
-    println!("=== Migration Readiness ===");
-    let mut issues: Vec<&str> = Vec::new();
-    if !report.is_bootc_ostree {
-        issues.push("NOT booted in OSTree mode — migration requires an OSTree-booted system.");
-    }
-    if !report.is_uefi {
-        issues.push("Legacy BIOS boot detected — systemd-boot unavailable; will stay on GRUB2.");
-    }
-    if report.is_uefi && !report.nvram_writable {
-        issues
-            .push("UEFI NVRAM not writable — efibootmgr may fail; systemd-boot may not register.");
-    }
-    if !report.esp_detected {
-        issues.push("No ESP found — systemd-boot unavailable; will use GRUB2.");
-    }
-    if report.is_uefi && report.esp_path.is_some() && !report.esp_ready_for_systemd_boot {
-        issues.push("ESP too small for systemd-boot — need >=150 MB free; will use GRUB2 instead.");
-    }
-    if report.is_uefi && !report.systemd_boot_binaries_present {
-        issues.push("systemd-boot binaries missing in source OS — migration will extract them from the target image instead.");
-    }
-    if !report.grub_tools_available {
-        issues.push(
-            "No GRUB tools (grub2-reboot, grub2-editenv) — one-shot boot selection may fail.",
-        );
-    }
-    if !report.supports_reflink {
-        issues.push("No reflink support — object copies will use 1.5× more disk space.");
-    }
-    let has_free_space =
-        report.composefs_free_bytes as f64 > (report.ostree_repo_size_bytes as f64 * 1.5);
-    if !has_free_space && report.ostree_repo_size_bytes > 0 {
-        issues.push(
-            "Insufficient free space for migration — need >=1.5× repo size (without reflink).",
-        );
-    }
-
-    if issues.is_empty() {
-        println!("  ✓ All preflight checks passed.");
-    } else {
-        for issue in &issues {
-            println!("  ⚠ {}", issue);
+    match preflight::readiness::gate(&report, args.force, args.skip_preflight) {
+        preflight::readiness::MigrationGate::Proceed => {}
+        preflight::readiness::MigrationGate::Refuse(reason) => {
+            eprintln!("Error: {}", reason);
+            exit_flushed!(1);
         }
-    }
-
-    // We migrate to systemd-boot by lifting the loader binary out of the target image,
-    // so the source OS no longer needs to ship systemd-boot. The systemd_boot_binaries_present
-    // field is now purely informational (warning if neither side ships it).
-    let use_systemd_boot = report.esp_ready_for_systemd_boot && report.nvram_writable;
-    if use_systemd_boot {
-        println!("\nBootloader: Will migrate to systemd-boot (ESP ready, NVRAM writable).");
-    } else if report.esp_path.is_some() {
-        println!("\nBootloader: Will stay on GRUB2 (BLS Type 1).");
-        if !report.grub_tools_available {
-            println!("  WARNING: grub2-reboot not found. Boot selection may not work.");
+        preflight::readiness::MigrationGate::ConfirmFullCopy => {
             println!(
-                "  The composefs entry will be written but you may need to select it manually"
+                "Warning: Reflink support not detected on /sysroot. Migration will perform a full copy of repository objects, which will require significant disk space."
             );
-            println!("  from the GRUB menu on next boot.");
-        }
-    } else {
-        println!("\nBootloader: Will stay on GRUB2 (BLS Type 1) — no ESP detected.");
-    }
-
-    // Validate requirements
-    if !report.is_bootc_ostree && !args.force {
-        eprintln!(
-            "Error: System is not booted into an OSTree deployment. Cannot perform migration."
-        );
-        exit_flushed!(1);
-    }
-
-    // Block on pending transactions — they cause incomplete composefs images
-    // and switch-root-os-release-errors on next boot.
-    if report.pending_transaction != preflight::PendingTransactionStatus::Clean
-        && !args.force
-        && !args.skip_preflight
-    {
-        eprintln!(
-            "Error: Pending OSTree transaction detected: {}.\n\
-             The OSTree repo has uncommitted state from a previous update. The migration\n\
-             would produce an incomplete composefs image that cannot boot.\n\
-             \n\
-             To resolve:\n\
-               - If you ran `bootc upgrade` or `rpm-ostree upgrade`, complete it first.\n\
-               - If the update was interrupted, run `ostree admin undeploy <index>`\n\
-                 to remove the pending deployment.\n\
-               - Or run `bootc upgrade` to finish/finalize the pending transaction.\n",
-            report.pending_transaction
-        );
-        exit_flushed!(1);
-    }
-
-    if !report.supports_reflink && !args.force {
-        println!(
-            "Warning: Reflink support not detected on /sysroot. Migration will perform a full copy of repository objects, which will require significant disk space."
-        );
-        print!("Do you want to proceed anyway? (y/N): ");
-        let mut input = String::new();
-        if std::io::stdin().read_line(&mut input).is_ok() {
-            let input = input.trim().to_lowercase();
-            if input != "y" && input != "yes" {
+            print!("Do you want to proceed anyway? (y/N): ");
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).is_ok() {
+                let input = input.trim().to_lowercase();
+                if input != "y" && input != "yes" {
+                    println!("Migration aborted.");
+                    exit_flushed!(0);
+                }
+            } else {
                 println!("Migration aborted.");
                 exit_flushed!(0);
             }
-        } else {
-            println!("Migration aborted.");
-            exit_flushed!(0);
         }
     }
 
