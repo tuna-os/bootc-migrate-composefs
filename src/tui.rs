@@ -234,7 +234,9 @@ impl PreflightTuiState {
                 }
                 other => format!("Pending transaction: {}", other),
             },
-            if report.pending_transaction == bootc_migrate_composefs::preflight::PendingTransactionStatus::Clean {
+            if report.pending_transaction
+                == bootc_migrate_composefs::preflight::PendingTransactionStatus::Clean
+            {
                 Readiness::Pass
             } else {
                 Readiness::Fail
