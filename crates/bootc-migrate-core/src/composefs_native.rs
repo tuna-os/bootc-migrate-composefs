@@ -239,6 +239,102 @@ pub fn repo_exists(repo_path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// A minimal POSIX ustar archive: `usr/` and one file under it (the
+    /// filesystem builder copies root metadata from `/usr`, so the layer must
+    /// contain it). Hand-rolled so the test needs no tar dependency.
+    fn minimal_tar() -> Vec<u8> {
+        fn header(name: &str, size: usize, typeflag: u8) -> [u8; 512] {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            h[100..108].copy_from_slice(b"0000755\0");
+            h[108..116].copy_from_slice(b"0000000\0");
+            h[116..124].copy_from_slice(b"0000000\0");
+            h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+            h[136..148].copy_from_slice(b"00000000000\0");
+            h[156] = typeflag;
+            h[257..263].copy_from_slice(b"ustar\0");
+            h[263..265].copy_from_slice(b"00");
+            // Checksum: field counts as spaces while summing.
+            h[148..156].copy_from_slice(b"        ");
+            let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+            h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+            h[155] = b' ';
+            h
+        }
+        let content = b"hello from the native store test\n";
+        let mut tar = Vec::new();
+        tar.extend_from_slice(&header("usr/", 0, b'5'));
+        tar.extend_from_slice(&header("usr/hello.txt", content.len(), b'0'));
+        tar.extend_from_slice(content);
+        tar.resize(tar.len().next_multiple_of(512), 0);
+        tar.resize(tar.len() + 1024, 0); // end-of-archive blocks
+        tar
+    }
+
+    /// Full create+seal integration against a real repository: fabricate a
+    /// one-layer OCI image via the crate's own import/write APIs, then drive
+    /// the trait methods the way phase 3 does.
+    #[test]
+    fn create_and_seal_against_a_real_store() {
+        use sha2::Digest as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = NativeStore::new(dir.path().join("repo"));
+        let repo = store.repo().unwrap();
+
+        // Layer: import the tar under its diff_id (sha256 of the bytes).
+        let tar = minimal_tar();
+        let diff_id = format!("sha256:{:x}", sha2::Sha256::digest(&tar));
+        let (layer_verity, _stats) = runtime()
+            .unwrap()
+            .block_on(composefs_oci::import_layer(
+                &repo,
+                &oci_digest(&diff_id).unwrap(),
+                None,
+                tar.as_slice(),
+            ))
+            .unwrap();
+
+        // Config: minimal OCI image configuration referencing that layer.
+        let config_json = format!(
+            r#"{{"architecture":"amd64","os":"linux","config":{{}},"rootfs":{{"type":"layers","diff_ids":["{diff_id}"]}}}}"#
+        );
+        let mut refs = std::collections::HashMap::new();
+        refs.insert(diff_id.clone().into_boxed_str(), layer_verity);
+        let (config_digest, _config_verity) = composefs_oci::write_config_raw(
+            &repo,
+            config_json.as_bytes(),
+            refs,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let config_digest = config_digest.to_string();
+
+        // Phase-3 shape: create_image returns the EROFS fs-verity digest as
+        // bare sha512 hex (what VerityDigest/`composefs=` expect).
+        let verity_hex = store.create_image("unused", &config_digest).unwrap();
+        assert_eq!(verity_hex.len(), 128, "sha512 fs-verity digest expected");
+        assert!(verity_hex.chars().all(|c| c.is_ascii_hexdigit()));
+        // Idempotent: a second run re-derives the same object.
+        assert_eq!(
+            store.create_image("unused", &config_digest).unwrap(),
+            verity_hex
+        );
+
+        // seal returns the *sealed* config digest line — a different digest
+        // than the pulled config (it gained the fs-verity label).
+        let seal_out = store.seal_image("unused", &config_digest).unwrap();
+        let sealed = seal_out.strip_prefix("config ").unwrap();
+        assert!(sealed.starts_with("sha256:"), "sealed digest: {sealed}");
+        assert_ne!(sealed, config_digest);
+
+        // And the store still verifies clean.
+        store.verify_store_target_readable("unused").unwrap();
+    }
+
     #[test]
     fn with_transport_adds_docker_prefix() {
         assert_eq!(
