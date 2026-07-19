@@ -621,8 +621,7 @@ mod tests {
     #[test]
     fn image_ref_digest_wins_over_colon() {
         // The digest itself contains ':' — '@' must take priority.
-        let (_, repo, r) =
-            parse_image_ref("ghcr.io/org/img@sha256:abcdef0123456789").unwrap();
+        let (_, repo, r) = parse_image_ref("ghcr.io/org/img@sha256:abcdef0123456789").unwrap();
         assert_eq!(repo, "org/img");
         assert_eq!(r, "sha256:abcdef0123456789");
     }

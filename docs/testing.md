@@ -117,6 +117,28 @@ docs updated), update `canary-baseline.tsv` in the same PR that absorbs it.
 - **Mount errors on new-gen hosts are expected noise** in phases 4/5 until
   PR #76 lands (podman fallbacks carry the migration) — don't read them as
   the failure signal.
+- **The LVM-on-LUKS cell is the disk-tightest one** (60G, BIOS-boot + ESP +
+  separate /boot + fixed 4G /var LV before root sees anything) — an ENOSPC
+  there is the flake class to suspect first, not a regression.
+
+### Incident: `required-checks` didn't actually gate on `e2e-gate`
+
+PR #73 auto-merged 2026-07-19 while its E2E run showed one cell failing
+(the LVM-on-LUKS ENOSPC flake above). Root cause: `required-checks` — the
+one job branch protection watches — listed `[validate, cargo-deny,
+coverage, actionlint]` in its `needs`, never `e2e-gate`. The two jobs were
+siblings, not a chain, since the workflow's original introduction — this
+predates every change in this document. `required-checks` passed on the
+fast jobs alone while `e2e-gate` independently failed, and GitHub had no
+reason to block the merge.
+
+Fixed by adding `e2e-gate` to `required-checks`' `needs`. The rule going
+forward: **`required-checks` is the merge gate, so every other gate must
+feed into it** — a new CI job that isn't in that `needs` list is invisible
+to branch protection no matter how good the job itself is. (The merge
+itself needed no revert: the fix under test was validated by the other
+three cells, including the critical btrfs one, and the ENOSPC failure was
+the known flake class above.)
 
 ## Local reproduction
 

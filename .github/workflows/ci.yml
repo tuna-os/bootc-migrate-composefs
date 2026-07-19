@@ -87,10 +87,18 @@ jobs:
           command: check bans sources licenses
 
   # Sentinel job for branch protection — set this as the single required check.
-  # Accepts 'skipped' so optional jobs never block a PR.
+  # Accepts 'skipped' so optional jobs never block a PR (e2e-gate skips on
+  # non-pull_request events).
+  #
+  # e2e-gate MUST be in this list. Its absence let PR #73 auto-merge despite
+  # a failing E2E cell: required-checks passed on validate+cargo-deny alone
+  # while e2e-gate independently reported failure, and branch protection
+  # only watches this sentinel. Never let required-checks and e2e-gate be
+  # siblings again — required-checks is the merge gate, so every other gate
+  # must feed into it.
   required-checks:
     if: always()
-    needs: [validate, cargo-deny, coverage, actionlint]
+    needs: [validate, cargo-deny, coverage, actionlint, e2e-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs succeeded
