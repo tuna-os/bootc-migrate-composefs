@@ -171,6 +171,46 @@ fn main() -> Result<()> {
     }
 }
 
+/// The staged deployment's image spec from `bootc status --json`, if any.
+/// (Schema: `.status.staged.image.image.image` — ImageStatus → ImageReference
+/// → image spec string; stable across bootc 1.x.)
+fn staged_image_from_status(status: &serde_json::Value) -> Option<&str> {
+    status
+        .pointer("/status/staged/image/image/image")
+        .and_then(|v| v.as_str())
+}
+
+/// Whether the image bootc reports as staged is the one the user asked for.
+///
+/// Compares by equality after stripping the transport prefix from both sides
+/// (`docker://`, `ostree-unverified-registry:`, …) — bootc's status output
+/// omits the transport the user may have typed. Deliberately NOT a substring
+/// match: `bluefin:gts-testing` must not "verify" a request for
+/// `bluefin:gts`.
+fn staged_image_matches(requested: &str, staged: &str) -> bool {
+    fn strip_transport(image: &str) -> &str {
+        // `scheme://rest` transports first, then the `prefix:name` transports
+        // whose remainder still contains a registry path (so a plain
+        // `registry/image:tag` — whose only ':' precedes the tag — survives).
+        if let Some((_, rest)) = image.split_once("://") {
+            return rest;
+        }
+        for prefix in [
+            "ostree-unverified-registry:",
+            "ostree-image-signed:",
+            "ostree-remote-registry:",
+            "containers-storage:",
+            "registry:",
+        ] {
+            if let Some(rest) = image.strip_prefix(prefix) {
+                return rest;
+            }
+        }
+        image
+    }
+    strip_transport(requested) == strip_transport(staged)
+}
+
 /// Scenario A (issue #30): re-base to another image as a plain OSTree
 /// deployment. `bootc switch` already does the heavy lifting on an
 /// OSTree-backed system — staging the target with OSTree's native 3-way /etc
@@ -248,14 +288,9 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     }
     let json: serde_json::Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| anyhow::anyhow!("parsing bootc status json: {e}"))?;
-    let staged_image = json
-        .pointer("/status/staged/image/image/image")
-        .and_then(|v| v.as_str());
+    let staged_image = staged_image_from_status(&json);
     match staged_image {
-        Some(img)
-            if args.target_image.contains(img)
-                || img.contains(args.target_image.trim_start_matches("docker://")) =>
-        {
+        Some(img) if staged_image_matches(&args.target_image, img) => {
             println!("Staged deployment verified: {img}");
         }
         Some(img) => bail!(
@@ -270,4 +305,87 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
          deployment remains in the boot menu as rollback."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staged_match_exact() {
+        assert!(staged_image_matches(
+            "ghcr.io/projectbluefin/bluefin:gts",
+            "ghcr.io/projectbluefin/bluefin:gts"
+        ));
+    }
+
+    #[test]
+    fn staged_match_strips_requested_transport() {
+        assert!(staged_image_matches(
+            "docker://ghcr.io/projectbluefin/bluefin:gts",
+            "ghcr.io/projectbluefin/bluefin:gts"
+        ));
+        assert!(staged_image_matches(
+            "ostree-unverified-registry:ghcr.io/projectbluefin/bluefin:gts",
+            "ghcr.io/projectbluefin/bluefin:gts"
+        ));
+    }
+
+    #[test]
+    fn staged_match_rejects_tag_extension() {
+        // The old substring check accepted this: gts-testing contains gts.
+        assert!(!staged_image_matches(
+            "ghcr.io/projectbluefin/bluefin:gts",
+            "ghcr.io/projectbluefin/bluefin:gts-testing"
+        ));
+        assert!(!staged_image_matches(
+            "ghcr.io/projectbluefin/bluefin:gts-testing",
+            "ghcr.io/projectbluefin/bluefin:gts"
+        ));
+    }
+
+    #[test]
+    fn staged_match_rejects_different_image() {
+        assert!(!staged_image_matches(
+            "ghcr.io/projectbluefin/bluefin:gts",
+            "ghcr.io/projectbluefin/dakota:stable"
+        ));
+    }
+
+    #[test]
+    fn staged_match_plain_tag_colon_survives_transport_strip() {
+        // A bare registry/image:tag has a ':' but no transport — it must not
+        // get mangled by the prefix stripping.
+        assert!(staged_image_matches(
+            "quay.io/fedora/fedora-bootc:42",
+            "quay.io/fedora/fedora-bootc:42"
+        ));
+    }
+
+    #[test]
+    fn staged_image_extracted_from_status_json() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"status":{"staged":{"image":{"image":{"image":"ghcr.io/projectbluefin/bluefin:gts","transport":"registry"}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            staged_image_from_status(&json),
+            Some("ghcr.io/projectbluefin/bluefin:gts")
+        );
+    }
+
+    #[test]
+    fn staged_image_absent_when_nothing_staged() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"status":{"staged":null,"booted":{}}}"#).unwrap();
+        assert_eq!(staged_image_from_status(&json), None);
+    }
+
+    #[test]
+    fn parse_backend_accepts_known_and_rejects_unknown() {
+        assert!(matches!(parse_backend("ostree"), Ok(Backend::Ostree)));
+        assert!(matches!(parse_backend("composefs"), Ok(Backend::Composefs)));
+        assert!(parse_backend("btrfs").is_err());
+        assert!(parse_backend("").is_err());
+    }
 }
