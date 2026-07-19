@@ -51,13 +51,15 @@ jobs:
             # The BIOS-boot + ESP + separate /boot partitions and the fixed
             # 4G /var LV all come out of this before root sees any of it.
             disk_size: 60G
-          - name: bluefin ostree re-base (plan tracer)
+          - name: bluefin ostree re-base (OstreeDeploy)
             base: ghcr.io/projectbluefin/bluefin:stable
-            # Same image as base: the plan tracer never pulls the target in the
-            # VM, so reusing the cached base keeps this the cheapest cell.
-            # Switches to a distinct tag when Strategy::OstreeDeploy lands (#64).
-            target: ghcr.io/projectbluefin/bluefin:stable
-            mode: ostree-rebase-plan
+            # A distinct tag so the re-base is observable; gts is the
+            # previous-Fedora Bluefin stream.
+            target: ghcr.io/projectbluefin/bluefin:gts
+            mode: ostree-rebase
+            # bootc switch pulls the full target into ostree storage inside
+            # the guest — needs headroom beyond the tracer's 20G.
+            disk_size: 40G
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
