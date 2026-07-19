@@ -173,8 +173,25 @@ impl ComposefsStore for NativeStore {
     fn create_image(&self, _target_image: &str, image_id: &str) -> Result<String> {
         let repo = self.repo()?;
         let config_digest = oci_digest(image_id)?;
-        let erofs = self.commit_erofs(&repo, &config_digest)?;
-        Ok(erofs.to_hex())
+
+        // Build the EROFS *and link it* into the config+manifest splitstreams
+        // (`upgrade_repo` covers every tagged image; `pull_image` always
+        // tags). The linkage is what new-generation `oci mount` resolves —
+        // a bare committed EROFS mounts fine by sealed-config digest on a
+        // legacy host but fails on a new-gen host with "No composefs EROFS
+        // image linked" (verified empirically against fedora-bootc:44).
+        composefs_oci::upgrade_repo(&repo)
+            .context("linking EROFS images into the OCI splitstreams")?;
+
+        let oc = open_config(&repo, &config_digest, None)
+            .with_context(|| format!("opening pulled config {image_id}"))?;
+        match oc.image_ref.or(oc.image_ref_v1) {
+            Some(erofs) => Ok(erofs.to_hex()),
+            // Untagged image (not reachable via pull_image, but the trait
+            // allows it): commit the EROFS directly. Legacy-identifier mounts
+            // still work; only new-gen tag/manifest mounts need the linkage.
+            None => Ok(self.commit_erofs(&repo, &config_digest)?.to_hex()),
+        }
     }
 
     fn seal_image(&self, _target_image: &str, image_id: &str) -> Result<String> {
@@ -301,7 +318,7 @@ mod tests {
         );
         let mut refs = std::collections::HashMap::new();
         refs.insert(diff_id.clone().into_boxed_str(), layer_verity);
-        let (config_digest, _config_verity) = composefs_oci::write_config_raw(
+        let (config_digest, config_verity) = composefs_oci::write_config_raw(
             &repo,
             config_json.as_bytes(),
             refs,
@@ -313,9 +330,47 @@ mod tests {
         .unwrap();
         let config_digest = config_digest.to_string();
 
+        // Manifest + tag: fabricated through the public low-level stream API
+        // (the typed `write_manifest` wants oci-spec types this crate doesn't
+        // depend on). Tagging matters — `create_image` links EROFS images via
+        // `upgrade_repo`, which walks tagged images.
+        let manifest_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{config_size}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{diff_id}","size":{tar_size}}}]}}"#,
+            config_size = config_json.len(),
+            tar_size = tar.len(),
+        );
+        let manifest_digest = oci_digest(&format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(manifest_json.as_bytes())
+        ))
+        .unwrap();
+        // The crate-private content-type tag for manifest splitstreams.
+        let manifest_content_type: u64 = u64::from_le_bytes(*b"ocimanif");
+        let mut stream = repo.create_stream(manifest_content_type).unwrap();
+        stream.add_named_stream_ref(&format!("config:{config_digest}"), &config_verity);
+        stream.write_external(manifest_json.as_bytes()).unwrap();
+        repo.write_stream(
+            stream,
+            &composefs_oci::oci_image::manifest_identifier(&manifest_digest),
+            None,
+        )
+        .unwrap();
+        composefs_oci::oci_image::tag_image(&repo, &manifest_digest, "xgen-test").unwrap();
+
         // Phase-3 shape: create_image returns the EROFS fs-verity digest as
         // bare sha512 hex (what VerityDigest/`composefs=` expect).
         let verity_hex = store.create_image("unused", &config_digest).unwrap();
+
+        // The EROFS must be *linked* into the original config splitstream —
+        // the exact thing new-generation `oci mount` resolves (its absence is
+        // the "No composefs EROFS image linked" refusal seen with
+        // legacy-CLI-written stores).
+        let oc =
+            composefs_oci::open_config(&repo, &oci_digest(&config_digest).unwrap(), None).unwrap();
+        assert!(
+            oc.image_ref.is_some() || oc.image_ref_v1.is_some(),
+            "EROFS not linked into the config splitstream"
+        );
         assert_eq!(verity_hex.len(), 128, "sha512 fs-verity digest expected");
         assert!(verity_hex.chars().all(|c| c.is_ascii_hexdigit()));
         // Idempotent: a second run re-derives the same object.
