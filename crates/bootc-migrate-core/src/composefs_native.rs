@@ -458,8 +458,8 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            format!("{err:#}").contains("composefs"),
-            "error should carry repo context: {err:#}"
+            format!("{err:#}").contains("sha256:1111"),
+            "error should name the missing config: {err:#}"
         );
     }
 
