@@ -173,7 +173,7 @@ fn help_is_legacy_cli(help: &std::process::Output) -> bool {
 }
 
 /// Probe the HOST bootc's cfs CLI generation.
-fn host_cfs_is_legacy() -> bool {
+pub(crate) fn host_cfs_is_legacy() -> bool {
     match host_cfs_oci(&["--help"]) {
         Ok(out) => help_is_legacy_cli(&out),
         Err(_) => true,
