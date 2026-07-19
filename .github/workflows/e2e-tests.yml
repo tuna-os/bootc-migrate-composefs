@@ -9,6 +9,13 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      only:
+        description: >-
+          Run only matrix cells whose name contains this substring
+          (e.g. "btrfs", "LVM", "LTS"). Empty runs the full matrix.
+        required: false
+        default: ''
 
 # Cancel superseded runs on the same ref so PR pushes don't queue up redundant jobs.
 concurrency:
@@ -18,6 +25,13 @@ concurrency:
 jobs:
   e2e:
     name: ${{ matrix.scenario.name }}
+    # Narrow-dispatch support: a manual run with the `only` input skips every
+    # cell whose name doesn't contain it (ci-fix-loop iterates one cell at a
+    # time instead of burning the whole matrix per attempt).
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.only == '' ||
+      contains(matrix.scenario.name, inputs.only)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

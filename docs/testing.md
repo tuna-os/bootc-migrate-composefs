@@ -1,0 +1,125 @@
+# Testing & automation
+
+How this project stays trustworthy: what runs where, what gates what, and
+what is automated so humans don't have to remember it. Companion to
+ROADMAP.md (what we're building) and docs/cfs-cli-generations.md (the
+evidence-gathering method this strategy grew out of).
+
+## The pyramid
+
+| Layer | What | Where it runs | Budget |
+|---|---|---|---|
+| Unit | Pure logic: parsers, planners, mergetc tables, routing, digest handling, probe classification | `just test` / CI `validate`, every push | seconds |
+| Feature-matrix | Same, with every cargo feature on (`composefs-native` is invisible to the default build) | `just test-all-features` (part of `just check`) | seconds |
+| Integration (host) | Real repositories on loopback filesystems, real podman probes of real images — no VM | developer machines + scheduled canary | minutes |
+| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml matrix, PR-gated via `e2e-gate` | ~30 min/cell |
+
+Rules of thumb:
+
+- **Logic goes down the pyramid.** If a behavior can be tested without a VM
+  (extract a pure function, fabricate store contents through public APIs,
+  feed fixture bytes), it must be. The E2E cells exist to catch what only a
+  real boot can: initrd behavior, bootloader handoff, mount namespaces,
+  systemd ordering.
+- **A failed E2E cell must name its phase.** The harness (`tests/run-e2e.sh`)
+  prints `=== Phase N ===` banners and asserts with `FAIL:` prefixes so logs
+  are greppable (`just e2e-failures`).
+- **Evidence over inference.** When upstream behavior is in question, build
+  the experiment (loopback verity store, container probes) before designing
+  around an assumption — docs/cfs-cli-generations.md is the worked example.
+
+## E2E matrix: current and planned
+
+Current (the four **untouchable MVP regression gates** + M1 addition):
+
+| Cell | Proves | Status |
+|---|---|---|
+| bluefin stable → dakota (btrfs) | new-gen host path: probe → delegation ladder → builder | active |
+| bluefin LTS → dakota (ext4) | legacy fast path, ext4 fs-verity | active |
+| bluefin LTS → dakota (xfs+LUKS) | loopback store, passphrase injection | active |
+| bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
+| bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
+
+Planned, one per milestone exit (see ROADMAP.md):
+
+- **M1**: dakota → dakota:other-tag (`ImageSwap`, `E2E_MODE=image-swap`)
+- **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
+  kernel update asserting ESP resync; `--undo` restores GRUB
+- **M3**: fedora-family → centos-family with populated /var (ownership,
+  remap report, `.rebase-old` sidecars)
+- **M4**: a migration where **no** legacy-CLI bootc exists (NativeStore
+  writer); kernel-version gate ≥6.12 for file-backed EROFS mounts
+- **M0**: rollback cell — migrate, boot, `rollback`, assert the OSTree
+  deployment boots and the store is intact (#22/#26); greenboot-compatible
+  health scripts asserted present
+
+Cell design rules: new capability ⇒ new cell (never widen an MVP cell);
+prefer `E2E_MODE` branches in one harness over new harnesses; every cell
+must be runnable locally (`just e2e*` with env overrides).
+
+## Narrow dispatch (implemented)
+
+`e2e-tests.yml` accepts a `workflow_dispatch` input `only`: cells whose
+name doesn't contain the substring are skipped. One failing cell gets
+iterated alone (`gh workflow run e2e-tests.yml -f only=btrfs`) instead of
+burning the whole matrix per attempt. This is the contract the ci-fix-loop
+practice expects.
+
+## Upstream drift canary (implemented)
+
+`.github/workflows/upstream-drift-canary.yml` runs twice weekly (and on
+dispatch): `tests/drift-canary.sh` probes every image in
+`tests/canary-baseline.tsv` for its cfs CLI generation and exits 1 on
+drift (auto-filing/updating a canary issue), 2 on probe-infra failure
+(retried next run, never alerted). The #72 breakage is exactly what this
+catches; **the pinned legacy builder drifting to new-gen is the critical
+alert** — it breaks the delegation ladder and blocks the MVP.
+
+Maintaining the baseline: when a drift is real and absorbed (code adapted,
+docs updated), update `canary-baseline.tsv` in the same PR that absorbs it.
+
+## Flake policy & known gotchas
+
+- **Retry taxonomy**: GHCR connection-resets and ENOSPC during image pull
+  are infra flakes (rerun the cell via narrow dispatch); assertion failures
+  and phase errors are never rerun without a diagnosis.
+- **`gh run rerun` reuses the run's original merge commit.** If main moved
+  since (e.g. a harness fix landed), rerunning tests stale code — merge
+  main into the PR branch instead. This has bitten before.
+- **Cancelled runs surface as `fail`** in `gh pr checks`; a stuck-queued
+  workflow sometimes needs cancel + rerun to re-enter the queue.
+- **Disk sizing is part of the test.** ENOSPC inside the guest shows up as
+  misleading downstream errors (including probe misfires — see the probe
+  asymmetry note in CONTEXT.md). Cells document their disk_size rationale
+  inline in e2e-tests.yml.
+- **Mount errors on new-gen hosts are expected noise** in phases 4/5 until
+  PR #76 lands (podman fallbacks carry the migration) — don't read them as
+  the failure signal.
+
+## Local reproduction
+
+- `just check` — everything CI's validate job runs, now including the
+  feature matrix (`test-all-features`).
+- `just e2e` / `e2e-lts` / `e2e-luks` / `e2e-lvm` — full cells locally;
+  `e2e-status`, `e2e-ssh`, `e2e-tail`, `e2e-scan`, `e2e-reboot-test` for
+  surgical iteration on a phase.
+- `just drift-canary` — the upstream probe, sans CI.
+- Cross-generation store experiments: reproduction commands in
+  docs/cfs-cli-generations.md §Reproducing (needs a `mkfs.ext4 -O verity`
+  loopback; root filesystems commonly lack the verity feature).
+
+## Gaps / next automation (tracked, not yet built)
+
+1. **Store-level integration test in CI**: the loopback cross-gen check
+   (legacy write → new-gen fsck) as a cheap weekly job — no VM, ~2 GB.
+2. **actionlint + shellcheck for workflows** in `just check` (workflow YAML
+   is currently validated only by GitHub at push time).
+3. **E2E artifact triage**: on cell failure, auto-extract the phase banner
+   + last 50 lines around the first `FAIL:` into the job summary
+   (`$GITHUB_STEP_SUMMARY`) so diagnosis starts from the annotation, not a
+   32 MB log download.
+4. **Nightly `cargo update --dry-run` + composefs-rs version watch** —
+   surfacing new 0.x releases early (NativeStore pins 0.7).
+5. **Merge-queue discipline**: once the stacked fleet lands, enable GitHub
+   merge queue with `required-checks` as the single required context (it
+   already tolerates skipped optional jobs).
