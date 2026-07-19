@@ -29,17 +29,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use composefs::fsverity::{FsVerityHashValue, Sha256HashValue};
+use composefs::fsverity::{FsVerityHashValue, Sha512HashValue};
 use composefs::repository::{Repository, RepositoryConfig};
 use composefs::tree::FileSystem;
 use composefs_oci::{PullOptions, image::create_filesystem, open_config, pull};
 
 use crate::composefs::ComposefsStore;
 
-/// The fs-verity flavour of the store. Legacy bootc stores use fsverity
-/// sha256 (64-hex object IDs), and `VerityDigest` throughout the pipeline
-/// assumes 64-hex, so the native backend stays on sha256.
-type ObjectId = Sha256HashValue;
+/// The fs-verity flavour of the store: **sha512**, matching what bootc's cfs
+/// CLI writes — `VerityDigest` carries a `sha512:` prefix in `.origin` /
+/// `.imginfo`, and `composefs=` takes the bare sha512 hex. A sha256 repo here
+/// would produce object IDs the rest of the pipeline (and the target's bootc
+/// at boot) cannot resolve.
+type ObjectId = Sha512HashValue;
 
 /// Config label that marks an OCI image as sealed, holding the EROFS image's
 /// fs-verity object ID. This is what new-generation `oci fsck` checks (the
