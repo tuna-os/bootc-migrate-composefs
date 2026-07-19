@@ -280,13 +280,16 @@ impl ComposefsStore for BootcCliStore {
         };
 
         wipe_store()?;
-        let init = image_cfs(&delegate, &["init"])?;
-        if !init.status.success() {
-            return Err(anyhow!(
-                "target bootc repo init failed: {}",
-                String::from_utf8_lossy(&init.stderr)
-            ));
-        }
+        // cfsctl has no `init` subcommand (verified empirically: `bootc
+        // internals cfs help` lists no such command, and running it errors
+        // "unrecognized subcommand 'init'" even on the legacy generation —
+        // this call was never valid and broke every run through the
+        // rebuild path, i.e. every new-gen-host migration). The repo is
+        // auto-initialized on first write by `oci pull` as long as the
+        // directory exists; `wipe_store` clears its contents but not the
+        // directory itself, so this is just a defensive ensure.
+        std::fs::create_dir_all(STORE)
+            .with_context(|| format!("creating composefs store directory {STORE}"))?;
 
         // Prefer the locally-cached image (Phase 2 `podman pull`) so we don't make a
         // second on-disk copy; fall back to the registry transport.
