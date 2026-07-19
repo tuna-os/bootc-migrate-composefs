@@ -69,12 +69,17 @@ impl NativeStore {
         Self::new("/sysroot/composefs")
     }
 
-    /// Open the repository, creating it if the directory does not exist yet
-    /// and upgrading pre-`meta.json` repositories in place (the
-    /// non-destructive path for stores written by a legacy bootc CLI).
+    /// Open the repository, creating it if absent and upgrading
+    /// pre-`meta.json` repositories in place (the non-destructive path for
+    /// stores written by a legacy bootc CLI).
+    ///
+    /// Discriminates on [`repo_exists`], not bare path existence: on a real
+    /// migration `/sysroot/composefs` is typically a pre-created (or
+    /// loopback-mounted, on XFS) **empty** directory before store init, and
+    /// an empty dir must take the init path, not the upgrade path.
     fn repo(&self) -> Result<Arc<Repository<ObjectId>>> {
         let cwd = rustix::fs::CWD;
-        let repo = if self.repo_path.exists() {
+        let repo = if repo_exists(&self.repo_path) {
             let (repo, _upgraded) = Repository::open_upgrade(cwd, &self.repo_path)
                 .with_context(|| format!("opening composefs repo at {:?}", self.repo_path))?;
             repo
@@ -269,9 +274,75 @@ mod tests {
     }
 
     #[test]
+    fn store_initializes_when_dir_exists_but_is_empty() {
+        // /sysroot/composefs is typically a pre-created (or loopback-mounted)
+        // empty directory before store init — this must init, not try to
+        // "upgrade" a repo that was never there.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo");
+        std::fs::create_dir(&path).unwrap();
+        let store = NativeStore::new(&path);
+        store.repo().unwrap();
+        assert!(repo_exists(&path));
+    }
+
+    #[test]
     fn verify_on_empty_store_is_ok() {
         let dir = tempfile::tempdir().unwrap();
         let store = NativeStore::new(dir.path().join("repo"));
         store.verify_store_target_readable("unused").unwrap();
+    }
+
+    #[test]
+    fn create_image_on_unknown_config_errors_cleanly() {
+        // Phase 3 hands us a config digest from Phase 2; if the store lost it
+        // (wiped repo, wrong path) this must be a contextual error, not a
+        // panic or a bogus digest.
+        let dir = tempfile::tempdir().unwrap();
+        let store = NativeStore::new(dir.path().join("repo"));
+        let err = store
+            .create_image(
+                "unused",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("composefs"),
+            "error should carry repo context: {err:#}"
+        );
+    }
+
+    #[test]
+    fn seal_image_on_unknown_config_errors_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NativeStore::new(dir.path().join("repo"));
+        let err = store
+            .seal_image(
+                "unused",
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("sha256:2222"),
+            "error should name the missing config: {err:#}"
+        );
+    }
+
+    #[test]
+    fn create_image_rejects_a_bare_verity_hex() {
+        // Guard against the verity-vs-config-digest confusion the glossary
+        // warns about: a bare 64-hex verity digest is not an OCI config
+        // digest and must be rejected at the boundary, silently looking up
+        // nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let store = NativeStore::new(dir.path().join("repo"));
+        assert!(
+            store
+                .create_image(
+                    "unused",
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                )
+                .is_err()
+        );
     }
 }
