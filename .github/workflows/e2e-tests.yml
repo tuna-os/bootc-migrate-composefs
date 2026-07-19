@@ -27,6 +27,9 @@ jobs:
           - name: bluefin -> dakota (systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:stable
             target: ghcr.io/projectbluefin/dakota:stable
+            # 20G intermittently ENOSPCs during the Phase-2 podman pull
+            # (#42-class; last seen 2026-07-19) — match the other cells.
+            disk_size: 40G
           - name: bluefin LTS -> dakota (systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
