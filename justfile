@@ -100,6 +100,18 @@ test-all-features:
 drift-canary:
     ./tests/drift-canary.sh
 
+# Line-coverage summary (requires cargo-llvm-cov + llvm-tools-preview).
+coverage:
+    cargo llvm-cov --workspace --all-features --summary-only
+
+# Coverage with the regression floor CI enforces (see docs/testing.md).
+coverage-check:
+    cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 26
+
+# Browsable HTML coverage report (target/llvm-cov/html/index.html).
+coverage-html:
+    cargo llvm-cov --workspace --all-features --html
+
 # Format all Rust code.
 fmt:
     cargo fmt --all

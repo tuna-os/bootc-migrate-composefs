@@ -59,11 +59,33 @@ must be runnable locally (`just e2e*` with env overrides).
 
 ## Narrow dispatch (implemented)
 
-`e2e-tests.yml` accepts a `workflow_dispatch` input `only`: cells whose
-name doesn't contain the substring are skipped. One failing cell gets
-iterated alone (`gh workflow run e2e-tests.yml -f only=btrfs`) instead of
-burning the whole matrix per attempt. This is the contract the ci-fix-loop
-practice expects.
+`e2e-single.yml` dispatches exactly one cell with chosen parameters:
+
+    gh workflow run e2e-single.yml -f filesystem=btrfs -f mode=composefs-migrate
+
+One failing scenario gets iterated alone instead of burning the whole
+matrix per attempt — the contract the ci-fix-loop practice expects. (A
+matrix-filter `if` was rejected: the `matrix` context is not available in
+job-level `if`, a bug actionlint caught before it shipped.) Keep its step
+sequence in sync with e2e-tests.yml.
+
+## Coverage floor (implemented)
+
+CI's `coverage` job runs `cargo llvm-cov --workspace --all-features` with
+a **regression floor** (`--fail-under-lines`, see `just coverage-check`)
+and posts the summary to the job summary. The floor is not a target — it
+exists to catch commits that delete or bypass meaningful coverage. Raise
+it as milestones add tests; never lower it to merge. Local:
+`just coverage` / `coverage-html`. Baseline 2026-07-19: ~27% lines, with
+the pure-logic modules at 75–100% and the deliberately-untested layers
+(process orchestration, TUI, network/filesystem effectors) at 0 — those
+are the E2E cells' job.
+
+## Failure triage (implemented)
+
+Both E2E workflows write a triage block to `$GITHUB_STEP_SUMMARY` on
+failure: last phase banner reached, every `FAIL:`/`ERROR:` assertion, and
+the log tail — diagnosis starts from the annotation, not a log download.
 
 ## Upstream drift canary (implemented)
 
@@ -112,14 +134,8 @@ docs updated), update `canary-baseline.tsv` in the same PR that absorbs it.
 
 1. **Store-level integration test in CI**: the loopback cross-gen check
    (legacy write → new-gen fsck) as a cheap weekly job — no VM, ~2 GB.
-2. **actionlint + shellcheck for workflows** in `just check` (workflow YAML
-   is currently validated only by GitHub at push time).
-3. **E2E artifact triage**: on cell failure, auto-extract the phase banner
-   + last 50 lines around the first `FAIL:` into the job summary
-   (`$GITHUB_STEP_SUMMARY`) so diagnosis starts from the annotation, not a
-   32 MB log download.
-4. **Nightly `cargo update --dry-run` + composefs-rs version watch** —
+2. **Nightly `cargo update --dry-run` + composefs-rs version watch** —
    surfacing new 0.x releases early (NativeStore pins 0.7).
-5. **Merge-queue discipline**: once the stacked fleet lands, enable GitHub
+3. **Merge-queue discipline**: once the stacked fleet lands, enable GitHub
    merge queue with `required-checks` as the single required context (it
    already tolerates skipped optional jobs).
