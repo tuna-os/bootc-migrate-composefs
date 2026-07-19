@@ -66,6 +66,23 @@ migrator's path byte-compatible.
   the existing deployment, both bootable; `commit` makes it permanent
   (one-way, deletes the OSTree side), `undo` rolls back (preserves the store
   unless `--full`).
+- **cfs CLI generations** (issue #72) — upstream bootc removed `oci
+  create-image`/`oci seal` (creation folded into `pull --bootable` /
+  `prepare-boot`, sealing implicit). *Legacy* = ships `create-image`; probed
+  via `bootc internals cfs oci --help`. Store selection (`core::composefs`):
+  host bootc if legacy → target image's bootc if legacy → pinned legacy
+  builder (`BMC_CFS_BUILDER`, default fedora-bootc). Probe asymmetry is
+  deliberate: a failed *host* probe counts as legacy (fail-safe fast path); a
+  failed *container* probe counts as NOT legacy (an ENOSPC'd podman run must
+  not masquerade as a legacy verdict).
+- **store format vs writing CLI** — new-generation bootc *reads*
+  legacy-format stores fine (proven by green LTS→dakota E2E cells); only the
+  writing CLI changed. Hence any legacy-CLI bootc is a valid store writer.
+  The permanent fix is the **native backend** (`core::composefs_native`,
+  feature `composefs-native`, issue #13): write the store with the
+  composefs/composefs-oci crates directly, selected when the *target* is
+  new-generation (the store format is defined by the bootc that reads it at
+  boot).
 - **route / strategy** (`bootc-rebase::routing`) — the transition table:
   (source backend → target backend) → strategy (`CoreMigration`,
   `OstreeDeploy`, `ImageSwap`) + implemented flag. First match wins; the CLI
