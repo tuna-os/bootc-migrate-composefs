@@ -152,6 +152,39 @@ fn wipe_store() -> Result<()> {
     Ok(())
 }
 
+/// Whether a `bootc internals cfs … oci --help` output belongs to the legacy
+/// CLI generation (has `create-image`/`seal`). Newer composefs-rs removed both
+/// (creation folded into `pull --bootable`/`prepare-boot`, sealing implicit) —
+/// see issue #72. Malformed/failed probes count as legacy so behavior on old
+/// hosts is unchanged.
+fn help_is_legacy_cli(help: &std::process::Output) -> bool {
+    if !help.status.success() {
+        return true;
+    }
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    text.contains("create-image")
+}
+
+/// Probe the HOST bootc's cfs CLI generation.
+fn host_cfs_is_legacy() -> bool {
+    match host_cfs_oci(&["--help"]) {
+        Ok(out) => help_is_legacy_cli(&out),
+        Err(_) => true,
+    }
+}
+
+/// Probe the TARGET image's bootc cfs CLI generation.
+fn target_cfs_is_legacy(target_image: &str) -> bool {
+    match target_cfs(target_image, &["oci", "--help"]) {
+        Ok(out) => help_is_legacy_cli(&out),
+        Err(_) => true,
+    }
+}
+
 /// Normalize an image reference to a `docker://` (or already-prefixed) transport.
 fn with_transport(image_ref: &str) -> String {
     if image_ref.contains("://") {
@@ -163,30 +196,57 @@ fn with_transport(image_ref: &str) -> String {
 
 impl ComposefsStore for BootcCliStore {
     fn pull_image(&self, target_image: &str, image_ref: &str) -> Result<String> {
-        // Fast path: pull with the host (source) bootc. On a current source this
-        // reflinks blobs into the store and produces a target-readable deployment.
         let docker_ref = with_transport(image_ref);
-        let host_out = host_cfs_oci(&["pull", &docker_ref])?;
-        if host_out.status.success() && manifest_stream_present() {
-            let _ = self.use_target_bootc.set(false);
-            return Ok(String::from_utf8_lossy(&host_out.stdout).to_string());
+
+        // The host bootc is only usable when it still speaks the legacy cfs
+        // CLI (`create-image`/`seal`); newer composefs-rs removed both (#72),
+        // so a new-generation host must delegate the whole sequence to the
+        // target image's bootc below.
+        let host_legacy = host_cfs_is_legacy();
+        if !host_legacy {
+            eprintln!(
+                "[cfs] host bootc ships the new cfs CLI (no create-image/seal — \
+                 see issue #72); building the store with the target image's bootc"
+            );
         }
 
-        // The host bootc is too old: its pull either failed or produced no
-        // oci-manifest stream, which leaves `bootc status`/`upgrade` broken after an
-        // otherwise-successful migration. Rebuild the store with the target image's
-        // own bootc so it's written in the format the migrated system expects.
-        if host_out.status.success() {
-            eprintln!(
-                "[cfs] host bootc produced no oci-manifest stream (too old for the \
-             target); rebuilding the store with the target image's bootc"
-            );
-        } else {
-            eprintln!(
-                "[cfs] host bootc pull failed ({}); rebuilding the store with the \
-             target image's bootc",
-                String::from_utf8_lossy(&host_out.stderr).trim()
-            );
+        // Fast path: pull with the host (source) bootc. On a current source this
+        // reflinks blobs into the store and produces a target-readable deployment.
+        if host_legacy {
+            let host_out = host_cfs_oci(&["pull", &docker_ref])?;
+            if host_out.status.success() && manifest_stream_present() {
+                let _ = self.use_target_bootc.set(false);
+                return Ok(String::from_utf8_lossy(&host_out.stdout).to_string());
+            }
+
+            // The host bootc is too old: its pull either failed or produced no
+            // oci-manifest stream, which leaves `bootc status`/`upgrade` broken
+            // after an otherwise-successful migration. Rebuild the store with
+            // the target image's own bootc so it's written in the format the
+            // migrated system expects.
+            if host_out.status.success() {
+                eprintln!(
+                    "[cfs] host bootc produced no oci-manifest stream (too old for the \
+                     target); rebuilding the store with the target image's bootc"
+                );
+            } else {
+                eprintln!(
+                    "[cfs] host bootc pull failed ({}); rebuilding the store with the \
+                     target image's bootc",
+                    String::from_utf8_lossy(&host_out.stderr).trim()
+                );
+            }
+        }
+
+        // Everything below drives the target image's bootc — which must still
+        // speak the legacy CLI for our create/seal sequence to work.
+        if !target_cfs_is_legacy(target_image) {
+            return Err(anyhow!(
+                "both the host bootc and the target image's bootc ({target_image}) ship \
+                 the new cfs CLI without `oci create-image`/`seal`; the legacy migration \
+                 sequence cannot run. This needs the native composefs-rs store backend — \
+                 see https://github.com/tuna-os/bootc-migrate-composefs/issues/72"
+            ));
         }
 
         wipe_store()?;
@@ -276,5 +336,43 @@ impl ComposefsStore for BootcCliStore {
             return Err(anyhow!("seal failed: {}", stderr));
         }
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    fn fake_output(code: i32, stdout: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_cli_detected_by_create_image() {
+        let help = fake_output(0, "Commands:\n  pull\n  create-image\n  seal\n  mount\n");
+        assert!(help_is_legacy_cli(&help));
+    }
+
+    #[test]
+    fn new_cli_detected_by_missing_create_image() {
+        let help = fake_output(
+            0,
+            "Commands:\n  pull\n  compute-id\n  prepare-boot\n  mount\n  fsck\n",
+        );
+        assert!(!help_is_legacy_cli(&help));
+    }
+
+    #[test]
+    fn failed_probe_counts_as_legacy() {
+        // A failed --help (old bootc without the subcommand, sandboxing, etc.)
+        // must not change behavior on old hosts.
+        let help = fake_output(256, "");
+        assert!(help_is_legacy_cli(&help));
     }
 }
