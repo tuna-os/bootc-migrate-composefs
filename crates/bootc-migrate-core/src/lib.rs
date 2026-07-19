@@ -24,6 +24,7 @@ pub mod ostree;
 pub mod preflight;
 pub mod reflink;
 pub mod registry;
+pub mod scan;
 pub mod transaction;
 pub mod types;
 pub mod xattr;
