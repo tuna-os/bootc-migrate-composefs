@@ -35,7 +35,8 @@ pub enum Strategy {
     /// Planned; not yet implemented (issue #30, scenario A analog).
     ImageSwap,
     /// Deploy the target as a plain OSTree deployment, skipping the
-    /// composefs phases. Planned; not yet implemented (issue #30, M1).
+    /// composefs phases (issue #30, scenario A). Implemented for
+    /// ostree→ostree; composefs→ostree remains planned.
     OstreeDeploy,
 }
 
@@ -67,7 +68,7 @@ const ROUTES: &[Route] = &[
         from: Backend::Ostree,
         to: Backend::Ostree,
         strategy: Strategy::OstreeDeploy,
-        implemented: false,
+        implemented: true,
     },
     Route {
         from: Backend::Composefs,
@@ -104,6 +105,13 @@ mod tests {
                 assert!(route(from, to).is_some(), "no route for {from} -> {to}");
             }
         }
+    }
+
+    #[test]
+    fn ostree_to_ostree_is_implemented() {
+        let r = route(Backend::Ostree, Backend::Ostree).unwrap();
+        assert!(r.implemented);
+        assert_eq!(r.strategy, Strategy::OstreeDeploy);
     }
 
     #[test]

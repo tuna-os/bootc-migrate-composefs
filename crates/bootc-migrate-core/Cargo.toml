@@ -16,6 +16,15 @@ sha2.workspace = true
 rustix.workspace = true
 tempfile.workspace = true
 tini.workspace = true
+composefs = { version = "0.7", optional = true }
+composefs-oci = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
 
 [lints]
 workspace = true
+
+[features]
+# Native composefs-rs store backend (issue #13): writes the store with the
+# composefs/composefs-oci crates instead of shelling out to `bootc internals
+# cfs`. Off by default — the MVP binary keeps the CLI-driven store.
+composefs-native = ["dep:composefs", "dep:composefs-oci", "dep:tokio"]
