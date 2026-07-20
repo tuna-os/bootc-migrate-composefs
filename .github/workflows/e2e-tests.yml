@@ -66,6 +66,14 @@ jobs:
             # bootc switch pulls the full target into ostree storage inside
             # the guest — needs headroom beyond the tracer's 20G.
             disk_size: 40G
+          - name: bluefin -> aurora ostree re-base (GNOME -> KDE, OstreeDeploy)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # Aurora is ublue-os's KDE spin (Bluefin is GNOME) — a DE swap
+            # is a more meaningful exercise of bootc switch's native /etc
+            # merge than a same-DE stream jump.
+            target: ghcr.io/ublue-os/aurora:stable
+            mode: ostree-rebase
+            disk_size: 40G
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
