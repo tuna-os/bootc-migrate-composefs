@@ -1,0 +1,8 @@
+# Watched bootc images and their expected cfs CLI generation.
+# legacy = `bootc internals cfs oci --help` lists create-image; new = it does not.
+# Updated 2026-07-19 (see docs/cfs-cli-generations.md for the evidence base).
+ghcr.io/projectbluefin/bluefin:lts	legacy
+ghcr.io/projectbluefin/bluefin:stable	new
+ghcr.io/projectbluefin/dakota:stable	new
+quay.io/fedora/fedora-bootc:42	legacy
+quay.io/fedora/fedora-bootc:44	new
