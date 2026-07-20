@@ -849,45 +849,6 @@ echo "etc-rebase-value" > /etc/rebase-test/marker.conf
 echo "# e2e rebase marker" >> /etc/hostname
 mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
-
-# `bootc switch`'s native OSTree 3-way merge treats a file baked into the
-# BASE image (present in old-default, unchanged in current, absent from the
-# target's new-default) as vendor content that was dropped upstream, and
-# drops it too — exactly the semantics core::mergetc mirrors for the
-# composefs path (see deploy.rs::ensure_e2e_ssh_socket, which recreates
-# this same file for that path). The e2e-sshd.socket baked into the base
-# image by the Containerfile above is invisible to bluefin:gts's own
-# defaults, so without this it would NOT survive the switch and the VM
-# would be unreachable after reboot — a real bug, not a flake. Writing it
-# here as a genuinely local (current-only) file makes it a local addition
-# the merge preserves, matching how a real user's customization survives.
-mkdir -p /etc/systemd/system/sockets.target.wants
-printf '%s\n' \
-    '[Unit]' \
-    'Description=E2E SSH TCP Socket (port 22)' \
-    '[Socket]' \
-    'ListenStream=22' \
-    'Accept=yes' \
-    '[Install]' \
-    'WantedBy=sockets.target' \
-    > /etc/systemd/system/e2e-sshd.socket
-printf '%s\n' \
-    '[Unit]' \
-    'Description=E2E SSH per-connection service' \
-    '[Service]' \
-    'ExecStart=-/usr/sbin/sshd -i' \
-    'StandardInput=socket' \
-    > /etc/systemd/system/e2e-sshd@.service
-ln -sf ../e2e-sshd.socket /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
-
-# Belt and suspenders, mirroring deploy.rs::ensure_e2e_ssh_socket's own
-# defensive removal: having both sshd.service (sshd -D) and e2e-sshd.socket
-# bound to port 22 kills the daemon with 255/EXCEPTION. The enablement
-# symlink is itself old==cur/absent-in-new (baked into the base image the
-# same way e2e-sshd.socket was) so the merge should drop it on its own —
-# but don't bet the E2E run on an unverified assumption about bootc
-# switch's merge semantics when a plain rm is just as easy.
-rm -f /etc/systemd/system/multi-user.target.wants/sshd.service
 REBASEFIX
 
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
@@ -904,6 +865,54 @@ REBASEFIX
         echo "FAIL: staged deployment does not reference $VM_TARGET_IMAGE"
         exit 1
     fi
+
+    # `bootc switch`'s native OSTree 3-way merge treats a file baked into the
+    # BASE image (present in old-default, unchanged in current, absent from
+    # the target's new-default) as vendor content that was dropped upstream,
+    # and drops it too — exactly the semantics core::mergetc mirrors for the
+    # composefs path (see deploy.rs::ensure_e2e_ssh_socket, which recreates
+    # this same file for that path). e2e-sshd.socket baked into the base
+    # image is invisible to the target's own defaults, so it does NOT
+    # survive the switch if injected pre-switch (confirmed: it disappears
+    # from the staged deploy's /etc post-merge). Inject it post-merge,
+    # directly into the *staged* deployment's /etc, mirroring
+    # ensure_e2e_ssh_socket's timing rather than the merge's.
+    step "=== ostree-rebase: re-injecting e2e-sshd into the staged deploy ==="
+    ssh $SSH_OPTS root@localhost bash <<'POSTMERGEFIX'
+set -e
+# Exactly two deployments exist at this point (booted + staged); the
+# booted one is marked with a leading '*' in `ostree admin status`, so the
+# other line is unambiguously the staged deployment.
+DEPLOY_LINE=$(ostree admin status | grep -v '^\*' | grep -v '^ *$' | head -1)
+STATEROOT=$(echo "$DEPLOY_LINE" | awk '{print $1}')
+CKSUM_SERIAL=$(echo "$DEPLOY_LINE" | awk '{print $2}')
+DEPLOY_ETC="/ostree/deploy/${STATEROOT}/deploy/${CKSUM_SERIAL}/etc"
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found ($DEPLOY_ETC)"; exit 1; }
+
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH TCP Socket (port 22)' \
+    '[Socket]' \
+    'ListenStream=22' \
+    'Accept=yes' \
+    '[Install]' \
+    'WantedBy=sockets.target' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH per-connection service' \
+    '[Service]' \
+    'ExecStart=-/usr/sbin/sshd -i' \
+    'StandardInput=socket' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
+ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+
+# Belt and suspenders, mirroring deploy.rs::ensure_e2e_ssh_socket's own
+# defensive removal: having both sshd.service (sshd -D) and e2e-sshd.socket
+# bound to port 22 kills the daemon with 255/EXCEPTION.
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+POSTMERGEFIX
 
     step "=== ostree-rebase: rebooting into the new deployment ==="
     ssh $SSH_OPTS root@localhost "reboot" || true
