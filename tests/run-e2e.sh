@@ -889,6 +889,10 @@ REBASEFIX
     fi
 
     step "=== ostree-rebase: post-reboot assertions ==="
+    # Deliberately unquoted heredoc: $VM_TARGET_IMAGE must expand client-side
+    # (it's a local variable, not present in the SSH'd shell); \$-escaped
+    # tokens below expand server-side instead.
+    # shellcheck disable=SC2087
     ssh $SSH_OPTS root@localhost bash <<REBASECHECK
 set -e
 booted=\$(bootc status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['status']['booted']['image']['image']['image'])")
