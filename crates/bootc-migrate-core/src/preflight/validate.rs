@@ -34,3 +34,43 @@ pub fn ostree_to_composefs(sys: SystemInfo) -> PreflightReport {
         sysroot_was_ro: sys.sysroot_was_ro,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::system_info::PendingTransactionStatus;
+    use super::*;
+
+    fn sys_with_esp(detected: bool, free: u64) -> SystemInfo {
+        SystemInfo {
+            is_bootc_ostree: true,
+            pending_transaction: PendingTransactionStatus::Clean,
+            is_uefi: true,
+            nvram_writable: true,
+            esp_path: detected.then(|| "/boot/efi".to_string()),
+            esp_free_space_bytes: free,
+            esp_fs_type: Some("vfat".into()),
+            esp_detected: detected,
+            supports_reflink: true,
+            is_btrfs: true,
+            fs_type: Some("btrfs".into()),
+            ostree_repo_size_bytes: 0,
+            composefs_free_bytes: 0,
+            systemd_boot_binaries_present: true,
+            grub_tools_available: true,
+            sysroot_was_ro: false,
+        }
+    }
+
+    #[test]
+    fn esp_readiness_threshold_is_150_mb() {
+        let at = 150 * 1024 * 1024;
+        assert!(ostree_to_composefs(sys_with_esp(true, at)).esp_ready_for_systemd_boot);
+        assert!(!ostree_to_composefs(sys_with_esp(true, at - 1)).esp_ready_for_systemd_boot);
+    }
+
+    #[test]
+    fn undetected_esp_is_never_ready() {
+        let r = ostree_to_composefs(sys_with_esp(false, u64::MAX));
+        assert!(!r.esp_ready_for_systemd_boot);
+    }
+}

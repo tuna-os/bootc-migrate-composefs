@@ -1,0 +1,59 @@
+# Scheduled probe of the bootc images this project depends on. When an
+# image's cfs CLI generation drifts from tests/canary-baseline.tsv (the #72
+# class of breakage), this opens/updates a pinned canary issue instead of a
+# user discovering it mid-migration. Probe *failures* (network, registry)
+# are retried next run, not alerted — only real drift files an issue.
+name: Upstream drift canary
+
+permissions:
+  contents: read
+  issues: write
+
+on:
+  schedule:
+    # Mondays and Thursdays, 06:23 UTC (odd minute to dodge cron herds).
+    - cron: '23 6 * * 1,4'
+  workflow_dispatch: {}
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe watched images
+        id: probe
+        run: |
+          set -o pipefail
+          CANARY_RMI=1 ./tests/drift-canary.sh 2>&1 | tee canary.log
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: File or update the canary issue on drift
+        if: steps.probe.outputs.exit == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Upstream drift canary: cfs CLI generation changed"
+          body="The scheduled canary detected a cfs CLI generation drift against \`tests/canary-baseline.tsv\`:
+
+          \`\`\`
+          $(grep -E '^(DRIFT|PROBE-FAILED|ok)' canary.log)
+          \`\`\`
+
+          Consequences and fix paths: \`docs/cfs-cli-generations.md\`, issues #72 / #13.
+          If the **pinned legacy builder** (fedora-bootc pin) drifted, the delegation
+          ladder is broken — that is a release blocker for the MVP.
+
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label bug
+          fi
+
+      - name: Fail the run on drift (so the badge goes red)
+        if: steps.probe.outputs.exit == '1'
+        run: exit 1

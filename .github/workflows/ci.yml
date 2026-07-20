@@ -36,6 +36,46 @@ jobs:
       - name: Run checks (clippy, rustfmt, unit tests, shellcheck)
         run: just check
 
+  # Line-coverage regression floor. Report-first: the summary lands in the
+  # job summary; the floor (see `just coverage-check`) only catches commits
+  # that delete or bypass meaningful test coverage — it is NOT a target.
+  # Raise the floor as milestones add tests; never lower it to merge.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Coverage with regression floor
+        run: |
+          set -o pipefail
+          cargo llvm-cov --workspace --all-features --summary-only \
+            --fail-under-lines 26 | tee cov.txt
+          {
+            echo '## Line coverage'
+            echo '```'
+            tail -5 cov.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Workflow-file lint: catches broken expressions/needs/inputs in the CI
+  # definitions themselves before they bite at dispatch time.
+  actionlint:
+    runs-on: ubuntu-latest
+    # Style-level shellcheck findings stay advisory, matching the repo's
+    # `shellcheck --severity=warning` convention (justfile lint-shell).
+    env:
+      SHELLCHECK_OPTS: --severity=warning
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:latest
+        with:
+          args: -color
+
   # Dependency license and source policy (deny.toml).
   cargo-deny:
     runs-on: ubuntu-latest
@@ -47,10 +87,18 @@ jobs:
           command: check bans sources licenses
 
   # Sentinel job for branch protection — set this as the single required check.
-  # Accepts 'skipped' so optional jobs never block a PR.
+  # Accepts 'skipped' so optional jobs never block a PR (e2e-gate skips on
+  # non-pull_request events).
+  #
+  # e2e-gate MUST be in this list. Its absence let PR #73 auto-merge despite
+  # a failing E2E cell: required-checks passed on validate+cargo-deny alone
+  # while e2e-gate independently reported failure, and branch protection
+  # only watches this sentinel. Never let required-checks and e2e-gate be
+  # siblings again — required-checks is the merge gate, so every other gate
+  # must feed into it.
   required-checks:
     if: always()
-    needs: [validate, cargo-deny]
+    needs: [validate, cargo-deny, coverage, actionlint, e2e-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs succeeded
