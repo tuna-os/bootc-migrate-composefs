@@ -849,6 +849,45 @@ echo "etc-rebase-value" > /etc/rebase-test/marker.conf
 echo "# e2e rebase marker" >> /etc/hostname
 mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
+
+# `bootc switch`'s native OSTree 3-way merge treats a file baked into the
+# BASE image (present in old-default, unchanged in current, absent from the
+# target's new-default) as vendor content that was dropped upstream, and
+# drops it too — exactly the semantics core::mergetc mirrors for the
+# composefs path (see deploy.rs::ensure_e2e_ssh_socket, which recreates
+# this same file for that path). The e2e-sshd.socket baked into the base
+# image by the Containerfile above is invisible to bluefin:gts's own
+# defaults, so without this it would NOT survive the switch and the VM
+# would be unreachable after reboot — a real bug, not a flake. Writing it
+# here as a genuinely local (current-only) file makes it a local addition
+# the merge preserves, matching how a real user's customization survives.
+mkdir -p /etc/systemd/system/sockets.target.wants
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH TCP Socket (port 22)' \
+    '[Socket]' \
+    'ListenStream=22' \
+    'Accept=yes' \
+    '[Install]' \
+    'WantedBy=sockets.target' \
+    > /etc/systemd/system/e2e-sshd.socket
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH per-connection service' \
+    '[Service]' \
+    'ExecStart=-/usr/sbin/sshd -i' \
+    'StandardInput=socket' \
+    > /etc/systemd/system/e2e-sshd@.service
+ln -sf ../e2e-sshd.socket /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
+
+# Belt and suspenders, mirroring deploy.rs::ensure_e2e_ssh_socket's own
+# defensive removal: having both sshd.service (sshd -D) and e2e-sshd.socket
+# bound to port 22 kills the daemon with 255/EXCEPTION. The enablement
+# symlink is itself old==cur/absent-in-new (baked into the base image the
+# same way e2e-sshd.socket was) so the merge should drop it on its own —
+# but don't bet the E2E run on an unverified assumption about bootc
+# switch's merge semantics when a plain rm is just as easy.
+rm -f /etc/systemd/system/multi-user.target.wants/sshd.service
 REBASEFIX
 
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
