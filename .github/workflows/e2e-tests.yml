@@ -53,9 +53,15 @@ jobs:
             disk_size: 60G
           - name: bluefin ostree re-base (OstreeDeploy)
             base: ghcr.io/projectbluefin/bluefin:stable
-            # A distinct tag so the re-base is observable; gts is the
-            # previous-Fedora Bluefin stream.
-            target: ghcr.io/projectbluefin/bluefin:gts
+            # A distinct, actively-maintained stream so the re-base is
+            # observable. gts was tried first but is an abandoned stream —
+            # it crash-looped dbus-broker after `bootc switch` (2026-07-20),
+            # almost certainly a stale/mismatched dbus setup on gts rather
+            # than a bug in run_ostree_deploy or bootc switch's native /etc
+            # merge. lts is current and gets regular pushes, so a
+            # stable->lts jump exercises the same cross-stream rebase
+            # without landing on dead software.
+            target: ghcr.io/projectbluefin/bluefin:lts
             mode: ostree-rebase
             # bootc switch pulls the full target into ostree storage inside
             # the guest — needs headroom beyond the tracer's 20G.
