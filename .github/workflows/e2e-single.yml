@@ -1,0 +1,124 @@
+# Dispatch exactly ONE E2E cell with chosen parameters — the narrow-iteration
+# workflow the ci-fix-loop practice uses: debug a single failing scenario
+# without burning the whole matrix per attempt. The full PR-gating matrix
+# lives in e2e-tests.yml; keep the step sequence here in sync with it.
+name: E2E single cell
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base image the VM installs first
+        required: false
+        default: ghcr.io/projectbluefin/bluefin:stable
+      target:
+        description: Target image the migration/re-base moves to
+        required: false
+        default: ghcr.io/projectbluefin/dakota:stable
+      filesystem:
+        description: Root filesystem layout
+        required: false
+        default: btrfs
+        type: choice
+        options: [btrfs, ext4, xfs, xfs+crypt, xfs+lvm+crypt]
+      disk_size:
+        description: Guest disk size (ENOSPC shows up as misleading downstream errors)
+        required: false
+        default: 40G
+      mode:
+        description: Harness mode (E2E_MODE)
+        required: false
+        default: composefs-migrate
+        type: choice
+        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase]
+
+jobs:
+  e2e:
+    name: "${{ inputs.base }} -> ${{ inputs.target }} (${{ inputs.filesystem }}, ${{ inputs.mode }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-system-x86 qemu-utils ovmf podman jq iproute2 \
+            netcat-openbsd cryptsetup lvm2 xfsprogs dosfstools swtpm swtpm-tools
+
+      - name: Enable KVM access
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          else
+            echo "::warning::/dev/kvm not present; TCG fallback will be slow"
+          fi
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build migration binary
+        run: cargo build --release && cargo test --release
+
+      - name: Pull base + target images
+        run: |
+          set -eux
+          sudo podman pull "${{ inputs.base }}"
+          sudo podman pull "${{ inputs.target }}"
+
+      - name: Run E2E cell
+        run: |
+          set -o pipefail
+          sudo -E PATH="$PATH" \
+            BASE_IMAGE="${{ inputs.base }}" \
+            TARGET_IMAGE="${{ inputs.target }}" \
+            FILESYSTEM="${{ inputs.filesystem }}" \
+            DISK_SIZE="${{ inputs.disk_size }}" \
+            E2E_MODE="${{ inputs.mode }}" \
+            ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
+
+      - name: Failure triage into job summary
+        if: failure()
+        run: |
+          {
+            echo "## E2E failure triage — single cell"
+            if [ -f e2e-run.log ]; then
+              echo '### Last phase reached'
+              echo '```'
+              grep -aE '^=== |\[e2e [0-9:]+\] ===' e2e-run.log | tail -5
+              echo '```'
+              echo '### Assertions and errors'
+              echo '```'
+              grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' e2e-run.log | tail -20
+              echo '```'
+              echo '### Log tail'
+              echo '```'
+              tail -40 e2e-run.log
+              echo '```'
+            else
+              echo 'e2e-run.log was never created — failure predates the harness.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-single-logs
+          path: |
+            e2e-run.log
+            qemu.log
+            ovmf_vars.fd
+          if-no-files-found: warn
+          retention-days: 7

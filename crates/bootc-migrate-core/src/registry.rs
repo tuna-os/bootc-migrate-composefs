@@ -597,3 +597,108 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
     }
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_ref_with_tag() {
+        let (host, repo, r) = parse_image_ref("ghcr.io/projectbluefin/dakota:stable").unwrap();
+        assert_eq!(host, "ghcr.io");
+        assert_eq!(repo, "projectbluefin/dakota");
+        assert_eq!(r, "stable");
+    }
+
+    #[test]
+    fn image_ref_docker_prefix_and_default_tag() {
+        let (host, repo, r) = parse_image_ref("docker://quay.io/fedora/fedora-bootc").unwrap();
+        assert_eq!(host, "quay.io");
+        assert_eq!(repo, "fedora/fedora-bootc");
+        assert_eq!(r, "latest");
+    }
+
+    #[test]
+    fn image_ref_digest_wins_over_colon() {
+        // The digest itself contains ':' — '@' must take priority.
+        let (_, repo, r) = parse_image_ref("ghcr.io/org/img@sha256:abcdef0123456789").unwrap();
+        assert_eq!(repo, "org/img");
+        assert_eq!(r, "sha256:abcdef0123456789");
+    }
+
+    #[test]
+    fn image_ref_with_registry_port() {
+        // rsplit_once(':') must pick the TAG colon, not the port colon.
+        let (host, repo, r) = parse_image_ref("127.0.0.1:5000/bluefin:stable").unwrap();
+        assert_eq!(host, "127.0.0.1:5000");
+        assert_eq!(repo, "bluefin");
+        assert_eq!(r, "stable");
+    }
+
+    #[test]
+    fn image_ref_without_repo_component_errors() {
+        assert!(parse_image_ref("just-a-name").is_err());
+    }
+
+    #[test]
+    fn plain_http_hosts() {
+        assert!(host_is_plain_http("localhost"));
+        assert!(host_is_plain_http("localhost:5000"));
+        assert!(host_is_plain_http("10.0.2.2:5000"));
+        assert!(host_is_plain_http("127.0.0.1"));
+        assert!(!host_is_plain_http("ghcr.io"));
+        assert!(!host_is_plain_http("quay.io:443"));
+        // Not a full dotted quad — must stay HTTPS.
+        assert!(!host_is_plain_http("10.0.2"));
+    }
+
+    #[test]
+    fn urlencode_reserved_and_unreserved() {
+        assert_eq!(urlencode("repo/pull:read"), "repo%2Fpull%3Aread");
+        assert_eq!(urlencode("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
+    }
+
+    #[test]
+    fn manifest_index_detection() {
+        let ep = RegistryEndpoint {
+            base_url: "https://example.invalid".into(),
+            repo: "r".into(),
+            reference: "t".into(),
+            bearer: None,
+        };
+        let index: serde_json::Value = serde_json::json!({
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": []
+        });
+        let list: serde_json::Value = serde_json::json!({
+            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json"
+        });
+        let image: serde_json::Value = serde_json::json!({
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "layers": []
+        });
+        // Media-type-less docker registries: presence of `manifests` decides.
+        let bare: serde_json::Value = serde_json::json!({ "manifests": [] });
+        assert!(ep.is_manifest_index(&index));
+        assert!(ep.is_manifest_index(&list));
+        assert!(!ep.is_manifest_index(&image));
+        assert!(ep.is_manifest_index(&bare));
+    }
+
+    #[test]
+    fn arch_manifest_passthrough_for_plain_manifest() {
+        let ep = RegistryEndpoint {
+            base_url: "https://example.invalid".into(),
+            repo: "r".into(),
+            reference: "t".into(),
+            bearer: None,
+        };
+        let image: serde_json::Value = serde_json::json!({
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "layers": [{"digest": "sha256:aaa"}]
+        });
+        // A non-index manifest must pass through untouched (no network).
+        let out = ep.arch_layers_manifest(image.clone()).unwrap();
+        assert_eq!(out, image);
+    }
+}

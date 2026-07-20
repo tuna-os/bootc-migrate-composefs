@@ -210,3 +210,121 @@ pub fn gate(report: &PreflightReport, force: bool, skip_preflight: bool) -> Migr
     }
     MigrationGate::Proceed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A report with every gate green — the baseline each test perturbs.
+    fn healthy() -> PreflightReport {
+        PreflightReport {
+            is_bootc_ostree: true,
+            pending_transaction: PendingTransactionStatus::Clean,
+            is_uefi: true,
+            nvram_writable: true,
+            esp_path: Some("/boot/efi".into()),
+            esp_free_space_bytes: 500 * 1024 * 1024,
+            esp_fs_type: Some("vfat".into()),
+            esp_detected: true,
+            supports_reflink: true,
+            is_btrfs: true,
+            fs_type: Some("btrfs".into()),
+            ostree_repo_size_bytes: 8_000_000_000,
+            composefs_free_bytes: 33_000_000_000,
+            esp_ready_for_systemd_boot: true,
+            systemd_boot_binaries_present: true,
+            grub_tools_available: true,
+            sysroot_was_ro: false,
+        }
+    }
+
+    #[test]
+    fn healthy_report_proceeds_with_no_issues() {
+        let r = healthy();
+        assert!(readiness_issues(&r).is_empty());
+        assert_eq!(gate(&r, false, false), MigrationGate::Proceed);
+    }
+
+    #[test]
+    fn non_ostree_boot_is_refused_unless_forced() {
+        let mut r = healthy();
+        r.is_bootc_ostree = false;
+        assert!(matches!(gate(&r, false, false), MigrationGate::Refuse(_)));
+        // force overrides — the operator has taken responsibility.
+        assert_eq!(gate(&r, true, false), MigrationGate::Proceed);
+    }
+
+    #[test]
+    fn pending_transaction_is_refused_unless_waived() {
+        for pending in [
+            PendingTransactionStatus::StagedDeployment,
+            PendingTransactionStatus::PendingDeployment,
+            PendingTransactionStatus::StaleTransactionFiles,
+        ] {
+            let mut r = healthy();
+            r.pending_transaction = pending.clone();
+            assert!(
+                matches!(gate(&r, false, false), MigrationGate::Refuse(_)),
+                "{pending:?} must refuse"
+            );
+            // Either waiver flag lets it pass.
+            assert_eq!(gate(&r, true, false), MigrationGate::Proceed);
+            assert_eq!(gate(&r, false, true), MigrationGate::Proceed);
+        }
+    }
+
+    #[test]
+    fn refusal_message_names_the_pending_state_and_a_fix() {
+        let mut r = healthy();
+        r.pending_transaction = PendingTransactionStatus::StagedDeployment;
+        let MigrationGate::Refuse(msg) = gate(&r, false, false) else {
+            panic!("expected refusal");
+        };
+        assert!(msg.contains("Pending OSTree transaction"));
+        assert!(msg.contains("undeploy"), "must tell the user how to fix it");
+    }
+
+    #[test]
+    fn no_reflink_asks_for_confirmation_not_refusal() {
+        let mut r = healthy();
+        r.supports_reflink = false;
+        assert_eq!(gate(&r, false, false), MigrationGate::ConfirmFullCopy);
+        assert_eq!(gate(&r, true, false), MigrationGate::Proceed);
+        // skip_preflight is NOT a full-copy consent — still asks.
+        assert_eq!(gate(&r, false, true), MigrationGate::ConfirmFullCopy);
+    }
+
+    #[test]
+    fn gate_order_refusal_beats_full_copy_confirmation() {
+        // A non-ostree system without reflink must refuse, not ask about disk.
+        let mut r = healthy();
+        r.is_bootc_ostree = false;
+        r.supports_reflink = false;
+        assert!(matches!(gate(&r, false, false), MigrationGate::Refuse(_)));
+    }
+
+    #[test]
+    fn issues_fire_per_condition() {
+        let mut r = healthy();
+        r.nvram_writable = false;
+        r.supports_reflink = false;
+        r.systemd_boot_binaries_present = false;
+        let issues = readiness_issues(&r);
+        assert!(issues.iter().any(|i| i.contains("NVRAM")));
+        assert!(issues.iter().any(|i| i.contains("reflink")));
+        assert!(issues.iter().any(|i| i.contains("systemd-boot binaries")));
+        assert_eq!(issues.len(), 3, "no unexpected extra issues: {issues:?}");
+    }
+
+    #[test]
+    fn tight_disk_without_reflink_warns_about_space() {
+        let mut r = healthy();
+        r.supports_reflink = false;
+        r.composefs_free_bytes = r.ostree_repo_size_bytes; // < 1.5×
+        assert!(
+            readiness_issues(&r)
+                .iter()
+                .any(|i| i.contains("Insufficient free space"))
+        );
+    }
+}
