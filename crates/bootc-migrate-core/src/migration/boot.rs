@@ -79,7 +79,7 @@ pub fn phase5_setup_bootloader(
     // own private mount namespace (MS_REC|MS_PRIVATE), which is torn down the
     // instant the subprocess exits — leaving us an empty directory. A zero exit is
     // therefore not enough; we verify the mount actually exposes content here.
-    let composefs_mounted = match mount_image(sealed_config, &mount_path) {
+    let composefs_mounted = match mount_image_for(target_image, sealed_config, &mount_path) {
         Ok(()) if mount_path.join("usr/lib/modules").is_dir() => true,
         Ok(()) => {
             eprintln!(

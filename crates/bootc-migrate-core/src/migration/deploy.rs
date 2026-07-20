@@ -241,7 +241,7 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
     // (see phase5_setup_bootloader), the mount is empty here. Fall back to a
     // `podman image mount` of the already-cached image — local, real content, and
     // no dependency on reaching the registry mid-migration.
-    let composefs_mounted = match mount_image(sealed_config, &mount_path) {
+    let composefs_mounted = match mount_image_for(target_image, sealed_config, &mount_path) {
         Ok(()) if mount_path.join("etc").is_dir() => true,
         _ => {
             eprintln!(
