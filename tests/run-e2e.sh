@@ -20,6 +20,13 @@ SSH_PORT="${SSH_PORT:-2222}"
 # from "ghcr.io/projectbluefin/dakota:stable"). Used by the subscription check.
 TARGET_REPO_TAG="${TARGET_REPO_TAG:-$(echo "$TARGET_IMAGE" | sed 's|.*/||')}"
 FILESYSTEM="${FILESYSTEM:-btrfs}"
+# What this run exercises. "composefs-migrate" is the full migrator pipeline
+# (the default, unchanged). "ostree-rebase-plan" is the tracer for the
+# ostree→ostree re-base (#63): boot the source VM, assert bootc-rebase
+# resolves the OstreeDeploy route on a real OSTree system, and exit —
+# upgraded to the full re-base + validation when Strategy::OstreeDeploy
+# lands (#64).
+E2E_MODE="${E2E_MODE:-composefs-migrate}"
 # Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
 # patching, skipping host-side SSH injection); the lvm variant additionally
@@ -804,6 +811,27 @@ fi
 # ~9 GB images cost ~35 min in CI and timed the job out before the e2e ran.
 VM_TARGET_IMAGE="$TARGET_IMAGE"
 step "=== Target image: ${VM_TARGET_IMAGE} (pulled directly by the migration) ==="
+
+# Tracer mode (#63): verify bootc-rebase route resolution on a real
+# OSTree-booted system, then exit before any migration machinery runs.
+if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
+    step "=== ostree-rebase-plan: copying bootc-rebase to VM ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+    step "=== ostree-rebase-plan: resolving route on the VM ==="
+    PLAN_OUT=$(ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --plan" 2>&1) || {
+        echo "FAIL: bootc-rebase --plan exited nonzero"
+        echo "$PLAN_OUT"
+        exit 1
+    }
+    echo "$PLAN_OUT"
+    if ! echo "$PLAN_OUT" | grep -q 'Route: ostree -> ostree via OstreeDeploy'; then
+        echo "FAIL: expected 'Route: ostree -> ostree via OstreeDeploy' in plan output"
+        exit 1
+    fi
+    step "=== ostree-rebase-plan PASSED ==="
+    exit 0
+fi
 
 step "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/bootc-migrate-composefs root@localhost:/var/tmp/bootc-migrate-composefs

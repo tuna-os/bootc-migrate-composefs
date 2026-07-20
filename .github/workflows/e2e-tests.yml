@@ -51,6 +51,13 @@ jobs:
             # The BIOS-boot + ESP + separate /boot partitions and the fixed
             # 4G /var LV all come out of this before root sees any of it.
             disk_size: 60G
+          - name: bluefin ostree re-base (plan tracer)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # Same image as base: the plan tracer never pulls the target in the
+            # VM, so reusing the cached base keeps this the cheapest cell.
+            # Switches to a distinct tag when Strategy::OstreeDeploy lands (#64).
+            target: ghcr.io/projectbluefin/bluefin:stable
+            mode: ostree-rebase-plan
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
@@ -123,6 +130,7 @@ jobs:
           echo "TARGET_IMAGE=${{ matrix.scenario.target }}" >> "$GITHUB_ENV"
           echo "FILESYSTEM=${{ matrix.scenario.filesystem || 'btrfs' }}" >> "$GITHUB_ENV"
           echo "DISK_SIZE=${{ matrix.scenario.disk_size || '20G' }}" >> "$GITHUB_ENV"
+          echo "E2E_MODE=${{ matrix.scenario.mode || 'composefs-migrate' }}" >> "$GITHUB_ENV"
 
       - name: Disk space before E2E
         run: df -h /
@@ -138,6 +146,32 @@ jobs:
       - name: Disk space after E2E
         if: always()
         run: df -h /
+
+      # Diagnosis starts from the job summary, not a 30 MB log download:
+      # the last phase banner reached, every FAIL/ERROR assertion, and the
+      # log tail land in $GITHUB_STEP_SUMMARY on failure.
+      - name: Failure triage into job summary
+        if: failure()
+        run: |
+          {
+            echo "## E2E failure triage — ${{ matrix.scenario.name }}"
+            if [ -f e2e-run.log ]; then
+              echo '### Last phase reached'
+              echo '```'
+              grep -aE '^=== |\[e2e [0-9:]+\] ===' e2e-run.log | tail -5
+              echo '```'
+              echo '### Assertions and errors'
+              echo '```'
+              grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' e2e-run.log | tail -20
+              echo '```'
+              echo '### Log tail'
+              echo '```'
+              tail -40 e2e-run.log
+              echo '```'
+            else
+              echo 'e2e-run.log was never created — failure predates the harness.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload logs on failure
         if: failure()
