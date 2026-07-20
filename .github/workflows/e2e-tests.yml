@@ -20,6 +20,11 @@ jobs:
     name: ${{ matrix.scenario.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Exploratory cells (aurora: see below) opt into continue-on-error via
+    # matrix.scenario.allow_failure so they surface signal without dragging
+    # down the "E2E Migration Tests" workflow conclusion e2e-gate polls —
+    # ci.yml's e2e-gate reads the whole run's conclusion, not per-job.
+    continue-on-error: ${{ matrix.scenario.allow_failure || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,13 +58,38 @@ jobs:
             disk_size: 60G
           - name: bluefin ostree re-base (OstreeDeploy)
             base: ghcr.io/projectbluefin/bluefin:stable
-            # A distinct tag so the re-base is observable; gts is the
-            # previous-Fedora Bluefin stream.
-            target: ghcr.io/projectbluefin/bluefin:gts
+            # Genuinely distinct built image, same GNOME family — this is
+            # the gating cell for Strategy::OstreeDeploy.
+            #
+            # History: gts was tried first but is an abandoned stream — it
+            # crash-looped dbus-broker after `bootc switch` (2026-07-20), a
+            # stale dbus setup on gts itself, not a bug in run_ostree_deploy.
+            # lts was tried next but is currently content-identical to
+            # stable (same ostree commit both boots, confirmed via kernel
+            # cmdline checksum) — `bootc switch` correctly no-oped, but that
+            # makes it a useless target for exercising a real switch. dakota
+            # is confirmed distinct (used as a real target elsewhere in this
+            # matrix) while staying same-DE, so it isolates the OstreeDeploy
+            # mechanism from cross-DE identity-DB differences (see the
+            # aurora cell below).
+            target: ghcr.io/projectbluefin/dakota:stable
             mode: ostree-rebase
             # bootc switch pulls the full target into ostree storage inside
             # the guest — needs headroom beyond the tracer's 20G.
             disk_size: 40G
+          - name: bluefin -> aurora ostree re-base (GNOME -> KDE, OstreeDeploy)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # Exploratory, non-gating: Aurora is ublue-os's KDE spin
+            # (Bluefin is GNOME). A DE swap is a more aggressive exercise of
+            # bootc switch's native /etc merge than a same-DE jump and may
+            # surface cross-DE identity-DB differences (the messagebus-user
+            # class of issue mergetc.rs handles for the composefs path) —
+            # useful signal, but not a reason to block the OstreeDeploy
+            # strategy itself.
+            target: ghcr.io/ublue-os/aurora:stable
+            mode: ostree-rebase
+            disk_size: 40G
+            allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration

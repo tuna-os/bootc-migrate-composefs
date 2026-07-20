@@ -17,6 +17,8 @@
 //! - [`types`] — shared types such as [`VerityDigest`]
 
 pub mod composefs;
+#[cfg(feature = "composefs-native")]
+pub mod composefs_native;
 pub mod mergetc;
 pub mod migration;
 pub mod motd;
