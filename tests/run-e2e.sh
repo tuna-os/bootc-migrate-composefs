@@ -833,6 +833,134 @@ if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
     exit 0
 fi
 
+# Full ostree→ostree re-base mode (#63/#64): stage the target as a plain
+# OSTree deployment via Strategy::OstreeDeploy, reboot into it, and assert
+# the image switched while /etc edits and /var data survived (OSTree's
+# native 3-way /etc merge + shared /var).
+if [ "$E2E_MODE" = "ostree-rebase" ]; then
+    step "=== ostree-rebase: copying bootc-rebase to VM ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+
+    step "=== ostree-rebase: injecting /etc + /var fixtures ==="
+    ssh $SSH_OPTS root@localhost bash <<'REBASEFIX'
+set -e
+mkdir -p /etc/rebase-test
+echo "etc-rebase-value" > /etc/rebase-test/marker.conf
+echo "# e2e rebase marker" >> /etc/hostname
+mkdir -p /var/rebase-test
+echo "var-rebase-value" > /var/rebase-test/marker.txt
+REBASEFIX
+
+    step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
+    if ! ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" \
+        2>&1 | sed 's/^/[rebase] /'; then
+        echo "FAIL: bootc-rebase exited nonzero"
+        exit 1
+    fi
+
+    step "=== ostree-rebase: verifying staged deployment ==="
+    if ! ssh $SSH_OPTS root@localhost "bootc status --json" \
+        | grep -q "$(echo "$VM_TARGET_IMAGE" | sed 's|.*/||')"; then
+        echo "FAIL: staged deployment does not reference $VM_TARGET_IMAGE"
+        exit 1
+    fi
+
+    # `bootc switch`'s native OSTree 3-way merge treats a file baked into the
+    # BASE image (present in old-default, unchanged in current, absent from
+    # the target's new-default) as vendor content that was dropped upstream,
+    # and drops it too — exactly the semantics core::mergetc mirrors for the
+    # composefs path (see deploy.rs::ensure_e2e_ssh_socket, which recreates
+    # this same file for that path). e2e-sshd.socket baked into the base
+    # image is invisible to the target's own defaults, so it does NOT
+    # survive the switch if injected pre-switch (confirmed: it disappears
+    # from the staged deploy's /etc post-merge). Inject it post-merge,
+    # directly into the *staged* deployment's /etc, mirroring
+    # ensure_e2e_ssh_socket's timing rather than the merge's.
+    step "=== ostree-rebase: re-injecting e2e-sshd into the staged deploy ==="
+    ssh $SSH_OPTS root@localhost bash <<'POSTMERGEFIX'
+set -e
+# Exactly two deployments exist at this point (booted + staged); the
+# booted one is marked with a leading '*' in `ostree admin status`, so the
+# other line is unambiguously the staged deployment.
+DEPLOY_LINE=$(ostree admin status | grep -v '^\*' | grep -v '^ *$' | head -1)
+STATEROOT=$(echo "$DEPLOY_LINE" | awk '{print $1}')
+CKSUM_SERIAL=$(echo "$DEPLOY_LINE" | awk '{print $2}')
+DEPLOY_ETC="/ostree/deploy/${STATEROOT}/deploy/${CKSUM_SERIAL}/etc"
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found ($DEPLOY_ETC)"; exit 1; }
+
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH TCP Socket (port 22)' \
+    '[Socket]' \
+    'ListenStream=22' \
+    'Accept=yes' \
+    '[Install]' \
+    'WantedBy=sockets.target' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH per-connection service' \
+    '[Service]' \
+    'ExecStart=-/usr/sbin/sshd -i' \
+    'StandardInput=socket' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
+ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+
+# Belt and suspenders, mirroring deploy.rs::ensure_e2e_ssh_socket's own
+# defensive removal: having both sshd.service (sshd -D) and e2e-sshd.socket
+# bound to port 22 kills the daemon with 255/EXCEPTION.
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+POSTMERGEFIX
+
+    step "=== ostree-rebase: rebooting into the new deployment ==="
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>&1; then
+            step "VM accessible via SSH after re-base reboot ($((SECONDS - WAIT_START))s)."
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for post-rebase SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "ERROR: VM did not boot back after the ostree re-base."
+        grep -E '\[FAILED\]|DEPEND\]' qemu.log | tail -40 || true
+        exit 1
+    fi
+
+    step "=== ostree-rebase: post-reboot assertions ==="
+    # Deliberately unquoted heredoc: $VM_TARGET_IMAGE must expand client-side
+    # (it's a local variable, not present in the SSH'd shell); \$-escaped
+    # tokens below expand server-side instead.
+    # shellcheck disable=SC2087
+    ssh $SSH_OPTS root@localhost bash <<REBASECHECK
+set -e
+booted=\$(bootc status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['status']['booted']['image']['image']['image'])")
+case "\$booted" in
+  *$(echo "$VM_TARGET_IMAGE" | sed 's|.*/||')*) echo "OK: booted image is \$booted" ;;
+  *) echo "FAIL: booted image is \$booted, expected $VM_TARGET_IMAGE"; exit 1 ;;
+esac
+grep -q "etc-rebase-value" /etc/rebase-test/marker.conf || { echo "FAIL: /etc marker lost"; exit 1; }
+grep -q "e2e rebase marker" /etc/hostname || { echo "FAIL: /etc/hostname edit lost"; exit 1; }
+grep -q "var-rebase-value" /var/rebase-test/marker.txt || { echo "FAIL: /var marker lost"; exit 1; }
+# Previous deployment must remain as rollback.
+rollback=\$(bootc status --json | python3 -c "import json,sys; print(bool(json.load(sys.stdin)['status'].get('rollback')))")
+[ "\$rollback" = "True" ] || { echo "FAIL: no rollback deployment after re-base"; exit 1; }
+echo "OK: /etc + /var preserved, rollback deployment present"
+REBASECHECK
+
+    step "=== ostree-rebase PASSED ==="
+    exit 0
+fi
+
 step "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/bootc-migrate-composefs root@localhost:/var/tmp/bootc-migrate-composefs
 
