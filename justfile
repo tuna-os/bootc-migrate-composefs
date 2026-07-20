@@ -87,7 +87,30 @@ e2e-debug: build
 # === Linting ===
 
 # Run every check CI runs (clippy, rustfmt, unit tests, shellcheck)
-check: clippy fmt-check test lint-shell
+check: clippy fmt-check test test-all-features lint-shell
+
+# Unit tests + clippy with every cargo feature enabled (feature-gated code
+# like composefs-native is invisible to the default build — this is its
+# only automated gate).
+test-all-features:
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo test --workspace --all-features {{env_var_or_default('PROFILE_FLAG', '')}}
+
+# Probe watched bootc images for cfs CLI generation drift (see #72).
+drift-canary:
+    ./tests/drift-canary.sh
+
+# Line-coverage summary (requires cargo-llvm-cov + llvm-tools-preview).
+coverage:
+    cargo llvm-cov --workspace --all-features --summary-only
+
+# Coverage with the regression floor CI enforces (see docs/testing.md).
+coverage-check:
+    cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 26
+
+# Browsable HTML coverage report (target/llvm-cov/html/index.html).
+coverage-html:
+    cargo llvm-cov --workspace --all-features --html
 
 # Format all Rust code.
 fmt:

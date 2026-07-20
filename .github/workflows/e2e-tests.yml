@@ -139,6 +139,32 @@ jobs:
         if: always()
         run: df -h /
 
+      # Diagnosis starts from the job summary, not a 30 MB log download:
+      # the last phase banner reached, every FAIL/ERROR assertion, and the
+      # log tail land in $GITHUB_STEP_SUMMARY on failure.
+      - name: Failure triage into job summary
+        if: failure()
+        run: |
+          {
+            echo "## E2E failure triage — ${{ matrix.scenario.name }}"
+            if [ -f e2e-run.log ]; then
+              echo '### Last phase reached'
+              echo '```'
+              grep -aE '^=== |\[e2e [0-9:]+\] ===' e2e-run.log | tail -5
+              echo '```'
+              echo '### Assertions and errors'
+              echo '```'
+              grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' e2e-run.log | tail -20
+              echo '```'
+              echo '### Log tail'
+              echo '```'
+              tail -40 e2e-run.log
+              echo '```'
+            else
+              echo 'e2e-run.log was never created — failure predates the harness.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
