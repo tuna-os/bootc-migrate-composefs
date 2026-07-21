@@ -378,6 +378,10 @@ fn run_image_swap(args: &Args) -> Result<()> {
         return Ok(());
     }
 
+    let _sleep_guard = Some(bootc_migrate_core::migration::SleepGuard::new(
+        "bootc image swap in progress",
+    ));
+
     stage_via_bootc_switch(&args.target_image)?;
 
     println!(
@@ -472,6 +476,10 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
         return Ok(());
     }
+
+    let _sleep_guard = Some(bootc_migrate_core::migration::SleepGuard::new(
+        "bootc ostree re-base in progress",
+    ));
 
     stage_via_bootc_switch(&args.target_image)?;
 
