@@ -225,8 +225,7 @@ DOCKERFILE
 # Substitute the base image
 sed -i "s|BASE_IMAGE_PLACEHOLDER|$BASE_IMAGE|g" "$TMP_CONTAINERFILE"
 
-echo "Building modified image with sshd enabled..."
-# Only pull base image if not already cached locally.
+echo "Building modified base image with sshd enabled..."
 if ! sudo podman image exists "$BASE_IMAGE" 2>/dev/null; then
     echo "Pulling base image $BASE_IMAGE..."
     sudo podman pull "$BASE_IMAGE"
@@ -236,6 +235,56 @@ rm -f "$TMP_CONTAINERFILE"
 
 INSTALL_IMAGE="$MODIFIED_IMAGE"
 echo "Using install image: $INSTALL_IMAGE"
+
+# Prepare target image with sshd enabled as well so Phase 4 runtime injection is unnecessary (#18)
+MODIFIED_TARGET_IMAGE="localhost/e2e-dakota-ssh:latest"
+TMP_TARGET_CONTAINERFILE=$(mktemp)
+cat > "$TMP_TARGET_CONTAINERFILE" <<'DOCKERFILE'
+FROM TARGET_IMAGE_PLACEHOLDER
+RUN mkdir -p /usr/lib/systemd/system-preset && \
+    echo 'enable sshd.service' > /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
+    echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
+RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
+RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
+    ln -sf /usr/lib/systemd/system/sshd.service \
+           /usr/lib/systemd/system/multi-user.target.wants/sshd.service
+RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
+    echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config && \
+    echo 'Port 22' >> /etc/ssh/sshd_config
+RUN systemctl disable firewalld 2>/dev/null || true
+RUN mkdir -p /etc/systemd/system && \
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=E2E SSH TCP Socket (port 22)' \
+        '[Socket]' \
+        'ListenStream=22' \
+        'Accept=yes' \
+        '[Install]' \
+        'WantedBy=sockets.target' \
+        > /etc/systemd/system/e2e-sshd.socket && \
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=E2E SSH per-connection service' \
+        '[Service]' \
+        'ExecStart=-/usr/sbin/sshd -i' \
+        'StandardInput=socket' \
+        > /etc/systemd/system/e2e-sshd@.service && \
+    mkdir -p /etc/systemd/system/sockets.target.wants && \
+    ln -sf /etc/systemd/system/e2e-sshd.socket \
+           /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
+DOCKERFILE
+
+sed -i "s|TARGET_IMAGE_PLACEHOLDER|$TARGET_IMAGE|g" "$TMP_TARGET_CONTAINERFILE"
+echo "Building modified target image with sshd enabled..."
+if ! sudo podman image exists "$TARGET_IMAGE" 2>/dev/null; then
+    echo "Pulling target image $TARGET_IMAGE..."
+    sudo podman pull "$TARGET_IMAGE"
+fi
+sudo podman build -t "$MODIFIED_TARGET_IMAGE" -f "$TMP_TARGET_CONTAINERFILE"
+rm -f "$TMP_TARGET_CONTAINERFILE"
+
+TARGET_IMAGE="$MODIFIED_TARGET_IMAGE"
+echo "Using target image: $TARGET_IMAGE"
 
 # 5. Create and initialize disk image (or restore checkpoint)
 # LUKS: checkpoint has plain partition layout, not LUKS — always full setup.
