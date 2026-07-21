@@ -230,6 +230,17 @@ pub fn is_cross_base(host: &BaseInfo, target: &BaseInfo) -> bool {
     !(like_contains(&host.id_like, &target.id) || like_contains(&target.id_like, &host.id))
 }
 
+/// Fetch probe files from an image ref via registry streaming.
+pub fn fetch_probe_files(image_ref: &str) -> anyhow::Result<ProbeFiles> {
+    crate::registry::fetch_probe_files_via_registry(image_ref)
+}
+
+/// Scan a target image via registry streaming and return its [`Capabilities`].
+pub fn scan_target_image(image_ref: &str) -> anyhow::Result<Capabilities> {
+    let probe = fetch_probe_files(image_ref)?;
+    Ok(assemble(&probe))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
