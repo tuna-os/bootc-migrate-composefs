@@ -62,7 +62,7 @@ const ROUTES: &[Route] = &[
         from: Backend::Composefs,
         to: Backend::Composefs,
         strategy: Strategy::ImageSwap,
-        implemented: false,
+        implemented: true,
     },
     Route {
         from: Backend::Ostree,
@@ -105,6 +105,13 @@ mod tests {
                 assert!(route(from, to).is_some(), "no route for {from} -> {to}");
             }
         }
+    }
+
+    #[test]
+    fn composefs_to_composefs_is_implemented() {
+        let r = route(Backend::Composefs, Backend::Composefs).unwrap();
+        assert!(r.implemented);
+        assert_eq!(r.strategy, Strategy::ImageSwap);
     }
 
     #[test]
