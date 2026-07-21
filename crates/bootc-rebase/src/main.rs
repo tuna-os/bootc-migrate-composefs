@@ -9,7 +9,7 @@
 use anyhow::{Result, bail};
 use bootc_migrate_core::migration;
 use bootc_migrate_core::preflight::{self, readiness};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 mod routing;
 
@@ -18,9 +18,36 @@ use routing::{Backend, Strategy, route};
 #[derive(Parser, Debug)]
 #[command(name = "bootc-rebase")]
 #[command(about = "Re-base a bootc system between backends, bootloaders, and images", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[command(flatten)]
+    rebase_args: Args,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Commands {
+    /// Inspect target container image capabilities via registry streaming
+    Scan(ScanArgs),
+    /// Re-base system
+    Rebase(Args),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ScanArgs {
+    /// Target container image to scan (e.g. ghcr.io/projectbluefin/dakota:stable)
+    image: String,
+
+    /// Output capabilities as machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args, Debug, Clone)]
 struct Args {
     /// Target bootable container image (e.g. ghcr.io/projectbluefin/dakota:stable)
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "")]
     target_image: String,
 
     /// Source backend: "auto" (detect), "ostree", or "composefs"
@@ -54,6 +81,75 @@ struct Args {
     /// Print the planned route and exit without touching the system
     #[arg(long)]
     plan: bool,
+}
+
+fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabilities) {
+    println!("=== Target image capabilities ===");
+    println!("Image:                 {image}");
+    println!(
+        "Composefs:             {}",
+        if caps.composefs_capable {
+            "capable"
+        } else {
+            "not enabled in prepare-root.conf"
+        }
+    );
+    println!(
+        "OSTree capable:        {}",
+        if caps.ostree_capable { "yes" } else { "no" }
+    );
+    println!(
+        "Bootloader payload:    {}",
+        if caps.systemd_boot_payload {
+            "systemd-boot ✓"
+        } else {
+            "none"
+        }
+    );
+    println!(
+        "bootc present:         {}",
+        if caps.bootc_present { "yes" } else { "no" }
+    );
+    println!(
+        "Desktops:              {}",
+        if caps.desktops.is_empty() {
+            "none".to_string()
+        } else {
+            caps.desktops.join(", ")
+        }
+    );
+    if let Some(base) = &caps.base {
+        println!(
+            "Base OS:               {} {}",
+            base.id,
+            base.version_id.as_deref().unwrap_or("")
+        );
+    } else {
+        println!("Base OS:               unknown");
+    }
+    println!(
+        "Sysusers:              {} static allocation(s)",
+        caps.sysusers.len()
+    );
+    println!(
+        "Compatible:            {}",
+        if caps.ostree_capable || caps.composefs_capable {
+            "YES"
+        } else {
+            "NO"
+        }
+    );
+}
+
+fn run_scan(args: &ScanArgs) -> Result<()> {
+    println!("Scanning target image {}...", args.image);
+    let caps = bootc_migrate_core::scan::scan_target_image(&args.image)?;
+    if args.json {
+        println!("{}", caps.to_json());
+    } else {
+        print_capabilities_table(&args.image, &caps);
+    }
+    Ok(())
 }
 
 fn parse_backend(s: &str) -> Result<Backend> {
@@ -129,9 +225,7 @@ fn run_core_migration(args: &Args) -> Result<()> {
     )
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-
+fn execute_rebase(args: &Args) -> Result<()> {
     let from = if args.source_backend == "auto" {
         detect_source_backend()?
     } else {
@@ -164,10 +258,45 @@ fn main() -> Result<()> {
         );
     }
 
+    if to == Backend::Composefs
+        && !args.skip_preflight
+        && let Ok(caps) = bootc_migrate_core::scan::scan_target_image(&args.target_image)
+        && !caps.composefs_capable
+        && !args.force
+    {
+        bail!(
+            "Target image {} is not composefs-capable (prepare-root.conf lacks composefs enabled). \
+             Use --force to override.",
+            args.target_image
+        );
+    }
+
     match r.strategy {
-        Strategy::CoreMigration => run_core_migration(&args),
-        Strategy::OstreeDeploy => run_ostree_deploy(&args),
-        Strategy::ImageSwap => run_image_swap(&args),
+        Strategy::CoreMigration => run_core_migration(args),
+        Strategy::OstreeDeploy => run_ostree_deploy(args),
+        Strategy::ImageSwap => run_image_swap(args),
+    }
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Scan(ref scan_args)) => run_scan(scan_args),
+        Some(Commands::Rebase(ref rebase_args)) => {
+            if rebase_args.target_image.is_empty() {
+                bail!("--target-image (-t) is required for re-base.");
+            }
+            execute_rebase(rebase_args)
+        }
+        None => {
+            if cli.rebase_args.target_image.is_empty() {
+                bail!(
+                    "--target-image (-t) is required for re-base. Run `bootc-rebase --help` or `bootc-rebase scan <image>`."
+                );
+            }
+            execute_rebase(&cli.rebase_args)
+        }
     }
 }
 
@@ -433,5 +562,51 @@ mod tests {
         assert!(matches!(parse_backend("composefs"), Ok(Backend::Composefs)));
         assert!(parse_backend("btrfs").is_err());
         assert!(parse_backend("").is_err());
+    }
+
+    #[test]
+    fn test_scan_subcommand_parsing() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "scan",
+            "ghcr.io/projectbluefin/dakota:stable",
+            "--json",
+        ]);
+        match cli.command {
+            Some(Commands::Scan(args)) => {
+                assert_eq!(args.image, "ghcr.io/projectbluefin/dakota:stable");
+                assert!(args.json);
+            }
+            _ => panic!("expected Commands::Scan"),
+        }
+    }
+
+    #[test]
+    fn test_rebase_subcommand_parsing() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+            "--plan",
+        ]);
+        assert!(cli.command.is_none());
+        assert_eq!(
+            cli.rebase_args.target_image,
+            "ghcr.io/projectbluefin/dakota:stable"
+        );
+        assert!(cli.rebase_args.plan);
+
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+        ]);
+        match cli.command {
+            Some(Commands::Rebase(args)) => {
+                assert_eq!(args.target_image, "ghcr.io/projectbluefin/dakota:stable");
+            }
+            _ => panic!("expected Commands::Rebase"),
+        }
     }
 }

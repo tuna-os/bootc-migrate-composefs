@@ -182,6 +182,117 @@ pub fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Pa
     Ok(())
 }
 
+/// Stream probe files for the target image from the registry without pulling full layers.
+pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::ProbeFiles> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    let layers_manifest = endpoint.arch_layers_manifest(manifest_json)?;
+    let layers = layers_manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-scan-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create /var/tmp scratch dir for registry scan")?;
+    let blob_path = scratch.path().join("layer.blob");
+
+    let probe_paths = [
+        "usr/lib/os-release",
+        "etc/os-release",
+        "usr/lib/ostree/prepare-root.conf",
+        "usr/lib/sysusers.d",
+        "usr/share/xsessions",
+        "usr/share/wayland-sessions",
+        "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
+        "usr/bin/bootc",
+        "usr/lib/bootc",
+    ];
+
+    for layer in layers.iter() {
+        let digest = match layer.get("digest").and_then(|v| v.as_str()) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        if endpoint.download_blob(digest, &blob_path).is_err() {
+            continue;
+        }
+
+        for path in &probe_paths {
+            for candidate in [format!("./{path}"), path.to_string()] {
+                let _ = Command::new("tar")
+                    .args([
+                        "-xaf",
+                        blob_path.to_str().unwrap_or_default(),
+                        "-C",
+                        scratch.path().to_str().unwrap_or_default(),
+                        "--overwrite",
+                        "--no-same-owner",
+                        &candidate,
+                    ])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+        let _ = fs::remove_file(&blob_path);
+    }
+
+    let mut probe = crate::scan::ProbeFiles::default();
+
+    let os_release_usr = scratch.path().join("usr/lib/os-release");
+    let os_release_etc = scratch.path().join("etc/os-release");
+    if os_release_usr.exists() {
+        probe.os_release = fs::read_to_string(&os_release_usr).ok();
+    } else if os_release_etc.exists() {
+        probe.os_release = fs::read_to_string(&os_release_etc).ok();
+    }
+
+    let prep_path = scratch.path().join("usr/lib/ostree/prepare-root.conf");
+    if prep_path.exists() {
+        probe.prepare_root = fs::read_to_string(&prep_path).ok();
+    }
+
+    let sysusers_dir = scratch.path().join("usr/lib/sysusers.d");
+    if sysusers_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&sysusers_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("conf")
+                && let Ok(content) = fs::read_to_string(&path)
+            {
+                probe.sysusers.push(content);
+            }
+        }
+    }
+
+    let mut sessions = Vec::new();
+    for sess_dir_name in ["usr/share/xsessions", "usr/share/wayland-sessions"] {
+        let sess_dir = scratch.path().join(sess_dir_name);
+        if sess_dir.is_dir()
+            && let Ok(entries) = fs::read_dir(&sess_dir)
+        {
+            for entry in entries.flatten() {
+                if let Some(fname) = entry.file_name().to_str() {
+                    sessions.push(fname.to_string());
+                }
+            }
+        }
+    }
+    probe.session_files = sessions;
+
+    probe.has_systemd_boot_payload = scratch
+        .path()
+        .join("usr/lib/systemd/boot/efi/systemd-bootx64.efi")
+        .exists();
+    probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
+        || scratch.path().join("usr/lib/bootc").exists();
+
+    Ok(probe)
+}
+
 /// Extract the target image's kernel modules for `kver` from the registry into a
 /// fresh /var/tmp directory, returning the tempdir guard plus the path to the
 /// extracted `usr/lib/modules/<kver>` tree.
