@@ -774,6 +774,67 @@ pub fn inspect_image(image_id: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Generation-aware composefs overlay mount for phases 4/5.
+///
+/// On a **legacy-CLI host** this is exactly [`mount_image`] with the sealed
+/// config digest — byte-identical to historical behavior.
+///
+/// On a **new-generation host** (no `create-image`/`seal` — issue #72) the
+/// sealed-config identifier resolves nothing (`oci mount` now takes a tag or
+/// manifest digest), and a legacy-delegate-written store additionally lacks
+/// the config-splitstream EROFS named ref that new-gen resolution requires.
+/// Both are fixed by one free operation, verified empirically (see
+/// docs/cfs-cli-generations.md): re-pull the image from `containers-storage:`
+/// — 0 new objects, deduped, rewrites config+manifest splitstreams with the
+/// EROFS ref, and the EROFS id is deterministic so existing BLS/`.origin`
+/// digests stay valid — then mount by the pulled ref. Any failure falls back
+/// to the legacy path (and its raw-EROFS + caller-side podman fallbacks).
+pub fn mount_image_for(target_image: &str, sealed_config: &str, mount_path: &Path) -> Result<()> {
+    if !crate::composefs::host_cfs_is_legacy() {
+        let cs_ref = format!("containers-storage:{target_image}");
+        let pulled = Command::new("bootc")
+            .args(["internals", "cfs", "--system", "oci", "pull", &cs_ref])
+            .output();
+        match pulled {
+            Ok(o) if o.status.success() => {
+                if let Some(mount_str) = mount_path.to_str() {
+                    let mnt = Command::new("bootc")
+                        .args([
+                            "internals",
+                            "cfs",
+                            "--system",
+                            "oci",
+                            "mount",
+                            &cs_ref,
+                            mount_str,
+                        ])
+                        .output();
+                    match mnt {
+                        Ok(m) if m.status.success() => return Ok(()),
+                        Ok(m) => eprintln!(
+                            "[mount] new-gen mount by ref failed ({}); trying legacy identifiers",
+                            String::from_utf8_lossy(&m.stderr).trim()
+                        ),
+                        Err(e) => eprintln!(
+                            "[mount] new-gen mount by ref failed ({e}); trying legacy identifiers"
+                        ),
+                    }
+                }
+            }
+            Ok(o) => eprintln!(
+                "[mount] new-gen containers-storage re-pull failed ({}); \
+                 trying legacy identifiers",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!(
+                "[mount] new-gen containers-storage re-pull failed ({e}); \
+                 trying legacy identifiers"
+            ),
+        }
+    }
+    mount_image(sealed_config, mount_path)
+}
+
 pub fn mount_image(image_id: &str, mount_path: &Path) -> Result<()> {
     let mount_str = mount_path
         .to_str()
