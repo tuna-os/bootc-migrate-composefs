@@ -286,6 +286,83 @@ pub fn render_report(plan: &RemapPlan) -> String {
     out
 }
 
+/// Apply a [`RemapPlan`] over `staged_root/var` and `staged_root/etc` in the staged deployment.
+/// Executes each step in `plan.steps` sequentially (handling cycle-safe scratch renames).
+/// Returns the total number of files/directories whose ownership was updated.
+pub fn apply_remap_plan(staged_root: &std::path::Path, plan: &RemapPlan) -> anyhow::Result<usize> {
+    if plan.is_empty() || plan.steps.is_empty() {
+        return Ok(0);
+    }
+
+    let mut total_changed = 0usize;
+
+    for step in &plan.steps {
+        let targets = [staged_root.join("var"), staged_root.join("etc")];
+        for target in &targets {
+            if !target.exists() {
+                continue;
+            }
+            let changed = apply_single_step(target, step)?;
+            total_changed += changed;
+        }
+    }
+
+    Ok(total_changed)
+}
+
+fn apply_single_step(dir: &std::path::Path, step: &RemapStep) -> anyhow::Result<usize> {
+    use rustix::fs::{AtFlags, Gid, Uid, chownat};
+    use std::os::unix::fs::MetadataExt;
+
+    let mut count = 0usize;
+    let mut stack = vec![dir.to_path_buf()];
+
+    while let Some(path) = stack.pop() {
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if meta.is_dir()
+            && !meta.file_type().is_symlink()
+            && let Ok(entries) = std::fs::read_dir(&path)
+        {
+            for entry in entries.flatten() {
+                stack.push(entry.path());
+            }
+        }
+
+        let matches = match step.kind {
+            IdKind::Uid => meta.uid() == step.from,
+            IdKind::Gid => meta.gid() == step.from,
+        };
+
+        if matches {
+            let uid_arg = match step.kind {
+                IdKind::Uid => Some(Uid::from_raw(step.to)),
+                IdKind::Gid => None,
+            };
+            let gid_arg = match step.kind {
+                IdKind::Uid => None,
+                IdKind::Gid => Some(Gid::from_raw(step.to)),
+            };
+            if chownat(
+                rustix::fs::CWD,
+                &path,
+                uid_arg,
+                gid_arg,
+                AtFlags::SYMLINK_NOFOLLOW,
+            )
+            .is_ok()
+            {
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +480,39 @@ newsvc:x:985:985::/var/lib/newsvc:/sbin/nologin
         let json = plan.to_json();
         assert!(json.contains("\"dnsmasq\""));
         assert!(json.contains("\"old_id\": 983"));
+    }
+
+    #[test]
+    fn test_apply_remap_plan_executes_steps() {
+        let temp = tempfile::tempdir().unwrap();
+        let var = temp.path().join("var");
+        std::fs::create_dir_all(&var).unwrap();
+        let f = var.join("testfile");
+        std::fs::write(&f, "content").unwrap();
+
+        let plan = RemapPlan {
+            remaps: vec![RemapEntry {
+                name: "testaccount".into(),
+                kind: IdKind::Uid,
+                old_id: 980,
+                new_id: 981,
+            }],
+            steps: vec![
+                RemapStep {
+                    kind: IdKind::Uid,
+                    from: 980,
+                    to: 60000,
+                },
+                RemapStep {
+                    kind: IdKind::Uid,
+                    from: 60000,
+                    to: 981,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let res = apply_remap_plan(temp.path(), &plan);
+        assert!(res.is_ok());
     }
 }
