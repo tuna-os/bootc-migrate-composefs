@@ -5,12 +5,14 @@ pub mod import;
 pub mod kernel_options;
 pub mod os_release;
 pub mod pull;
+pub mod rollback;
 pub mod seal;
 
 pub use boot::phase5_setup_bootloader;
 pub use deploy::phase4_stage_deploy;
 pub use import::phase1_import_objects;
 pub use pull::phase2_pull_image;
+pub use rollback::run_rollback;
 pub use seal::phase3_create_image;
 
 pub use boot::find_esp_or_mount;
