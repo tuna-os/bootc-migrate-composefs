@@ -225,8 +225,7 @@ DOCKERFILE
 # Substitute the base image
 sed -i "s|BASE_IMAGE_PLACEHOLDER|$BASE_IMAGE|g" "$TMP_CONTAINERFILE"
 
-echo "Building modified image with sshd enabled..."
-# Only pull base image if not already cached locally.
+echo "Building modified base image with sshd enabled..."
 if ! sudo podman image exists "$BASE_IMAGE" 2>/dev/null; then
     echo "Pulling base image $BASE_IMAGE..."
     sudo podman pull "$BASE_IMAGE"
@@ -236,6 +235,15 @@ rm -f "$TMP_CONTAINERFILE"
 
 INSTALL_IMAGE="$MODIFIED_IMAGE"
 echo "Using install image: $INSTALL_IMAGE"
+
+# NOTE: TARGET_IMAGE stays the pristine upstream ref (see the "pulled directly
+# by the migration" comment near VM_TARGET_IMAGE below) — the migration/rebase
+# binaries pull it live, from inside the VM, over the network. A locally-built
+# "localhost/..." target image is unreachable from inside the VM (no registry
+# mirror; that was tried and rejected for cost — see that comment) and
+# harmless deviation on the target image is out of scope for the E2E's sshd
+# setup: post-merge injection (below, mirroring the ostree-rebase path) covers
+# it without touching what the migration actually pulls.
 
 # 5. Create and initialize disk image (or restore checkpoint)
 # LUKS: checkpoint has plain partition layout, not LUKS — always full setup.
@@ -1088,6 +1096,44 @@ if [ "${MIGRATE_RC:-1}" != "0" ]; then
     echo "ERROR: migration binary exited with rc=${MIGRATE_RC:-?}" >&2
     exit "${MIGRATE_RC:-1}"
 fi
+
+# e2e-sshd.socket baked into the base image (see MODIFIED_IMAGE above) is
+# vendor content absent from the target's own defaults, so core::mergetc's
+# 3-way merge drops it (old==cur, new absent) — same semantics as the
+# ostree-rebase path's native OSTree merge (see the "re-injecting e2e-sshd"
+# block above). Recreate it directly in the staged deployment's /etc,
+# post-merge, pre-reboot, rather than baking it into the target image itself
+# (#18 — that would require the migration to pull a locally-built image it
+# can't reach; see the TARGET_IMAGE note above).
+step "=== Re-injecting e2e-sshd into the staged deployment ==="
+ssh $SSH_OPTS root@localhost bash <<'CFS_POSTMERGEFIX'
+set -e
+DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found (/sysroot/state/deploy/*/etc)"; exit 1; }
+
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH TCP Socket (port 22)' \
+    '[Socket]' \
+    'ListenStream=22' \
+    'Accept=yes' \
+    '[Install]' \
+    'WantedBy=sockets.target' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH per-connection service' \
+    '[Service]' \
+    'ExecStart=-/usr/sbin/sshd -i' \
+    'StandardInput=socket' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
+ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+
+# Belt and suspenders: having both sshd.service (sshd -D) and e2e-sshd.socket
+# bound to port 22 kills the daemon with 255/EXCEPTION.
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+CFS_POSTMERGEFIX
 
 step "=== Verifying migration artifacts before reboot ==="
 ssh $SSH_OPTS root@localhost bash <<'DIAG'

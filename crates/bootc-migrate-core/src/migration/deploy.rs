@@ -312,17 +312,10 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
     // system state on Dakota.
     drop_ostree_era_etc_artifacts(etc_dir);
 
-    // Ensure the TCP 22 SSH socket-activated listener is always present in the
-    // deploy /etc. On Bluefin, sshd only binds Unix-local + vsock by default;
-    // this socket provides the TCP listener the E2E test needs. The 3-way merge
-    // drops it when baked into the OSTree factory (old==cur, new absent), so we
-    // recreate it unconditionally after the merge.
-    ensure_e2e_ssh_socket(etc_dir)?;
-
     Ok(())
 }
 
-/// Drop GRUB / rpm-ostree artifacts that don't belong on a composefs +
+/// Drop GRUB / rpm-ostree / ostree-remount artifacts that don't belong on a composefs +
 /// systemd-boot deploy. These come from the source OS's /etc but reference
 /// boot/state mechanisms the target no longer uses.
 fn drop_ostree_era_etc_artifacts(etc_dir: &Path) {
@@ -335,6 +328,7 @@ fn drop_ostree_era_etc_artifacts(etc_dir: &Path) {
         "grub2.cfg",
         "grub2-efi.cfg",
         "grub.d",
+        "systemd/system/local-fs.target.wants/ostree-remount.service",
     ];
     for name in &drops {
         let p = etc_dir.join(name);
@@ -352,55 +346,6 @@ fn drop_ostree_era_etc_artifacts(etc_dir: &Path) {
             Err(e) => eprintln!("[phase4] warning: failed to drop {}: {}", p.display(), e),
         }
     }
-}
-
-/// Ensure the TCP 22 SSH socket-activated listener is present in the deploy
-/// /etc. Bluefin's sshd only binds Unix-local + vsock by default; this socket
-/// provides the TCP listener the E2E test needs. The 3-way merge drops it when
-/// baked into the OSTree factory (old==cur, new absent), so we recreate it
-/// unconditionally after the merge.
-fn ensure_e2e_ssh_socket(etc_dir: &Path) -> Result<()> {
-    let systemd_dir = etc_dir.join("systemd/system");
-    fs::create_dir_all(systemd_dir.join("sockets.target.wants"))?;
-
-    fs::write(
-        systemd_dir.join("e2e-sshd.socket"),
-        "[Unit]\nDescription=E2E SSH TCP Socket (port 22)\n[Socket]\nListenStream=22\nAccept=yes\n[Install]\nWantedBy=sockets.target\n",
-    )?;
-    fs::write(
-        systemd_dir.join("e2e-sshd@.service"),
-        "[Unit]\nDescription=E2E SSH per-connection service\n[Service]\nExecStart=-/usr/bin/sshd -i -E /var/log/sshd-e2e.log -d\nStandardInput=socket\n",
-    )?;
-
-    let symlink = systemd_dir.join("sockets.target.wants/e2e-sshd.socket");
-    if symlink.exists() || symlink.is_symlink() {
-        let _ = fs::remove_file(&symlink);
-    }
-    std::os::unix::fs::symlink("../e2e-sshd.socket", &symlink)?;
-
-    // Remove the sshd.service enablement symlink if it survived the merge.
-    // e2e-sshd.socket provides TCP 22 via socket activation; having both
-    // sshd.service (sshd -D) and e2e-sshd.socket on port 22 causes a port
-    // conflict that kills the daemon process with 255/EXCEPTION.
-    let sshd_enable = systemd_dir.join("multi-user.target.wants/sshd.service");
-    if sshd_enable.exists() || sshd_enable.is_symlink() {
-        fs::remove_file(&sshd_enable)?;
-        println!("[phase4] removed sshd.service enablement (e2e-sshd.socket provides TCP 22)");
-    }
-
-    // Remove ostree-remount.service enablement — on composefs, OSTree bind
-    // mounts are irrelevant and the service would fail or create stale mounts
-    // under /sysroot/ostree (which we delete on commit).
-    let remount_enable = systemd_dir.join("local-fs.target.wants/ostree-remount.service");
-    if remount_enable.exists() || remount_enable.is_symlink() {
-        fs::remove_file(&remount_enable)?;
-        println!(
-            "[phase4] removed ostree-remount.service enablement (composefs doesn't need OSTree bind mounts)"
-        );
-    }
-
-    println!("[phase4] ensured e2e-sshd.socket in deploy /etc");
-    Ok(())
 }
 
 /// Legacy single-DB supplement path. Kept for callers that don't want the full
