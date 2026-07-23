@@ -201,7 +201,9 @@ pub fn parse_prepare_root_info(content: &str) -> PrepareRootInfo {
                     _ => ComposefsMode::Disabled,
                 });
             }
-            ("root", "transient") => info.root_transient = matches!(v.as_str(), "true" | "yes" | "1"),
+            ("root", "transient") => {
+                info.root_transient = matches!(v.as_str(), "true" | "yes" | "1")
+            }
             ("etc", "transient") => info.etc_transient = matches!(v.as_str(), "true" | "yes" | "1"),
             _ => {}
         }
