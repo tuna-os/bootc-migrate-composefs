@@ -267,7 +267,22 @@ pub fn commit(dry_run: bool) -> Result<()> {
         }
     }
 
+    // 5. Drop OSTree-only bookkeeping state under /var (issue #17).
+    for var_path in &[
+        "/var/lib/sysimage/ostree",
+        "/var/lib/rpm-ostree",
+        "/var/cache/rpm-ostree",
+        "/var/lib/ostree-boot",
+    ] {
+        total_freed += remove_path_with_size(
+            Path::new(var_path),
+            "OSTree-only bookkeeping state under /var",
+            dry_run,
+        );
+    }
+
     let human = format_bytes(total_freed);
+
     if dry_run {
         println!("\nWould reclaim: {} ({} bytes)", human, total_freed);
         println!("Re-run without --dry-run to apply.");
@@ -619,4 +634,17 @@ pub fn undo(dry_run: bool, full: bool) -> Result<()> {
         eprintln!("Warning: failed to clear login reminder: {e:#}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(2048), "2.00 KiB");
+        assert_eq!(format_bytes(10 * 1024 * 1024), "10.00 MiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024 * 1024), "5.00 GiB");
+    }
 }
