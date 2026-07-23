@@ -6,10 +6,12 @@
 //! is planned. See issues #30 and #45 in tuna-os/bootc-migrate-composefs for
 //! the roadmap.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use bootc_migrate_core::migration;
 use bootc_migrate_core::preflight::{self, readiness};
+use bootc_migrate_core::{registry, remap, scan};
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 mod routing;
 
@@ -94,6 +96,13 @@ struct Args {
     /// Print the planned route and exit without touching the system
     #[arg(long)]
     plan: bool,
+
+    /// Acknowledge a cross-base re-base (host and target disagree on
+    /// ID/ID_LIKE) and proceed with its UID/GID remap (#67). Without this,
+    /// a detected cross-base re-base is refused after printing the remap
+    /// report so the blast radius is visible first.
+    #[arg(long)]
+    accept_cross_base: bool,
 }
 
 fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabilities) {
@@ -451,6 +460,170 @@ fn staged_image_matches(requested: &str, staged: &str) -> bool {
     strip_transport(requested) == strip_transport(staged)
 }
 
+/// Build the cross-base UID/GID remap plan for `target_image` (issue #67
+/// part 1), by comparing this host's base identity against the target
+/// image's. `Ok(None)` means "not cross-base" (or identity couldn't be
+/// established on either side, which is treated the same way — nothing to
+/// gate on unknown information). A registry probe this early in a
+/// freshly-booted system can race the guest's own network coming up (seen
+/// in E2E: `bootc switch`'s own pull moments later succeeds against the
+/// same registry), so a handful of retries absorb that before falling back
+/// to the same "can't establish identity, don't gate" degradation used for
+/// a target with no parseable os-release — printing a warning either way so
+/// the degradation isn't silent.
+fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>> {
+    let Some(host_base) = scan::read_host_base_info() else {
+        return Ok(None);
+    };
+
+    const SCAN_ATTEMPTS: u32 = 3;
+    const SCAN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut last_err = None;
+    let mut caps = None;
+    for attempt in 1..=SCAN_ATTEMPTS {
+        match scan::scan_target_image(target_image) {
+            Ok(c) => {
+                caps = Some(c);
+                break;
+            }
+            Err(e) => {
+                if attempt < SCAN_ATTEMPTS {
+                    std::thread::sleep(SCAN_RETRY_DELAY);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    let Some(caps) = caps else {
+        eprintln!(
+            "Warning: could not scan target image for cross-base identity after {SCAN_ATTEMPTS} \
+             attempt(s) ({}); proceeding without a cross-base check.",
+            last_err.expect("caps is None only after at least one failed attempt")
+        );
+        return Ok(None);
+    };
+    let Some(target_base) = caps.base else {
+        return Ok(None);
+    };
+    if !scan::is_cross_base(&host_base, &target_base) {
+        return Ok(None);
+    }
+
+    let source_passwd =
+        remap::parse_passwd(&std::fs::read_to_string("/etc/passwd").unwrap_or_default());
+    let source_group =
+        remap::parse_group(&std::fs::read_to_string("/etc/group").unwrap_or_default());
+
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-rebase-remap-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create scratch dir for target identity DBs")?;
+    let target_passwd_path = scratch.path().join("passwd");
+    let target_group_path = scratch.path().join("group");
+    registry::extract_files_via_registry(
+        target_image,
+        &[
+            (Path::new("etc/passwd"), target_passwd_path.as_path()),
+            (Path::new("etc/group"), target_group_path.as_path()),
+        ],
+    )
+    .context("failed to fetch target identity DBs over the registry")?;
+    let target_passwd =
+        remap::parse_passwd(&std::fs::read_to_string(&target_passwd_path).unwrap_or_default());
+    let target_group =
+        remap::parse_group(&std::fs::read_to_string(&target_group_path).unwrap_or_default());
+
+    Ok(Some(remap::plan_remap(
+        &source_passwd,
+        &source_group,
+        &target_passwd,
+        &target_group,
+    )))
+}
+
+/// Print the remap report and, unless `accept_cross_base` (or `force`) was
+/// passed, refuse with the blast radius already visible. Returns the plan
+/// so the caller can apply it after staging succeeds — `None` when this
+/// re-base isn't cross-base at all.
+fn gate_cross_base(
+    target_image: &str,
+    accept_cross_base: bool,
+    force: bool,
+) -> Result<Option<remap::RemapPlan>> {
+    let Some(plan) = build_cross_base_plan(target_image)? else {
+        return Ok(None);
+    };
+    println!("{}", remap::render_report(&plan));
+    if !accept_cross_base && !force {
+        bail!(
+            "Cross-base re-base detected (host and target disagree on ID/ID_LIKE). \
+             Re-run with --accept-cross-base to proceed with the remap above."
+        );
+    }
+    Ok(Some(plan))
+}
+
+/// The staged deployment's root directory under `/ostree/deploy/<stateroot>`,
+/// found via `ostree admin status`: exactly two deployments exist right
+/// after `bootc switch` stages a target (booted + staged), and the booted
+/// one is marked with a leading `*` — so the other line is unambiguously the
+/// staged deployment. Mirrors the parsing tests/run-e2e.sh's ostree-rebase
+/// cell already relies on for its own post-merge fixture injection.
+fn staged_deployment_root() -> Result<PathBuf> {
+    let out = std::process::Command::new("ostree")
+        .args(["admin", "status"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to execute ostree admin status: {e}"))?;
+    if !out.status.success() {
+        bail!(
+            "ostree admin status failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    parse_staged_deployment_root(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Testable core of [`staged_deployment_root`]: find the non-booted
+/// deployment line in `ostree admin status` output and build its path.
+fn parse_staged_deployment_root(admin_status_stdout: &str) -> Result<PathBuf> {
+    let deploy_line = admin_status_stdout
+        .lines()
+        .find(|l| !l.trim_start().starts_with('*') && !l.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("no staged (non-booted) deployment found in ostree admin status")
+        })?;
+    let mut fields = deploy_line.split_whitespace();
+    let stateroot = fields
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("malformed ostree admin status line: {deploy_line}"))?;
+    let checksum_serial = fields
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("malformed ostree admin status line: {deploy_line}"))?;
+    Ok(PathBuf::from("/ostree/deploy")
+        .join(stateroot)
+        .join("deploy")
+        .join(checksum_serial))
+}
+
+/// Apply the cross-base remap plan (chown /var + preserved /etc in the
+/// staged deployment to the target's ids) after `bootc switch` has staged
+/// it. No-op when `plan` is empty (same-base re-base, or no accounts
+/// diverged even though the bases differ).
+fn apply_cross_base_remap(plan: &remap::RemapPlan) -> Result<()> {
+    if plan.is_empty() {
+        return Ok(());
+    }
+    let staged_root = staged_deployment_root()
+        .context("failed to locate staged deployment for cross-base remap")?;
+    let changed = remap::apply_remap_plan(&staged_root, plan)
+        .context("failed to apply cross-base UID/GID remap")?;
+    println!(
+        "Cross-base remap applied: {changed} file(s)/dir(s) rechowned under {}",
+        staged_root.display()
+    );
+    Ok(())
+}
+
 /// Scenario A (issue #30): re-base to another image as a plain OSTree
 /// deployment. `bootc switch` already does the heavy lifting on an
 /// OSTree-backed system — staging the target with OSTree's native 3-way /etc
@@ -492,6 +665,11 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
         );
     }
 
+    // Cross-base gate (#67 part 1): always print the remap report before
+    // anything is staged, and refuse without --accept-cross-base so the
+    // blast radius is visible first — including in --dry-run.
+    let cross_base_plan = gate_cross_base(&args.target_image, args.accept_cross_base, args.force)?;
+
     if args.dry_run {
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
         return Ok(());
@@ -502,6 +680,10 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     ));
 
     stage_via_bootc_switch(&args.target_image)?;
+
+    if let Some(plan) = &cross_base_plan {
+        apply_cross_base_remap(plan)?;
+    }
 
     println!(
         "Re-base staged. Reboot to enter the new deployment; the previous \
@@ -582,6 +764,44 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(r#"{"status":{"staged":null,"booted":{}}}"#).unwrap();
         assert_eq!(staged_image_from_status(&json), None);
+    }
+
+    #[test]
+    fn staged_deployment_root_picks_non_starred_line() {
+        // Real `ostree admin status` output: the booted deployment is
+        // prefixed with '*', the staged one is not.
+        let status = "* dakota abc123.0\nbluefin def456.1\n";
+        let root = parse_staged_deployment_root(status).unwrap();
+        assert_eq!(
+            root,
+            PathBuf::from("/ostree/deploy/bluefin/deploy/def456.1")
+        );
+    }
+
+    #[test]
+    fn staged_deployment_root_errors_when_only_booted_present() {
+        let only_booted = "* dakota abc123.0\n";
+        assert!(parse_staged_deployment_root(only_booted).is_err());
+    }
+
+    #[test]
+    fn staged_deployment_root_errors_on_malformed_line() {
+        let malformed = "* dakota abc123.0\nonly-one-field\n";
+        assert!(parse_staged_deployment_root(malformed).is_err());
+    }
+
+    #[test]
+    fn accept_cross_base_flag_parses() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "-t",
+            "ghcr.io/tuna-os/centos-bootc:stream10",
+            "--accept-cross-base",
+        ]);
+        assert!(cli.rebase_args.accept_cross_base);
+
+        let cli = Cli::parse_from(["bootc-rebase", "-t", "ghcr.io/projectbluefin/dakota:stable"]);
+        assert!(!cli.rebase_args.accept_cross_base);
     }
 
     #[test]
