@@ -32,6 +32,19 @@ enum Commands {
     Scan(ScanArgs),
     /// Re-base system
     Rebase(Args),
+    /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB)
+    Rollback(RollbackArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct RollbackArgs {
+    /// Reboot immediately after re-ordering UEFI BootOrder
+    #[arg(long)]
+    reboot: bool,
+
+    /// Dry-run: print every action without executing
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -283,6 +296,13 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Scan(ref scan_args)) => run_scan(scan_args),
+        Some(Commands::Rollback(ref rollback_args)) => {
+            check_root_privilege()?;
+            bootc_migrate_core::migration::rollback::run_rollback(
+                rollback_args.reboot,
+                rollback_args.dry_run,
+            )
+        }
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");
@@ -378,6 +398,10 @@ fn run_image_swap(args: &Args) -> Result<()> {
         return Ok(());
     }
 
+    let _sleep_guard = Some(bootc_migrate_core::migration::SleepGuard::new(
+        "bootc image swap in progress",
+    ));
+
     stage_via_bootc_switch(&args.target_image)?;
 
     println!(
@@ -472,6 +496,10 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
         return Ok(());
     }
+
+    let _sleep_guard = Some(bootc_migrate_core::migration::SleepGuard::new(
+        "bootc ostree re-base in progress",
+    ));
 
     stage_via_bootc_switch(&args.target_image)?;
 
@@ -607,6 +635,18 @@ mod tests {
                 assert_eq!(args.target_image, "ghcr.io/projectbluefin/dakota:stable");
             }
             _ => panic!("expected Commands::Rebase"),
+        }
+    }
+
+    #[test]
+    fn test_rollback_subcommand_parsing() {
+        let cli = Cli::parse_from(["bootc-rebase", "rollback", "--reboot", "--dry-run"]);
+        match cli.command {
+            Some(Commands::Rollback(args)) => {
+                assert!(args.reboot);
+                assert!(args.dry_run);
+            }
+            _ => panic!("expected Commands::Rollback"),
         }
     }
 }
