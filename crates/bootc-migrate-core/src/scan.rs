@@ -34,6 +34,44 @@ pub struct SysusersEntry {
     pub id: Option<u32>,
 }
 
+/// Whether the target's `prepare-root.conf` enables the composefs root, and
+/// under which mode. ostree's `[composefs] enabled` accepts `true`/`yes`/`1`
+/// (plain enable) and `maybe` (signed-only: composefs is used only when the
+/// image carries a valid signature, which in practice means fs-verity
+/// sealing is required — see `docs/filesystem-support.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComposefsMode {
+    Disabled,
+    Enabled,
+    /// `enabled = maybe`: signed-only — composefs requires a valid (i.e.
+    /// fs-verity-sealed) signature to activate.
+    SignedOnly,
+}
+
+impl ComposefsMode {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, ComposefsMode::Disabled)
+    }
+
+    /// Whether this mode requires fs-verity sealing (tightens Phase 3's
+    /// policy — see issue #24's capability-scan acceptance criteria).
+    pub fn requires_verity(self) -> bool {
+        matches!(self, ComposefsMode::SignedOnly)
+    }
+}
+
+/// The `[root]`/`[etc]` `transient = true|false` settings from
+/// `prepare-root.conf`. Transient means the section is composed fresh from
+/// the image's own defaults every boot rather than persisted — affects
+/// whether a user's `/etc` edits actually survive a re-base (issue #24).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct PrepareRootInfo {
+    pub composefs: Option<ComposefsMode>,
+    pub root_transient: bool,
+    pub etc_transient: bool,
+}
+
 /// The probe files the scan reads. Every field is optional — a missing file
 /// is a signal (e.g. no prepare-root.conf ⇒ not an ostree/bootc image), not
 /// an error.
@@ -71,6 +109,17 @@ pub struct Capabilities {
     pub base: Option<BaseInfo>,
     /// Statically-allocated sysusers ids, input to the remap planner (#67).
     pub sysusers: Vec<SysusersEntry>,
+    /// `enabled = verity`: fs-verity is required, tightening Phase 3's policy.
+    pub fs_verity_required: bool,
+    /// `[root] transient = true`: the target composes its root fresh every
+    /// boot rather than persisting it.
+    pub root_transient: bool,
+    /// `[etc] transient = true`: the target's `/etc` is composed fresh every
+    /// boot — a user's live `/etc` edits will NOT survive on this target
+    /// unless the migration's own merge captures them into the deployment
+    /// (as `mergetc`/native `bootc switch` merge both already do); this flag
+    /// is informational context for that merge, not a gate.
+    pub etc_transient: bool,
 }
 
 impl Capabilities {
@@ -115,22 +164,49 @@ pub fn parse_base_info(content: &str) -> Option<BaseInfo> {
 /// `true`/`yes`/`1` and the signed-only mode `maybe` — all of them mean the
 /// initrd can set up a composefs root.
 pub fn prepare_root_enables_composefs(content: &str) -> bool {
-    let mut in_composefs = false;
+    parse_prepare_root_info(content)
+        .composefs
+        .is_some_and(ComposefsMode::is_enabled)
+}
+
+/// Parse `prepare-root.conf`'s `[composefs] enabled`, `[root] transient`,
+/// and `[etc] transient` keys (issue #24). Unlike
+/// [`prepare_root_enables_composefs`], this walks every section instead of
+/// stopping at the first `[composefs] enabled` match, so `root`/`etc`
+/// transience is captured regardless of section order.
+pub fn parse_prepare_root_info(content: &str) -> PrepareRootInfo {
+    let mut info = PrepareRootInfo::default();
+    let mut section = "";
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with('[') {
-            in_composefs = line.eq_ignore_ascii_case("[composefs]");
+        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            section = match name.to_ascii_lowercase().as_str() {
+                "composefs" => "composefs",
+                "root" => "root",
+                "etc" => "etc",
+                _ => "",
+            };
             continue;
         }
-        if in_composefs
-            && let Some((k, v)) = line.split_once('=')
-            && k.trim().eq_ignore_ascii_case("enabled")
-        {
-            let v = unquote(v).to_ascii_lowercase();
-            return matches!(v.as_str(), "true" | "yes" | "1" | "maybe");
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim().to_ascii_lowercase();
+        let v = unquote(v).to_ascii_lowercase();
+        match (section, k.as_str()) {
+            ("composefs", "enabled") if info.composefs.is_none() => {
+                info.composefs = Some(match v.as_str() {
+                    "maybe" => ComposefsMode::SignedOnly,
+                    "true" | "yes" | "1" => ComposefsMode::Enabled,
+                    _ => ComposefsMode::Disabled,
+                });
+            }
+            ("root", "transient") => info.root_transient = matches!(v.as_str(), "true" | "yes" | "1"),
+            ("etc", "transient") => info.etc_transient = matches!(v.as_str(), "true" | "yes" | "1"),
+            _ => {}
         }
     }
-    false
+    info
 }
 
 /// Parse sysusers.d content: `u name id …` / `g name id …`. Ranges, `-`,
@@ -197,12 +273,15 @@ pub fn desktops_from_sessions(session_files: &[String]) -> Vec<String> {
 
 /// Assemble the capability report from probe files.
 pub fn assemble(probe: &ProbeFiles) -> Capabilities {
+    let prepare_root_info = probe
+        .prepare_root
+        .as_deref()
+        .map(parse_prepare_root_info)
+        .unwrap_or_default();
     Capabilities {
-        composefs_capable: probe
-            .prepare_root
-            .as_deref()
-            .map(prepare_root_enables_composefs)
-            .unwrap_or(false),
+        composefs_capable: prepare_root_info
+            .composefs
+            .is_some_and(ComposefsMode::is_enabled),
         ostree_capable: probe.prepare_root.is_some(),
         systemd_boot_payload: probe.has_systemd_boot_payload,
         bootc_present: probe.has_bootc,
@@ -213,6 +292,11 @@ pub fn assemble(probe: &ProbeFiles) -> Capabilities {
             .iter()
             .flat_map(|c| parse_sysusers(c))
             .collect(),
+        fs_verity_required: prepare_root_info
+            .composefs
+            .is_some_and(ComposefsMode::requires_verity),
+        root_transient: prepare_root_info.root_transient,
+        etc_transient: prepare_root_info.etc_transient,
     }
 }
 
@@ -324,6 +408,81 @@ mod tests {
             "[root]\nenabled = true\n[composefs]\n"
         ));
         assert!(!prepare_root_enables_composefs(""));
+    }
+
+    #[test]
+    fn prepare_root_info_plain_enabled() {
+        let info = parse_prepare_root_info("[composefs]\nenabled = true\n");
+        assert_eq!(info.composefs, Some(ComposefsMode::Enabled));
+        assert!(!info.composefs.unwrap().requires_verity());
+        assert!(!info.root_transient);
+        assert!(!info.etc_transient);
+    }
+
+    #[test]
+    fn prepare_root_info_signed_only_requires_verity() {
+        let info = parse_prepare_root_info("[composefs]\nenabled = maybe\n");
+        assert_eq!(info.composefs, Some(ComposefsMode::SignedOnly));
+        assert!(info.composefs.unwrap().requires_verity());
+        assert!(info.composefs.unwrap().is_enabled());
+    }
+
+    #[test]
+    fn prepare_root_info_disabled_does_not_require_verity() {
+        let info = parse_prepare_root_info("[composefs]\nenabled = false\n");
+        assert_eq!(info.composefs, Some(ComposefsMode::Disabled));
+        assert!(!info.composefs.unwrap().is_enabled());
+        assert!(!info.composefs.unwrap().requires_verity());
+    }
+
+    #[test]
+    fn prepare_root_info_captures_transient_root_and_etc_regardless_of_order() {
+        let info = parse_prepare_root_info(
+            "[etc]\ntransient = true\n[composefs]\nenabled = true\n[root]\ntransient = yes\n",
+        );
+        assert_eq!(info.composefs, Some(ComposefsMode::Enabled));
+        assert!(info.root_transient);
+        assert!(info.etc_transient);
+    }
+
+    #[test]
+    fn prepare_root_info_transient_false_is_not_transient() {
+        let info = parse_prepare_root_info("[root]\ntransient = false\n[etc]\ntransient = 0\n");
+        assert!(!info.root_transient);
+        assert!(!info.etc_transient);
+    }
+
+    #[test]
+    fn prepare_root_info_transient_outside_its_section_is_ignored() {
+        // A `transient` key under [composefs] (or any other section) must
+        // not be mistaken for [root]/[etc] transience.
+        let info = parse_prepare_root_info("[composefs]\ntransient = true\nenabled = true\n");
+        assert!(!info.root_transient);
+        assert!(!info.etc_transient);
+    }
+
+    #[test]
+    fn prepare_root_info_empty_content_is_all_defaults() {
+        let info = parse_prepare_root_info("");
+        assert_eq!(info.composefs, None);
+        assert!(!info.root_transient);
+        assert!(!info.etc_transient);
+    }
+
+    #[test]
+    fn assemble_wires_fs_verity_and_transient_flags() {
+        let probe = ProbeFiles {
+            prepare_root: Some(
+                "[composefs]\nenabled = maybe\n[root]\ntransient = true\n[etc]\ntransient = true\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let caps = assemble(&probe);
+        assert!(caps.composefs_capable);
+        assert!(caps.fs_verity_required);
+        assert!(caps.root_transient);
+        assert!(caps.etc_transient);
     }
 
     #[test]
