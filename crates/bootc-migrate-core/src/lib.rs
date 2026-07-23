@@ -4,6 +4,7 @@
 //! `bootc-migrate-composefs` binary so other tools (e.g. a universal
 //! bootc re-base engine) can compose their own migration pipelines:
 //!
+//! - [`boot_audit`] — UEFI boot-entry enumeration + dead/generic/duplicate/firmware classification
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
 //! - [`reflink`] — CoW-aware file copy (FICLONE with fallback)
 //! - [`xattr`] — xattr-preserving copy helpers
@@ -16,6 +17,7 @@
 //! - [`transaction`] — two-phase apply: `commit` / `undo` of a staged migration
 //! - [`types`] — shared types such as [`VerityDigest`]
 
+pub mod boot_audit;
 pub mod composefs;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;

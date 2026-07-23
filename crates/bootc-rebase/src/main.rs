@@ -44,6 +44,18 @@ enum Commands {
     /// entry-token logic (`bootc_migrate_core::migration::bootloader::systemd_boot`)
     /// can be reviewed ahead of the live mutation work.
     MigrateBootloader(MigrateBootloaderArgs),
+    /// Enumerate and classify UEFI boot entries (issue #31). Read-only:
+    /// reports which entries look dead/generic/duplicate/firmware-managed
+    /// without removing or renaming anything. Interactive cleanup and
+    /// branding-rename are not implemented yet.
+    BootEntries(BootEntriesArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct BootEntriesArgs {
+    /// Output as machine-readable JSON instead of a table.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -200,6 +212,69 @@ fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
     );
 }
 
+/// Read-only UEFI boot-entry audit (issue #31). Runs `efibootmgr -v`, parses
+/// and classifies every entry against the ESP's actual contents, and prints
+/// the result. Never removes or renames anything.
+fn run_boot_entries_audit(args: &BootEntriesArgs) -> Result<()> {
+    use bootc_migrate_core::boot_audit::{self, AuditFlag};
+
+    let out = std::process::Command::new("efibootmgr")
+        .arg("-v")
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to execute efibootmgr -v: {e}"))?;
+    if !out.status.success() {
+        bail!(
+            "efibootmgr -v failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let entries = boot_audit::parse_efibootmgr_entries(&stdout);
+
+    let esp_root = migration::boot::find_esp_or_mount()
+        .context("failed to locate the ESP for boot-entry audit")?;
+    let audited = boot_audit::audit_entries(&entries, Path::new(&esp_root));
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&audited).expect("audited entries always serialize")
+        );
+        return Ok(());
+    }
+
+    println!("=== UEFI boot-entry audit ({} entries) ===", audited.len());
+    for a in &audited {
+        let marker = if a.entry.active { "*" } else { " " };
+        let flag_str = if a.flags.is_empty() {
+            "ok".to_string()
+        } else {
+            a.flags
+                .iter()
+                .map(|f| match f {
+                    AuditFlag::Dead => "DEAD",
+                    AuditFlag::GenericLabel => "generic-label",
+                    AuditFlag::DuplicateLoaderPath => "duplicate",
+                    AuditFlag::FirmwareManaged => "firmware",
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!(
+            "  Boot{}{} {:<28} [{}]",
+            a.entry.id, marker, a.entry.label, flag_str
+        );
+    }
+    let preselect_count = audited.iter().filter(|a| a.safe_to_preselect()).count();
+    println!(
+        "\n{preselect_count} entry(ies) would be pre-selected for removal (clearly dead, not firmware-managed)."
+    );
+    println!(
+        "No entries were modified — this is a read-only audit (interactive cleanup: issue #31, not implemented yet)."
+    );
+    Ok(())
+}
+
 fn run_scan(args: &ScanArgs) -> Result<()> {
     println!("Scanning target image {}...", args.image);
     let caps = bootc_migrate_core::scan::scan_target_image(&args.image)?;
@@ -350,6 +425,7 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
+        Some(Commands::BootEntries(ref args)) => run_boot_entries_audit(args),
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");
@@ -925,6 +1001,17 @@ mod tests {
                 assert!(args.undo);
             }
             _ => panic!("expected Commands::MigrateBootloader"),
+        }
+    }
+
+    #[test]
+    fn test_boot_entries_subcommand_parsing() {
+        let cli = Cli::parse_from(["bootc-rebase", "boot-entries", "--json"]);
+        match cli.command {
+            Some(Commands::BootEntries(args)) => {
+                assert!(args.json);
+            }
+            _ => panic!("expected Commands::BootEntries"),
         }
     }
 
