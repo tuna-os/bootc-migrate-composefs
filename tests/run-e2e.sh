@@ -963,6 +963,25 @@ grep -q "var-rebase-value" /var/rebase-test/marker.txt || { echo "FAIL: /var mar
 rollback=\$(bootc status --json | python3 -c "import json,sys; print(bool(json.load(sys.stdin)['status'].get('rollback')))")
 [ "\$rollback" = "True" ] || { echo "FAIL: no rollback deployment after re-base"; exit 1; }
 echo "OK: /etc + /var preserved, rollback deployment present"
+
+# #80: bootc switch's native ostree 3-way /etc merge has no identity-DB-aware
+# special-casing the way mergetc.rs does for the composefs conversion path
+# (union-merge by key so e.g. a target-only 'messagebus' system account
+# survives even when old==cur locally). A divergent system-user set between
+# source and target images (different DE spins, different dbus stack) could
+# in principle drop an account the merge doesn't know is load-bearing, which
+# manifests as dbus/logind failing to start post-reboot. Assert the bus
+# actually works rather than just checking the deployment staged/booted.
+if systemctl is-active --quiet dbus.service || systemctl is-active --quiet dbus-broker.service; then
+    echo "OK: system dbus is active."
+else
+    echo "FAIL: neither dbus.service nor dbus-broker.service is active post-rebase (#80)"; exit 1
+fi
+busctl list --system >/dev/null 2>&1 || { echo "FAIL: system bus is not queryable post-rebase (#80)"; exit 1; }
+loginctl list-sessions >/dev/null 2>&1 || { echo "FAIL: systemd-logind (via dbus) is not responding post-rebase (#80)"; exit 1; }
+# (sshd itself is proven by the fact this script is SSH'd in to run these
+# checks at all — no separate assertion needed.)
+echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
 
     step "=== ostree-rebase PASSED ==="
