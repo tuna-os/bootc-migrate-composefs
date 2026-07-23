@@ -325,7 +325,21 @@ deployment stays bootable:
 - We push `Linux Boot Manager` (systemd-boot) to the front of NVRAM `BootOrder`
   but the `Fedora` shim entry (which boots GRUB → OSTree) remains listed.
 
-To boot back into OSTree-Bluefin:
+#### Automatic rollback subcommand
+
+To return to the original OSTree deployment directly from the command line:
+
+```bash
+sudo bootc-migrate-composefs rollback --reboot
+# or via the universal re-base CLI:
+sudo bootc-rebase rollback --reboot
+```
+
+This verifies prerequisites, re-orders UEFI `BootOrder` so the OSTree entry (Fedora/GRUB) takes top priority, and reboots immediately into the OSTree deployment.
+
+#### Manual firmware recovery
+
+If the system fails to boot into composefs or NVRAM state is interrupted:
 
 1. Power on; tap the firmware boot-menu key (commonly **F12**, **F8**, or **Esc**).
 2. Pick the `Fedora` entry. GRUB will show the original `ostree:0` menu.
@@ -338,6 +352,8 @@ sudo efibootmgr -v | grep -E 'Fedora|Linux Boot Manager'
 sudo efibootmgr --bootnext <Boot####-of-Fedora>
 sudo systemctl reboot
 ```
+
+Pre-migration diagnostic snapshots and logs are automatically recorded under `/var/log/bootc-migrate-composefs/` on every run (`preflight-*.json` and `migration.log`) so boot configuration can be manually reconstructed if NVRAM is ever wiped.
 
 After running `bootc-migrate-composefs commit`, the OSTree fallback is removed
 from the ESP and rollback becomes a fresh install. The E2E test exercises the
