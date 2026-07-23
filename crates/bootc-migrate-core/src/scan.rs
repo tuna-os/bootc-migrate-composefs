@@ -13,6 +13,7 @@
 //! mid-phase failures.
 
 use serde::Serialize;
+use std::path::Path;
 
 /// Identity of a base image, from `/usr/lib/os-release`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -230,6 +231,24 @@ pub fn is_cross_base(host: &BaseInfo, target: &BaseInfo) -> bool {
     !(like_contains(&host.id_like, &target.id) || like_contains(&target.id_like, &host.id))
 }
 
+/// Read this host's own base identity from `/etc/os-release` (falling back
+/// to `/usr/lib/os-release`, the same precedence os-release(5) specifies),
+/// for cross-base gating (#67) against a target image's scanned identity.
+/// `None` if neither file is readable or parseable — callers treat that as
+/// "can't establish identity, don't gate."
+pub fn read_host_base_info() -> Option<BaseInfo> {
+    read_base_info_from(Path::new("/etc/os-release"), Path::new("/usr/lib/os-release"))
+}
+
+/// Testable core of [`read_host_base_info`]: try `primary`, falling back to
+/// `secondary`, parsing whichever is readable first.
+fn read_base_info_from(primary: &Path, secondary: &Path) -> Option<BaseInfo> {
+    let content = std::fs::read_to_string(primary)
+        .or_else(|_| std::fs::read_to_string(secondary))
+        .ok()?;
+    parse_base_info(&content)
+}
+
 /// Fetch probe files from an image ref via registry streaming.
 pub fn fetch_probe_files(image_ref: &str) -> anyhow::Result<ProbeFiles> {
     crate::registry::fetch_probe_files_via_registry(image_ref)
@@ -244,6 +263,35 @@ pub fn scan_target_image(image_ref: &str) -> anyhow::Result<Capabilities> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_base_info_from_prefers_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("etc-os-release");
+        let secondary = dir.path().join("usr-os-release");
+        std::fs::write(&primary, "ID=dakota\n").unwrap();
+        std::fs::write(&secondary, "ID=fallback\n").unwrap();
+        let b = read_base_info_from(&primary, &secondary).unwrap();
+        assert_eq!(b.id, "dakota");
+    }
+
+    #[test]
+    fn read_base_info_from_falls_back_when_primary_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("does-not-exist");
+        let secondary = dir.path().join("usr-os-release");
+        std::fs::write(&secondary, "ID=fallback\n").unwrap();
+        let b = read_base_info_from(&primary, &secondary).unwrap();
+        assert_eq!(b.id, "fallback");
+    }
+
+    #[test]
+    fn read_base_info_from_none_when_neither_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("nope1");
+        let secondary = dir.path().join("nope2");
+        assert!(read_base_info_from(&primary, &secondary).is_none());
+    }
 
     #[test]
     fn base_info_parses_quoted_and_unquoted() {
