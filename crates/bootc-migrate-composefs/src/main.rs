@@ -84,6 +84,18 @@ enum Command {
     /// Launch the interactive TUI wizard.
     #[command(name = "tui")]
     Tui,
+    /// Show config drift between the OSTree factory default /etc and live
+    /// /etc — the "Config Drift Review" step (issue #15). Read-only;
+    /// independent of any migration target. Interactive selection feeding
+    /// into Phase 4 is not implemented yet — this reports the same
+    /// Added/Modified/Removed/TypeChanged categorization that would drive
+    /// it.
+    #[command(name = "etc-drift")]
+    EtcDrift {
+        /// Output as machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn check_root_privilege() -> Result<()> {
@@ -239,6 +251,19 @@ fn main() {
         return;
     }
 
+    // Handle `etc-drift` subcommand
+    if let Some(Command::EtcDrift { json }) = args.command {
+        let result = run_etc_drift(json);
+        if let Err(e) = result {
+            eprintln!("Error: {}", e);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        return;
+    }
+
     // Handle explicit `tui` subcommand, or fall into the wizard automatically
     // when no target image was given on the command line. Root isn't required
     // just to browse the wizard — the migration subprocess it spawns on Run
@@ -366,4 +391,33 @@ fn run_undo(dry_run: bool, full: bool) -> Result<()> {
 fn run_rollback(reboot: bool, dry_run: bool) -> Result<()> {
     check_root_privilege()?;
     migration::run_rollback(reboot, dry_run)
+}
+
+/// Show config drift between the OSTree factory default /etc and live /etc
+/// (issue #15). Read-only; does not require root (only reads /proc/cmdline,
+/// /sysroot/ostree/deploy/.../usr/etc, and /etc).
+fn run_etc_drift(json: bool) -> Result<()> {
+    let drift = migration::deploy::compute_etc_drift()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&drift).expect("drift entries always serialize")
+        );
+        return Ok(());
+    }
+    if drift.is_empty() {
+        println!("No /etc config drift from the OSTree factory default.");
+        return Ok(());
+    }
+    println!("=== /etc Config Drift ({} change(s)) ===", drift.len());
+    for entry in &drift {
+        let kind = match entry.kind {
+            bootc_migrate_core::mergetc::DriftKind::Added => "Added",
+            bootc_migrate_core::mergetc::DriftKind::Modified => "Modified",
+            bootc_migrate_core::mergetc::DriftKind::Removed => "Removed",
+            bootc_migrate_core::mergetc::DriftKind::TypeChanged => "TypeChanged",
+        };
+        println!("  {:<50} [{}]", format!("/etc/{}", entry.path), kind);
+    }
+    Ok(())
 }
