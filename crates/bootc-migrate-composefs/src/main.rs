@@ -71,6 +71,16 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB).
+    #[command(name = "rollback")]
+    Rollback {
+        /// Reboot immediately after re-ordering UEFI BootOrder
+        #[arg(long)]
+        reboot: bool,
+        /// Preview changes without modifying UEFI BootOrder or rebooting
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Launch the interactive TUI wizard.
     #[command(name = "tui")]
     Tui,
@@ -216,6 +226,19 @@ fn main() {
         return;
     }
 
+    // Handle --rollback subcommand
+    if let Some(Command::Rollback { reboot, dry_run }) = args.command {
+        let result = run_rollback(reboot, dry_run);
+        if let Err(e) = result {
+            eprintln!("Error: {}", e);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        return;
+    }
+
     // Handle explicit `tui` subcommand, or fall into the wizard automatically
     // when no target image was given on the command line. Root isn't required
     // just to browse the wizard — the migration subprocess it spawns on Run
@@ -338,4 +361,9 @@ fn run_commit(dry_run: bool) -> Result<()> {
 fn run_undo(dry_run: bool, full: bool) -> Result<()> {
     check_root_privilege()?;
     transaction::undo(dry_run, full)
+}
+
+fn run_rollback(reboot: bool, dry_run: bool) -> Result<()> {
+    check_root_privilege()?;
+    migration::run_rollback(reboot, dry_run)
 }

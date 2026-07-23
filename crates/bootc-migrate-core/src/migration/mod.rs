@@ -5,12 +5,14 @@ pub mod import;
 pub mod kernel_options;
 pub mod os_release;
 pub mod pull;
+pub mod rollback;
 pub mod seal;
 
 pub use boot::phase5_setup_bootloader;
 pub use deploy::phase4_stage_deploy;
 pub use import::phase1_import_objects;
 pub use pull::phase2_pull_image;
+pub use rollback::run_rollback;
 pub use seal::phase3_create_image;
 
 pub use boot::find_esp_or_mount;
@@ -82,6 +84,47 @@ impl Drop for MountGuard {
                 self.mount_path.display(),
                 self.mount_path.display(),
             ),
+        }
+    }
+}
+
+/// Inhibits system sleep/suspend during migration using systemd-inhibit if available (issue #27).
+#[derive(Debug)]
+pub struct SleepGuard {
+    child: Option<std::process::Child>,
+}
+
+impl SleepGuard {
+    pub fn new(why: &str) -> Self {
+        let child = Command::new("systemd-inhibit")
+            .args([
+                "--what=sleep",
+                &format!("--why={why}"),
+                "--mode=block",
+                "sleep",
+                "infinity",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+
+        if child.is_some() {
+            println!("Acquired systemd sleep inhibitor lock.");
+        } else {
+            eprintln!("Note: systemd-inhibit unavailable; sleep inhibitor lock was not acquired.");
+        }
+
+        SleepGuard { child }
+    }
+}
+
+impl Drop for SleepGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            println!("Released systemd sleep inhibitor lock.");
         }
     }
 }
@@ -651,6 +694,13 @@ pub fn run_migration(
         None
     };
 
+    // Acquire systemd sleep inhibitor lock (issue #27).
+    let _sleep_guard = if !dry_run {
+        Some(SleepGuard::new("OSTree to ComposeFS migration in progress"))
+    } else {
+        None
+    };
+
     if dry_run {
         println!("[DRY RUN] Would execute migration phases without making changes.");
     }
@@ -889,4 +939,15 @@ pub fn mount_image(image_id: &str, mount_path: &Path) -> Result<()> {
         }
     }
     Err(anyhow!("mount failed: {}", bootc_err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sleep_guard_creation_and_drop() {
+        let guard = SleepGuard::new("unit test migration");
+        drop(guard);
+    }
 }
