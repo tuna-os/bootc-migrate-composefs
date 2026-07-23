@@ -464,13 +464,44 @@ fn staged_image_matches(requested: &str, staged: &str) -> bool {
 /// part 1), by comparing this host's base identity against the target
 /// image's. `Ok(None)` means "not cross-base" (or identity couldn't be
 /// established on either side, which is treated the same way — nothing to
-/// gate on unknown information).
+/// gate on unknown information). A registry probe this early in a
+/// freshly-booted system can race the guest's own network coming up (seen
+/// in E2E: `bootc switch`'s own pull moments later succeeds against the
+/// same registry), so a handful of retries absorb that before falling back
+/// to the same "can't establish identity, don't gate" degradation used for
+/// a target with no parseable os-release — printing a warning either way so
+/// the degradation isn't silent.
 fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>> {
     let Some(host_base) = scan::read_host_base_info() else {
         return Ok(None);
     };
-    let caps = scan::scan_target_image(target_image)
-        .context("failed to scan target image for cross-base identity")?;
+
+    const SCAN_ATTEMPTS: u32 = 3;
+    const SCAN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut last_err = None;
+    let mut caps = None;
+    for attempt in 1..=SCAN_ATTEMPTS {
+        match scan::scan_target_image(target_image) {
+            Ok(c) => {
+                caps = Some(c);
+                break;
+            }
+            Err(e) => {
+                if attempt < SCAN_ATTEMPTS {
+                    std::thread::sleep(SCAN_RETRY_DELAY);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    let Some(caps) = caps else {
+        eprintln!(
+            "Warning: could not scan target image for cross-base identity after {SCAN_ATTEMPTS} \
+             attempt(s) ({}); proceeding without a cross-base check.",
+            last_err.expect("caps is None only after at least one failed attempt")
+        );
+        return Ok(None);
+    };
     let Some(target_base) = caps.base else {
         return Ok(None);
     };
