@@ -237,7 +237,10 @@ pub fn is_cross_base(host: &BaseInfo, target: &BaseInfo) -> bool {
 /// `None` if neither file is readable or parseable — callers treat that as
 /// "can't establish identity, don't gate."
 pub fn read_host_base_info() -> Option<BaseInfo> {
-    read_base_info_from(Path::new("/etc/os-release"), Path::new("/usr/lib/os-release"))
+    read_base_info_from(
+        Path::new("/etc/os-release"),
+        Path::new("/usr/lib/os-release"),
+    )
 }
 
 /// Testable core of [`read_host_base_info`]: try `primary`, falling back to

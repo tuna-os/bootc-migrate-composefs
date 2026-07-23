@@ -497,9 +497,8 @@ fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>>
         ],
     )
     .context("failed to fetch target identity DBs over the registry")?;
-    let target_passwd = remap::parse_passwd(
-        &std::fs::read_to_string(&target_passwd_path).unwrap_or_default(),
-    );
+    let target_passwd =
+        remap::parse_passwd(&std::fs::read_to_string(&target_passwd_path).unwrap_or_default());
     let target_group =
         remap::parse_group(&std::fs::read_to_string(&target_group_path).unwrap_or_default());
 
@@ -515,7 +514,11 @@ fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>>
 /// passed, refuse with the blast radius already visible. Returns the plan
 /// so the caller can apply it after staging succeeds — `None` when this
 /// re-base isn't cross-base at all.
-fn gate_cross_base(target_image: &str, accept_cross_base: bool, force: bool) -> Result<Option<remap::RemapPlan>> {
+fn gate_cross_base(
+    target_image: &str,
+    accept_cross_base: bool,
+    force: bool,
+) -> Result<Option<remap::RemapPlan>> {
     let Some(plan) = build_cross_base_plan(target_image)? else {
         return Ok(None);
     };
@@ -738,7 +741,10 @@ mod tests {
         // prefixed with '*', the staged one is not.
         let status = "* dakota abc123.0\nbluefin def456.1\n";
         let root = parse_staged_deployment_root(status).unwrap();
-        assert_eq!(root, PathBuf::from("/ostree/deploy/bluefin/deploy/def456.1"));
+        assert_eq!(
+            root,
+            PathBuf::from("/ostree/deploy/bluefin/deploy/def456.1")
+        );
     }
 
     #[test]
