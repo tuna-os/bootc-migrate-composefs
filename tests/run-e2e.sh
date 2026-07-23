@@ -236,55 +236,14 @@ rm -f "$TMP_CONTAINERFILE"
 INSTALL_IMAGE="$MODIFIED_IMAGE"
 echo "Using install image: $INSTALL_IMAGE"
 
-# Prepare target image with sshd enabled as well so Phase 4 runtime injection is unnecessary (#18)
-MODIFIED_TARGET_IMAGE="localhost/e2e-dakota-ssh:latest"
-TMP_TARGET_CONTAINERFILE=$(mktemp)
-cat > "$TMP_TARGET_CONTAINERFILE" <<'DOCKERFILE'
-FROM TARGET_IMAGE_PLACEHOLDER
-RUN mkdir -p /usr/lib/systemd/system-preset && \
-    echo 'enable sshd.service' > /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
-    echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
-RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
-RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
-    ln -sf /usr/lib/systemd/system/sshd.service \
-           /usr/lib/systemd/system/multi-user.target.wants/sshd.service
-RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
-    echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config && \
-    echo 'Port 22' >> /etc/ssh/sshd_config
-RUN systemctl disable firewalld 2>/dev/null || true
-RUN mkdir -p /etc/systemd/system && \
-    printf '%s\n' \
-        '[Unit]' \
-        'Description=E2E SSH TCP Socket (port 22)' \
-        '[Socket]' \
-        'ListenStream=22' \
-        'Accept=yes' \
-        '[Install]' \
-        'WantedBy=sockets.target' \
-        > /etc/systemd/system/e2e-sshd.socket && \
-    printf '%s\n' \
-        '[Unit]' \
-        'Description=E2E SSH per-connection service' \
-        '[Service]' \
-        'ExecStart=-/usr/sbin/sshd -i' \
-        'StandardInput=socket' \
-        > /etc/systemd/system/e2e-sshd@.service && \
-    mkdir -p /etc/systemd/system/sockets.target.wants && \
-    ln -sf /etc/systemd/system/e2e-sshd.socket \
-           /etc/systemd/system/sockets.target.wants/e2e-sshd.socket
-DOCKERFILE
-
-sed -i "s|TARGET_IMAGE_PLACEHOLDER|$TARGET_IMAGE|g" "$TMP_TARGET_CONTAINERFILE"
-echo "Building modified target image with sshd enabled..."
-if ! sudo podman image exists "$TARGET_IMAGE" 2>/dev/null; then
-    echo "Pulling target image $TARGET_IMAGE..."
-    sudo podman pull "$TARGET_IMAGE"
-fi
-sudo podman build -t "$MODIFIED_TARGET_IMAGE" -f "$TMP_TARGET_CONTAINERFILE"
-rm -f "$TMP_TARGET_CONTAINERFILE"
-
-TARGET_IMAGE="$MODIFIED_TARGET_IMAGE"
-echo "Using target image: $TARGET_IMAGE"
+# NOTE: TARGET_IMAGE stays the pristine upstream ref (see the "pulled directly
+# by the migration" comment near VM_TARGET_IMAGE below) — the migration/rebase
+# binaries pull it live, from inside the VM, over the network. A locally-built
+# "localhost/..." target image is unreachable from inside the VM (no registry
+# mirror; that was tried and rejected for cost — see that comment) and
+# harmless deviation on the target image is out of scope for the E2E's sshd
+# setup: post-merge injection (below, mirroring the ostree-rebase path) covers
+# it without touching what the migration actually pulls.
 
 # 5. Create and initialize disk image (or restore checkpoint)
 # LUKS: checkpoint has plain partition layout, not LUKS — always full setup.
@@ -1137,6 +1096,44 @@ if [ "${MIGRATE_RC:-1}" != "0" ]; then
     echo "ERROR: migration binary exited with rc=${MIGRATE_RC:-?}" >&2
     exit "${MIGRATE_RC:-1}"
 fi
+
+# e2e-sshd.socket baked into the base image (see MODIFIED_IMAGE above) is
+# vendor content absent from the target's own defaults, so core::mergetc's
+# 3-way merge drops it (old==cur, new absent) — same semantics as the
+# ostree-rebase path's native OSTree merge (see the "re-injecting e2e-sshd"
+# block above). Recreate it directly in the staged deployment's /etc,
+# post-merge, pre-reboot, rather than baking it into the target image itself
+# (#18 — that would require the migration to pull a locally-built image it
+# can't reach; see the TARGET_IMAGE note above).
+step "=== Re-injecting e2e-sshd into the staged deployment ==="
+ssh $SSH_OPTS root@localhost bash <<'CFS_POSTMERGEFIX'
+set -e
+DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found (/sysroot/state/deploy/*/etc)"; exit 1; }
+
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH TCP Socket (port 22)' \
+    '[Socket]' \
+    'ListenStream=22' \
+    'Accept=yes' \
+    '[Install]' \
+    'WantedBy=sockets.target' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E SSH per-connection service' \
+    '[Service]' \
+    'ExecStart=-/usr/sbin/sshd -i' \
+    'StandardInput=socket' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
+ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+
+# Belt and suspenders: having both sshd.service (sshd -D) and e2e-sshd.socket
+# bound to port 22 kills the daemon with 255/EXCEPTION.
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+CFS_POSTMERGEFIX
 
 step "=== Verifying migration artifacts before reboot ==="
 ssh $SSH_OPTS root@localhost bash <<'DIAG'
