@@ -36,6 +36,29 @@ enum Commands {
     Rebase(Args),
     /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB)
     Rollback(RollbackArgs),
+    /// GRUB2 -> systemd-boot bootloader migration (issue #65). NOT YET
+    /// IMPLEMENTED: the ESP/NVRAM mutation and the kernel-install resync
+    /// hook (without which a flipped system would silently boot stale
+    /// kernels after the next update) don't exist yet. This subcommand
+    /// exists so the CLI shape and pure BLS-entry/karg-carry-over/
+    /// entry-token logic (`bootc_migrate_core::migration::bootloader::systemd_boot`)
+    /// can be reviewed ahead of the live mutation work.
+    MigrateBootloader(MigrateBootloaderArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct MigrateBootloaderArgs {
+    /// Target bootloader (only "systemd-boot" is planned)
+    #[arg(long, default_value = "systemd-boot")]
+    to: String,
+
+    /// Dry-run: print every action without executing
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Undo a previous migrate-bootloader run
+    #[arg(long)]
+    undo: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -160,6 +183,20 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
         } else {
             "NO"
         }
+    );
+}
+
+/// Stub (issue #65): the pure BLS-entry/karg-carry-over/entry-token core
+/// lives in `bootc_migrate_core::migration::bootloader::systemd_boot` and is
+/// unit-tested, but the live ESP populate + NVRAM cutover + kernel-install
+/// resync hook aren't implemented — see the doc comment on
+/// `Commands::MigrateBootloader`. Refuses unconditionally so this can't be
+/// mistaken for a working migration.
+fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
+    bail!(
+        "migrate-bootloader is not implemented yet (issue #65): the ESP/NVRAM mutation and \
+         kernel-install resync hook don't exist. See \
+         https://github.com/tuna-os/bootc-migrate-composefs/issues/65"
     );
 }
 
@@ -312,6 +349,7 @@ fn main() -> Result<()> {
                 rollback_args.dry_run,
             )
         }
+        Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");
@@ -868,5 +906,36 @@ mod tests {
             }
             _ => panic!("expected Commands::Rollback"),
         }
+    }
+
+    #[test]
+    fn test_migrate_bootloader_subcommand_parsing() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "migrate-bootloader",
+            "--to",
+            "systemd-boot",
+            "--dry-run",
+            "--undo",
+        ]);
+        match cli.command {
+            Some(Commands::MigrateBootloader(args)) => {
+                assert_eq!(args.to, "systemd-boot");
+                assert!(args.dry_run);
+                assert!(args.undo);
+            }
+            _ => panic!("expected Commands::MigrateBootloader"),
+        }
+    }
+
+    #[test]
+    fn migrate_bootloader_stub_always_refuses() {
+        let args = MigrateBootloaderArgs {
+            to: "systemd-boot".into(),
+            dry_run: false,
+            undo: false,
+        };
+        let err = run_migrate_bootloader(&args).unwrap_err();
+        assert!(err.to_string().contains("not implemented"));
     }
 }
