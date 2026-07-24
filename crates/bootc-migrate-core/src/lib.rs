@@ -1,7 +1,7 @@
 //! In-place migration from OSTree-backed to composefs-backed bootc systems.
 //!
 //! This library exposes the building blocks used by the
-//! `bootc-migrate-composefs` binary so other tools (e.g. a universal
+//! `bootc-migrate` binary so other tools (e.g. a universal
 //! bootc re-base engine) can compose their own migration pipelines:
 //!
 //! - [`boot_audit`] — UEFI boot-entry enumeration + dead/generic/duplicate/firmware classification

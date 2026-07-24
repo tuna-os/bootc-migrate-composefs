@@ -463,7 +463,7 @@ it's a landmine field.
 
 The original migration invocation was:
 ```bash
-ssh ... "/var/tmp/bootc-migrate-composefs ..." 2>&1 \
+ssh ... "/var/tmp/bootc-migrate ..." 2>&1 \
   | awk '{ print "[migrate] " $0; fflush() }'
 ```
 

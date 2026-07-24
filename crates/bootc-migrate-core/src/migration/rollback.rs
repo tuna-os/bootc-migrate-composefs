@@ -185,7 +185,7 @@ pub fn run_rollback(reboot: bool, dry_run: bool) -> Result<()> {
     } else {
         println!(
             "Reboot now to return to Bluefin OSTree. \
-             Run bootc-migrate-composefs commit when ready to finalize."
+             Run bootc-migrate commit when ready to finalize."
         );
     }
 

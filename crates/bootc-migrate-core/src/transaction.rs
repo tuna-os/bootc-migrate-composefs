@@ -434,7 +434,7 @@ pub fn undo(dry_run: bool, full: bool) -> Result<()> {
     // Always release the migration lock so a subsequent run doesn't fail
     // with "already running". The lock guard drops automatically at process
     // exit, but if the previous run crashed mid-phase the lock can linger.
-    let lock_path = "/var/run/bootc-migrate-composefs.lock";
+    let lock_path = "/var/run/bootc-migrate.lock";
     if !dry_run {
         let _ = std::fs::remove_file(lock_path);
     }
@@ -628,7 +628,7 @@ pub fn undo(dry_run: bool, full: bool) -> Result<()> {
             println!("{} path(s) skipped (empty or already clean).", skipped);
         }
         println!("The system is now in its pre-migration OSTree state.");
-        println!("Run 'bootc-migrate-composefs --target-image <image>' to try again.");
+        println!("Run 'bootc-migrate --target-image <image>' to try again.");
     }
     if !dry_run && let Err(e) = motd::clear_migration_reminder() {
         eprintln!("Warning: failed to clear login reminder: {e:#}");

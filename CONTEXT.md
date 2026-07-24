@@ -10,11 +10,11 @@ still the best design narrative).
 ```
 crates/
   bootc-migrate-core/        # the library — everything reusable
-  bootc-migrate-composefs/   # the proven migrator binary + TUI  ← protected MVP
+  bootc-migrate/   # the proven migrator binary + TUI  ← protected MVP
   bootc-rebase/              # universal re-base engine (growing per RFC #30)
 ```
 
-**Invariant: `bootc-migrate-composefs` is the working MVP.** Its CLI surface,
+**Invariant: `bootc-migrate` is the working MVP.** Its CLI surface,
 printed output, and behavior do not change; the four composefs E2E matrix
 cells are untouchable regression gates. New capability lands additively in
 `bootc-rebase` and `bootc-migrate-core`. Shared-core refactors must keep the

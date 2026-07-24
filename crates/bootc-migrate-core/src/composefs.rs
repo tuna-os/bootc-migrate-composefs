@@ -273,7 +273,7 @@ impl ComposefsStore for BootcCliStore {
                      builder ({builder}) all lack `oci create-image`/`seal`. Set \
                      BMC_CFS_BUILDER to an image whose bootc still ships the legacy cfs \
                      CLI, or wait for the native composefs-rs backend — see \
-                     https://github.com/tuna-os/bootc-migrate-composefs/issues/72"
+                     https://github.com/tuna-os/bootc-migrate/issues/72"
                 ));
             }
             builder

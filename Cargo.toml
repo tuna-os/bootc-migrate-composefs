@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/bootc-migrate-core",
-    "crates/bootc-migrate-composefs",
+    "crates/bootc-migrate",
     "crates/bootc-rebase",
 ]
 
@@ -10,7 +10,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/hanthor/bootc-migrate-composefs"
+repository = "https://github.com/tuna-os/bootc-migrate"
 rust-version = "1.88.0"
 
 [workspace.dependencies]

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in improving `bootc-migrate-composefs`.
+Thanks for your interest in improving `bootc-migrate`.
 
 > **Note:** this tool performs an in-place, hard-to-reverse migration of a real
 > system. Treat changes to the migration phases (`src/migration/`) with extra
@@ -119,12 +119,12 @@ base64 /tmp/bmc-src.tar.gz | corral ssh tui-e2e --user root -c \
   "base64 -d > /tmp/src.tar.gz && mkdir -p /tmp/bmc && \
    tar xzf /tmp/src.tar.gz -C /tmp/bmc && cd /tmp/bmc && \
    cargo build --release && \
-   cp target/release/bootc-migrate-composefs /usr/local/bin/"
+   cp target/release/bootc-migrate /usr/local/bin/"
 
 # Option 2: If architectures match, just ship the binary
-base64 target/release/bootc-migrate-composefs | corral ssh tui-e2e --user root -c \
-  "base64 -d > /usr/local/bin/bootc-migrate-composefs && \
-   chmod +x /usr/local/bin/bootc-migrate-composefs"
+base64 target/release/bootc-migrate | corral ssh tui-e2e --user root -c \
+  "base64 -d > /usr/local/bin/bootc-migrate && \
+   chmod +x /usr/local/bin/bootc-migrate"
 ```
 
 **Capture TUI screenshots** (the VM won't have tmux on an immutable OS, but
@@ -139,7 +139,7 @@ if pid == 0:
     ws = struct.pack('HHHH', rows, cols, 0, 0)
     fcntl.ioctl(sys.stdout.fileno(), termios.TIOCSWINSZ, ws)
     os.environ['TERM'] = 'xterm-256color'
-    os.execvp('bootc-migrate-composefs', ['bootc-migrate-composefs'])
+    os.execvp('bootc-migrate', ['bootc-migrate'])
 else:
     ws = struct.pack('HHHH', rows, cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, ws)
