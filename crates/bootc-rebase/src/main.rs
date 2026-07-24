@@ -189,6 +189,15 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
         caps.sysusers.len()
     );
     println!(
+        "Transient root/etc:    {} / {}",
+        if caps.root_transient { "yes" } else { "no" },
+        if caps.etc_transient { "yes" } else { "no" }
+    );
+    println!(
+        "fs-verity required:    {}",
+        if caps.fs_verity_required { "yes" } else { "no" }
+    );
+    println!(
         "Compatible:            {}",
         if caps.ostree_capable || caps.composefs_capable {
             "YES"
