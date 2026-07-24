@@ -1,6 +1,6 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-07-19. Living document; the issue tracker is authoritative
+Status date: 2026-07-24. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 ## Vision
@@ -15,113 +15,139 @@ Three deliverables share the code:
 | Deliverable | What it is | Stability contract |
 |---|---|---|
 | `bootc-migrate-composefs` | The proven OSTree→ComposeFS migrator (**protected MVP**) | CLI surface, output, and behavior frozen; its four E2E cells are untouchable regression gates |
-| `bootc-migrate-core` | The capability library: phases, preflight, /etc merge, transaction, registry streaming, stores, scan, remap | Additive growth; everything new lands here first |
+| `bootc-migrate-core` | The capability library: phases, preflight, /etc merge, transaction, registry streaming, stores, scan, remap, boot audit, DE stash/restore | Additive growth; everything new lands here first |
 | `bootc-rebase` | The universal CLI: routing table × strategies | Where new user-facing capability ships |
 
 ## Where we are
 
-**Done and merged**: RFC #45 library carve-out (workspace, phase modules,
-preflight/readiness, transaction, `ComposefsStore` trait, `bootc-rebase`
-scaffold + routing table, core-migration route) — PRs #53–#62. Upstream cfs
-CLI drift (#72) survived via probe + delegation + pinned legacy builder
-(commit-level fix on PR #73).
+**M0 (MVP hardening) and M1 (same-backend re-base engine) are done.** Every
+issue under both milestones is closed. `bootc-rebase` truthfully routes all
+four backend pairs (implemented for three of them; `composefs→ostree` remains
+explicitly refused, not silently attempted) and the capability scan (#24)
+covers every proposed probe.
 
-**In flight** (all locally verified; awaiting E2E gates):
-
-```
-main ← #73 cfs-drift fix ← #76 generation-aware mount (phases 4/5)
-main ← #69 ostree-rebase E2E cell ← #70 OstreeDeploy ← #75 ImageSwap
-main ← #71 docs (CONTEXT.md, cfs-cli-generations.md, this file)
-main ← #74 NativeStore (composefs-native feature)      [independent]
-main ← #77 UID/GID remap planner (#67 part 1)          [independent]
-main ← #78 capability-scan parsers (#24)               [independent]
-```
-
-Merge order: #73 → #69 → #70, then the stacked children retarget; the four
-independents merge any time their gates pass.
+**In progress, with an explicit boundary between what's landed and what's
+deliberately deferred** — each of M2, M3, and M5 shipped a pure/unit-testable
+"skeleton" slice, then stopped before the part that needs either boot-critical
+live-system mutation or an interactive UI this codebase can't yet validate in
+CI. See each milestone below for the specific line and why.
 
 ## Milestones
 
-### M0 — MVP hardening (continuous; protects everything else)
+### M0 — MVP hardening (continuous; protects everything else) — **done**
 
-The migrator must stay boringly reliable while capability work happens
-around it.
+All exit-criteria issues closed: #72 (cfs CLI drift, resolved short-term by
+probe+delegation, long-term by #13's `NativeStore`), #22 (E2E rollback proof),
+#26 (`rollback` subcommand), #25 (`commit` verified fresh-install-identical),
+#17 (post-migration `/var` cleanup), #27 (sleep inhibitor), #18 (pre-baked SSH
+E2E image), #12 (phase-module unit tests), #29 (Containerfile-initrd
+alternative — evaluated and superseded by the shipped host-side dracut
+`--rebuild` approach, closed as won't-implement).
 
-- #72 → resolved by #73/#76 short-term, #13 long-term (close when merged)
-- #22 E2E rollback test + README recovery section
-- #26 `rollback` subcommand (automate return to OSTree)
-- #25 `commit` produces layout identical to fresh install
-- #17 post-migration cleanup of OSTree-only /var paths
-- #27 systemd sleep inhibitor during migration
-- #18 E2E: pre-baked SSH image, drop runtime injection (CI reliability)
-- #12 finish phase-module unit tests (largely done by carve-out; audit + close)
-- #29 Containerfile-based initrd patching (LVM+XFS+loopback approach B — keep
-  as recorded alternative; activate only if the current initrd path breaks)
-
-**Exit criteria**: rollback proven in CI; commit/undo produce
+**Exit criteria met**: rollback proven in CI; commit/undo produce
 indistinguishable-from-fresh layouts; no known MVP flakes.
 
-### M1 — Same-backend re-base engine (scenarios A / A′) — *nearly done*
+### M1 — Same-backend re-base engine (scenarios A / A′) — **done**
 
-- #63 ostree-rebase E2E cell (PR #69) — gate for the strategy work
-- #64 `Strategy::OstreeDeploy` (PR #70)
-- #66 `Strategy::ImageSwap` switch-path (PR #75); direct-store sub-case moves to M4
-- #24 capability scan: parsers landed (PR #78); remaining: registry fetch
-  wiring for `ProbeFiles` + `bootc-rebase scan` subcommand + routing consumption
+#63 (ostree-rebase E2E cell), #64 (`Strategy::OstreeDeploy`), #66
+(`Strategy::ImageSwap`), #24 (capability scan: parsers, registry fetch wiring,
+`bootc-rebase scan` subcommand, and the `Compatible: YES/NO` gate) — all
+closed.
 
-**Exit criteria**: `bootc-rebase --plan` truthfully answers all four
+**Exit criteria met**: `bootc-rebase --plan` truthfully answers all four
 backend-pair routes; ostree→ostree proven by its own E2E cell; scan output
 drives route refusal with evidence.
 
-### M2 — Bootloader migration (scenario B)
+### M2 — Bootloader migration (scenario B) — **skeleton landed, live mutation deferred**
 
-- #65 `migrate-bootloader` GRUB2→systemd-boot: ESP-copy + kernel-install /
-  path-unit resync hook + BootNext one-boot trial (spec on issue; XBOOTLDR
-  ruled out by audit)
-- Integration into OstreeDeploy route when readiness allows (#64 decision:
-  migrate when ready)
-- E2E: extend the #63 cell with `--bootloader systemd-boot` + a simulated
-  kernel update asserting ESP resync
+[#65](https://github.com/tuna-os/bootc-migrate-composefs/issues/65) — the
+pure core (BLS entry assembly, kernel-arg carry-over, entry-token derivation)
+merged and is unit-tested; `bootc-rebase migrate-bootloader` exists as a CLI
+shape but its `run` always refuses with "not implemented."
 
-**Exit criteria**: a GRUB2 bluefin VM re-bases, boots via sd-boot, survives a
-kernel update, and `--undo` restores GRUB cleanly.
+**Why stopped here**: the remaining work — ESP populate, NVRAM cutover via
+`efibootmgr` with a `BootNext` one-boot trial before `BootOrder` promotion,
+and the kernel-install resync hook (without which a flipped system silently
+boots stale kernels after the next update) — is boot-critical and currently
+unvalidatable: no E2E cell exercises it yet, and this isn't something a
+compile+unit-test loop can prove correct. A full implementation plan (ESP
+layout, NVRAM sequencing, resync-hook mechanism, phase-5 interplay, E2E cell
+design) is posted on the issue for whoever picks it up with real
+E2E-iteration budget and explicit sign-off on the risk.
 
-### M3 — Cross-base re-base (scenario C)
+**Exit criteria (not yet met)**: a GRUB2 bluefin VM re-bases, boots via
+sd-boot, survives a kernel update, and `--undo` restores GRUB cleanly.
 
-- #67 part 1 (remap planner) in PR #77; part 2: apply walk over /var +
-  preserved /etc in the staged deployment; part 3: mergetc cross-base mode
-  (target defaults + `.rebase-old` sidecars); gate via `is_cross_base`
-  (landed in PR #78) + `--accept-cross-base`
-- Uses #24 scan for target passwd/group/sysusers without a pull
+### M3 — Cross-base re-base (scenario C) — **part 1 done, part 2 blocked**
 
-**Exit criteria**: fedora-family → centos-family E2E cell with a populated
-/var: correct ownership after reboot, report lists every renumbered account,
-`.rebase-old` sidecars present where defaults were taken.
+[#67](https://github.com/tuna-os/bootc-migrate-composefs/issues/67) part 1
+(remap planner + apply walk over the staged deployment) is done and wired
+into `OstreeDeploy`, gated by `is_cross_base` + `--accept-cross-base`.
 
-### M4 — Native store & the generation matrix (the #72 endgame)
+Part 2 (a `mergetc`-style `/etc` merge conflict policy for cross-base
+re-bases) is **blocked, not merely deferred**: `OstreeDeploy` and `ImageSwap`
+both delegate `/etc` merging to `bootc switch`'s native OSTree merge, not to
+`mergetc`, so there is no live caller for a `mergetc` cross-base extension
+yet. Revisit once either route grows its own `/etc`-merge seam.
 
-- #13 `NativeStore` (PR #74) + store **selection** by target generation;
-  generation-aware mount (PR #76) already restores phase-4/5 overlay mounts
-- Retire the pinned legacy builder once selection lands (the builder is a
-  bridge, not a destination)
-- E2E cell exercising a NativeStore-written store end-to-end
-- Evidence base: `docs/cfs-cli-generations.md` (compatibility matrix,
-  in-place upgrade, deterministic EROFS ids)
+Related: [#80](https://github.com/tuna-os/bootc-migrate-composefs/issues/80)
+confirmed (via reading ostree's `merge_configuration_from()` source directly)
+that `bootc switch`'s native merge does plain whole-*file* 3-way merge with
+**no** identity-DB (`passwd`/`group`/etc.) key-level reconciliation — the
+exact class of problem `mergetc`'s union-merge exists to prevent. This is a
+real gap in the `OstreeDeploy` route, tracked separately since fixing it
+means either an upstream ostree/bootc change or new compensating logic, not a
+`mergetc` cross-base extension.
 
-**Exit criteria**: migration succeeds with *no* legacy-CLI bootc anywhere
-(host, target, builder); `BMC_CFS_BUILDER` becomes a no-op escape hatch.
+**Exit criteria (not yet met)**: fedora-family → centos-family E2E cell with
+a populated `/var`: correct ownership after reboot, report lists every
+renumbered account, `.rebase-old` sidecars present where defaults were taken.
 
-### M5 — Desktop & UX (scenario E + human factors)
+### M4 — Native store & the generation matrix (the #72 endgame) — **not started beyond the feature flag**
 
-- #68 DE hooks: E1 stash (per-DE inventory from the Mending Wall model) →
-  E2 restore unit + menu dedup → E3 flatpak swap plan/apply → E4 hook
-  contract for image maintainers (spec on issue, research recorded)
-- #15 pre-migration /etc drift review (interactive diff)
-- #31 TUI/GUI boot-entry cleanup + distro branding
+[#13](https://github.com/tuna-os/bootc-migrate-composefs/issues/13)'s
+`NativeStore` (composefs/composefs-oci crates, no CLI shelling) exists behind
+the `composefs-native` feature flag and is off by default. The default path
+still probes host/target/builder for a legacy-CLI-capable bootc and pins
+`quay.io/fedora/fedora-bootc:42` as a builder when none of the three has it —
+visible in every E2E run's Phase 2 log line. Store **selection** by target
+generation, and retiring the pinned legacy builder, have not been picked up.
 
-**Exit criteria**: bluefin↔aurora-style switch preserves user data
-untouched, stashes/restores DE state, swaps DE-scoped flatpaks on request;
-non-experts can read what will happen before it happens.
+**Exit criteria (not yet met)**: migration succeeds with *no* legacy-CLI
+bootc anywhere (host, target, builder); `BMC_CFS_BUILDER` becomes a no-op
+escape hatch.
+
+### M5 — Desktop & UX (scenario E + human factors) — **computable cores landed, interactive/live pieces deferred**
+
+Three issues, same shape: the pure/reusable core shipped; the interactive
+TUI and (for #31) live NVRAM mutation did not, because neither is
+exercisable by this project's build/clippy/test/fmt + E2E loop — a passing
+CI run can't demonstrate a checklist UI works, and #31's remaining scope
+(deleting/renaming boot entries) is the same unvalidatable-boot-mutation
+class of risk as #65.
+
+- [#68](https://github.com/tuna-os/bootc-migrate-composefs/issues/68) — DE
+  config stash/restore (GNOME dconf/gnome-shell, KDE kdeglobals/plasma/…),
+  a best-effort portable-preference extractor, and the
+  `pre-switch.d`/`post-switch.d` hook contract are done, unit-tested, and
+  exposed as `bootc-rebase de-migrate stash|restore`. Target-image DE
+  *detection* (needs registry streaming, and realistically needs M3's
+  cross-base hardening landed first since cross-DE is usually also
+  cross-image) and wiring into the live `rebase` flow are not implemented.
+- [#15](https://github.com/tuna-os/bootc-migrate-composefs/issues/15) — the
+  factory-vs-live `/etc` diff computation is done, exposed as
+  `bootc-migrate-composefs etc-drift` (table or JSON). The interactive
+  checklist UI and its wiring into Phase 4's merge decision are not
+  implemented.
+- [#31](https://github.com/tuna-os/bootc-migrate-composefs/issues/31) — the
+  UEFI boot-entry audit (dead/generic-label/duplicate/firmware-managed
+  classification) is done, read-only, exposed as `bootc-rebase boot-entries`.
+  Interactive selection, live entry removal, and branding-rename (which is a
+  delete+recreate, so the same NVRAM-mutation risk) are not implemented.
+
+**Exit criteria (not yet met)**: bluefin↔aurora-style switch preserves user
+data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
+request; non-experts can read what will happen before it happens.
 
 ### 1.0 — Universal migrator
 
@@ -134,21 +160,15 @@ recovery, hooks). Version and deprecation policy published.
 
 ```mermaid
 graph TD
-  M73["#73 cfs drift fix"] --> M76["#76 gen-aware mount"]
-  M69["#69 e2e cell"] --> M70["#70 OstreeDeploy"] --> M75["#75 ImageSwap"]
-  M74["#74 NativeStore"] --> SEL["#13 store selection"]
-  M76 --> SEL
-  M78["#78 scan parsers"] --> FETCH["scan fetch + subcommand (#24)"]
-  FETCH --> ROUTE["routing consumes scan"]
-  M77["#77 remap planner"] --> APPLY["#67 apply walk"]
-  M78 --> APPLY
-  APPLY --> XBASE["#67 cross-base E2E"]
-  M70 --> BL["#65 migrate-bootloader"]
-  BL --> BLE2E["#65 E2E + resync proof"]
-  SEL --> RETIRE["retire legacy builder"]
-  M75 --> DIRECT["#66 direct-store sub-case"]
-  SEL --> DIRECT
-  ROUTE --> DE["#68 DE hooks E1..E4"]
+  M0["M0 MVP hardening — done"] --> M1["M1 same-backend engine — done"]
+  M1 --> M2["M2 #65 migrate-bootloader — skeleton done, live mutation deferred"]
+  M1 --> M3P1["M3 #67 pt1 remap — done, wired into OstreeDeploy"]
+  M3P1 --> M3P2["M3 #67 pt2 mergetc cross-base — blocked, no live caller"]
+  M1 --> GAP80["#80 identity-DB merge gap — confirmed, tracked separately"]
+  M1 --> M4["M4 NativeStore selection / retire legacy builder — not started"]
+  M1 --> M5A["M5 #68 DE stash/restore — skeleton done, detection+wiring deferred"]
+  M1 --> M5B["M5 #15 etc-drift report — done, TUI deferred"]
+  M1 --> M5C["M5 #31 boot-entry audit — done, cleanup+branding deferred"]
 ```
 
 ## Risks & standing mitigations
@@ -160,10 +180,19 @@ graph TD
 - **MVP regression via shared code.** Mitigation: MVP protection rule
   (frozen behavior, additive-only in core, probe-gated divergence), four
   untouchable E2E cells.
-- **CI capacity** (runner starvation observed 2026-07-19). Mitigation:
-  everything is verified locally before push; heavy validation designed as
-  unit/loopback experiments where possible; E2E cells narrow and
-  dispatchable individually.
+- **Boot-critical work can't be validated by this project's normal loop.**
+  Mitigation, applied consistently across M2 and M5: land the pure/testable
+  core, stop before live NVRAM/ESP/interactive-UI mutation, document the
+  exact remaining plan on the issue, and require explicit sign-off + a
+  dedicated E2E cell before attempting it — rather than shipping unvalidated
+  boot-path code just because the rest of a PR's CI run was green.
+- **CI capacity.** Runner starvation observed both 2026-07-19 (this repo's
+  own concurrency groups) and 2026-07-24 (org-wide GitHub Actions queue
+  congestion across most tuna-os repos simultaneously — not fixable from any
+  one repo's side; just wait it out or check org Actions capacity/billing).
+  Mitigation: everything is verified locally (or via a remote build host)
+  before push; heavy validation designed as unit/loopback experiments where
+  possible; E2E cells narrow and dispatchable individually.
 - **Settings translation temptation (#68).** Prior art is unanimous that
   GNOME↔KDE translation fails; the spec forbids it. Stash/restore only.
 
@@ -172,9 +201,11 @@ graph TD
 - Bootloader on ostree→ostree: migrate to systemd-boot **when ready** (#64)
 - UID/GID divergence: **auto-remap with report** (#67)
 - Cross-base /etc conflicts: **target defaults win**, user value kept as
-  `.rebase-old` sidecar (#67)
+  `.rebase-old` sidecar (#67, part 2 — not yet implemented, see M3 above)
 - Store format is defined by the **reader at boot** (target image) — writer
   selection follows the target's generation (#13/#72)
 - XBOOTLDR GUID-retype: **dead** (sd-boot ≥258.2 requires vfat) — ESP-copy
   + resync instead (#65)
 - DE settings: **stash/restore, never translate** (#68)
+- Boot-critical or UI-only remaining scope gets a documented plan on its
+  issue, not a best-effort implementation without validation (#65, #31, #15)

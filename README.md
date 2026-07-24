@@ -242,6 +242,17 @@ Things to confirm in the report:
 - `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — the composefs object
   store is built by reflinking your existing OSTree objects.
 
+Optionally, preview what Phase 4's `/etc` merge will see before running it:
+
+```bash
+sudo bootc-migrate-composefs etc-drift
+```
+
+Lists every path where your live `/etc` has diverged from the OSTree factory
+default (added/modified/removed/type-changed), read-only. Useful for
+spotting a stale customization you no longer need before it carries forward
+into the migrated system.
+
 ### 3. Run the migration
 
 ```bash
@@ -433,17 +444,56 @@ and LVM-on-LUKS with a dedicated `/var`.
 
 ## Layout
 
-- `src/main.rs` — CLI surface (clap), `commit` and `undo` subcommands
-- `src/preflight.rs` — environment validation
-- `src/migration/mod.rs` — five-phase orchestrator (monolithic; uses rustix)
-- `src/composefs.rs` — wraps `bootc internals cfs`
-- `src/ostree.rs` — OSTree object scan + reflink import
-- `src/mergetc.rs` — 3-way `/etc` merge
-- `src/migration/bootloader.rs` — BLS entry generation (systemd-boot + GRUB2)
-- `src/migration/esp.rs` — ESP device detection, auto-mount, efibootmgr
-- `src/migration/phases.rs` — phase-specific helpers (registry extraction,
-  initrd rebuild, kernel modules)
-- `tests/run-e2e.sh` — QEMU E2E harness
+A Cargo workspace with three crates (see [ROADMAP.md](ROADMAP.md) for why):
+
+- `crates/bootc-migrate-core` — the capability library everything else is
+  built from: phases, preflight/readiness, `/etc` merge (`mergetc`), OSTree
+  object scan, registry streaming, transaction (`commit`/`undo`), target-image
+  capability scan (`scan`), cross-base UID/GID remap (`remap`), UEFI boot-entry
+  audit (`boot_audit`), DE config stash/restore (`de_migrate`), types.
+- `crates/bootc-migrate-composefs` — **the protected MVP binary** described
+  above. CLI surface (clap), `commit`/`undo`/`rollback` subcommands, the TUI
+  wizard. Its four E2E cells are untouchable regression gates — this binary's
+  behavior doesn't change as new capability lands in `bootc-rebase`.
+- `crates/bootc-rebase` — the universal re-base engine binary; see below.
+- `tests/run-e2e.sh` — QEMU E2E harness exercising both binaries.
+
+## `bootc-rebase` — the universal re-base engine
+
+`bootc-migrate-composefs` above does one proven thing: OSTree → ComposeFS.
+`bootc-rebase` is the generalization — a routing table over
+**backend × strategy** that will eventually cover every bootc re-base shape
+(same-backend image swaps, cross-backend conversions, bootloader changes,
+cross-distro-family moves, desktop-environment switches). It's newer and less
+battle-tested than the MVP binary; treat subcommands marked *skeleton* or
+*read-only* below as previews, not yet full features.
+
+```bash
+cargo build --release -p bootc-rebase
+```
+
+| Subcommand | What it does | Status |
+|---|---|---|
+| `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. `--json` for machine output. | Done |
+| `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route and exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), and ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report) |
+| `rollback [--reboot]` | Re-order UEFI `BootOrder` back to the previous deployment. | Done |
+| `boot-entries [--json]` | Enumerate and classify UEFI boot entries: dead (loader path missing), generic-label, duplicate, firmware-managed. **Read-only** — reports what could be cleaned up; removes nothing. | Read-only audit; interactive cleanup + distro-branding rename not yet implemented ([#31](https://github.com/tuna-os/bootc-migrate-composefs/issues/31)) |
+| `de-migrate stash\|restore` | Move a user's desktop-environment config (GNOME dconf/gnome-shell, KDE kdeglobals/plasma/…) into or out of a stash directory around a cross-DE re-base — union of paths per issue [#68](https://github.com/tuna-os/bootc-migrate-composefs/issues/68), never deletes. `--run-hooks` executes `pre-switch.d`/`post-switch.d` scripts with `REBASE_FROM_DE`/`REBASE_TO_DE`/`REBASE_STASH_DIR`/`REBASE_HOME` set. `--dry-run` previews without touching anything. | Stash/restore mechanics + hook contract done; target-image DE *detection* and wiring into `rebase` itself are not yet implemented (depends on the cross-base hardening milestone landing first) |
+| `migrate-bootloader --to systemd-boot` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Not implemented** — the subcommand exists and always refuses; only the pure BLS-entry/kernel-arg/entry-token logic it will use has landed. Live ESP populate + NVRAM cutover + the kernel-install resync hook (without which a flipped system would silently boot stale kernels) are deliberately deferred pending explicit sign-off and a dedicated E2E cell — see [#65](https://github.com/tuna-os/bootc-migrate-composefs/issues/65) for the full implementation plan |
+
+`rebase`'s routing table (`crates/bootc-rebase/src/routing.rs` is the single
+source of truth the CLI consults before touching anything):
+
+| From ↓ \ To → | ostree | composefs |
+|---|---|---|
+| **ostree** | `OstreeDeploy` (native `bootc switch`) | `CoreMigration` (this repo's proven phase 0–5 pipeline) |
+| **composefs** | planned, not implemented | `ImageSwap` |
+
+## Roadmap
+
+Full milestone plan, current status per issue, and design decisions live in
+[ROADMAP.md](ROADMAP.md) — start there for "what's next" and "why did we
+choose X over Y."
 
 ## Contributing
 
