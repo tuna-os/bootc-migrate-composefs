@@ -16,6 +16,7 @@ rustix.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tui-big-text.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
