@@ -14,7 +14,7 @@ Three deliverables share the code:
 
 | Deliverable | What it is | Stability contract |
 |---|---|---|
-| `bootc-migrate-composefs` | The proven OSTree→ComposeFS migrator (**protected MVP**) | CLI surface, output, and behavior frozen; its four E2E cells are untouchable regression gates |
+| `bootc-migrate` | The proven OSTree→ComposeFS migrator (**protected MVP**) | CLI surface, output, and behavior frozen; its four E2E cells are untouchable regression gates |
 | `bootc-migrate-core` | The capability library: phases, preflight, /etc merge, transaction, registry streaming, stores, scan, remap, boot audit, DE stash/restore | Additive growth; everything new lands here first |
 | `bootc-rebase` | The universal CLI: routing table × strategies | Where new user-facing capability ships |
 
@@ -136,7 +136,7 @@ class of risk as #65.
   cross-image) and wiring into the live `rebase` flow are not implemented.
 - [#15](https://github.com/tuna-os/bootc-migrate-composefs/issues/15) — the
   factory-vs-live `/etc` diff computation is done, exposed as
-  `bootc-migrate-composefs etc-drift` (table or JSON). The interactive
+  `bootc-migrate etc-drift` (table or JSON). The interactive
   checklist UI and its wiring into Phase 4's merge decision are not
   implemented.
 - [#31](https://github.com/tuna-os/bootc-migrate-composefs/issues/31) — the

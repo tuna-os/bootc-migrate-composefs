@@ -39,7 +39,7 @@ use tempfile::TempDir;
 
 // ---- Lock file ----
 
-const LOCK_PATH: &str = "/var/run/bootc-migrate-composefs.lock";
+const LOCK_PATH: &str = "/var/run/bootc-migrate.lock";
 
 fn acquire_lock() -> Result<File> {
     let lock = File::create(LOCK_PATH).context("failed to create lock file")?;
@@ -49,7 +49,7 @@ fn acquire_lock() -> Result<File> {
         Ok(()) => {}
         Err(Errno::WOULDBLOCK | Errno::ACCESS) => {
             return Err(anyhow!(
-                "Another instance of bootc-migrate-composefs is already running (lock held at {}).",
+                "Another instance of bootc-migrate is already running (lock held at {}).",
                 LOCK_PATH
             ));
         }
@@ -799,9 +799,7 @@ pub fn run_migration(
         println!("Primary bootloader: GRUB2 (BLS Type 1)");
     }
     println!("Please reboot the system to finalize the transition.");
-    println!(
-        "After successful boot, run 'bootc-migrate-composefs commit' to make composefs permanent."
-    );
+    println!("After successful boot, run 'bootc-migrate commit' to make composefs permanent.");
     if !dry_run {
         // Best-effort: a login reminder is a courtesy, not a migration
         // requirement — don't fail an otherwise-successful migration over it.

@@ -1,5 +1,5 @@
 # OSTree → ComposeFS Migration Tool — just tasks
-# https://github.com/hanthor/bootc-migrate-composefs
+# https://github.com/tuna-os/bootc-migrate
 
 default:
     @just --list

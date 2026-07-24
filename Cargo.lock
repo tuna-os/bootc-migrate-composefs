@@ -169,7 +169,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bootc-migrate-composefs"
+name = "bootc-migrate"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -178,6 +178,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "rustix",
+ "serde_json",
  "tui-big-text",
 ]
 
@@ -206,6 +207,7 @@ dependencies = [
  "clap",
  "rustix",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

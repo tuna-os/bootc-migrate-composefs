@@ -1,6 +1,6 @@
-//! Interactive TUI wizard for bootc-migrate-composefs.
+//! Interactive TUI wizard for bootc-migrate.
 //!
-//! Entry point: [`run_tui`].  Invoke as `sudo bootc-migrate-composefs tui`
+//! Entry point: [`run_tui`].  Invoke as `sudo bootc-migrate tui`
 //! or automatically when `--target-image` is omitted.
 
 use anyhow::{Context, Result};
@@ -523,8 +523,8 @@ impl App {
 
     fn build_command_args(&self) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
-        let exe = std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from("bootc-migrate-composefs"));
+        let exe =
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("bootc-migrate"));
         args.push(exe.display().to_string());
         args.push("--target-image".to_owned());
         args.push(self.selected_image());
@@ -1113,7 +1113,7 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let title_line = Line::from(vec![
         Span::styled(
-            " 🚀 bootc-migrate-composefs",
+            " 🚀 bootc-migrate",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ),
         Span::styled(step_str, Style::default().fg(SUBTLE)),
@@ -1255,7 +1255,7 @@ fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
     // ── Subtitle ──
     let subtitle = Paragraph::new(Line::from(vec![
         Span::styled(
-            "  bootc-migrate-composefs",
+            "  bootc-migrate",
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -2282,7 +2282,7 @@ fn render_complete(f: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "       sudo bootc-migrate-composefs commit",
+            "       sudo bootc-migrate commit",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
@@ -2355,12 +2355,12 @@ fn render_failed(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
     )));
     text_lines.push(Line::from(Span::styled(
-        "    sudo bootc-migrate-composefs undo",
+        "    sudo bootc-migrate undo",
         Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
     )));
     text_lines.push(Line::raw(""));
     text_lines.push(Line::from(Span::styled(
-        "  Check the log at /var/log/bootc-migrate-composefs.log for details.",
+        "  Check the log at /var/log/bootc-migrate.log for details.",
         Style::default().fg(SUBTLE),
     )));
     text_lines.push(Line::raw(""));

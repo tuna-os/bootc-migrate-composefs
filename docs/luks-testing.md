@@ -73,7 +73,7 @@ shell (projectbluefin/dakota#270) — the single most likely cause of the failur
 ### What we actually test: GRUB source → migrate to systemd-boot
 
 Bluefin and Bluefin-LTS (the migration **source**) use **GRUB**, so the e2e must
-install the source with GRUB + LUKS and then let `bootc-migrate-composefs`
+install the source with GRUB + LUKS and then let `bootc-migrate`
 convert it to systemd-boot + composefs. Installing Dakota directly (as the old
 `--block-setup tpm2-luks` path did) does not exercise the tool at all.
 
@@ -121,7 +121,7 @@ sed -i "s|^\(options .*\)|\1 rd.luks.name=$LUKS_UUID=root rd.luks.key=/keys/luks
 umount /mnt/target/boot/efi /mnt/target/boot /mnt/target && cryptsetup luksClose root
 ```
 
-After boot, `bootc-migrate-composefs` migrates to systemd-boot + composefs. The
+After boot, `bootc-migrate` migrates to systemd-boot + composefs. The
 migration must **carry the `rd.luks.*` args onto the new systemd-boot BLS entries
 it writes on the ESP** — otherwise the post-migration boot loses LUKS unlock.
 This is the key cross-cutting requirement for migrating an encrypted system and

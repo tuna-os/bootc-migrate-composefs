@@ -1,5 +1,5 @@
 [package]
-name = "bootc-migrate-composefs"
+name = "bootc-migrate"
 description = "In-place migration from OSTree-backed to composefs-backed bootc systems"
 readme = "../../README.md"
 version.workspace = true

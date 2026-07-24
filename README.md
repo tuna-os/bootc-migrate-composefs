@@ -1,7 +1,7 @@
-# bootc-migrate-composefs
+# bootc-migrate
 
-[![CI](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/ci.yml/badge.svg)](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/ci.yml)
-[![E2E](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/e2e-tests.yml/badge.svg?branch=main)](https://github.com/tuna-os/bootc-migrate-composefs/actions/workflows/e2e-tests.yml?query=branch%3Amain)
+[![CI](https://github.com/tuna-os/bootc-migrate/actions/workflows/ci.yml/badge.svg)](https://github.com/tuna-os/bootc-migrate/actions/workflows/ci.yml)
+[![E2E](https://github.com/tuna-os/bootc-migrate/actions/workflows/e2e-tests.yml/badge.svg?branch=main)](https://github.com/tuna-os/bootc-migrate/actions/workflows/e2e-tests.yml?query=branch%3Amain)
 
 In-place migration utility that converts an OSTree-backend bootc system
 (e.g. Bluefin) into a ComposeFS-backend bootc system (e.g. Dakota), without
@@ -23,9 +23,9 @@ swap in `aarch64-unknown-linux-gnu`):
 
 ```bash
 curl -fsSL -o bmc.tar.gz \
-  https://github.com/tuna-os/bootc-migrate-composefs/releases/latest/download/bootc-migrate-composefs-x86_64-unknown-linux-gnu.tar.gz
+  https://github.com/tuna-os/bootc-migrate/releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz
 tar xzf bmc.tar.gz
-sudo install -m755 bootc-migrate-composefs /usr/local/bin/
+sudo install -m755 bootc-migrate /usr/local/bin/
 ```
 
 <details><summary>…or pull the container image</summary>
@@ -33,34 +33,34 @@ sudo install -m755 bootc-migrate-composefs /usr/local/bin/
 A minimal image ships the same binary, useful when GitHub Releases is rate-limited/blocked, or to `COPY --from=` it into another Containerfile:
 
 ```bash
-podman create --name bmc-extract ghcr.io/tuna-os/bootc-migrate-composefs:latest
-podman cp bmc-extract:/usr/local/bin/bootc-migrate-composefs .
+podman create --name bmc-extract ghcr.io/tuna-os/bootc-migrate:latest
+podman cp bmc-extract:/usr/local/bin/bootc-migrate .
 podman rm bmc-extract
-sudo install -m755 bootc-migrate-composefs /usr/local/bin/
+sudo install -m755 bootc-migrate /usr/local/bin/
 ```
 </details>
 
 <details><summary>…or build from source (needs Rust)</summary>
 
 ```bash
-git clone https://github.com/tuna-os/bootc-migrate-composefs
-cd bootc-migrate-composefs
+git clone https://github.com/tuna-os/bootc-migrate
+cd bootc-migrate
 cargo build --release
-sudo install -m755 target/release/bootc-migrate-composefs /usr/local/bin/
+sudo install -m755 target/release/bootc-migrate /usr/local/bin/
 ```
 </details>
 
 **2. Dry-run** — makes no changes, just checks your system is ready:
 
 ```bash
-sudo bootc-migrate-composefs \
+sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable --dry-run
 ```
 
 **3. Migrate** (~5–25 min depending on cache/network):
 
 ```bash
-sudo bootc-migrate-composefs \
+sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable
 ```
 
@@ -75,7 +75,7 @@ sudo systemctl reboot
 
 ```bash
 cat /proc/cmdline | grep -o 'composefs=[0-9a-f]*'   # confirms composefs boot
-sudo bootc-migrate-composefs commit                 # one-way; removes the OSTree fallback
+sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 ```
 
 > ⚠️ **Note:** Phase 4 copies `/var` to the composefs side. After migration,
@@ -104,10 +104,10 @@ image selection, options, a plain-English review of what's about to happen,
 and a live phase-by-phase progress view with scrollable logs:
 
 ```bash
-sudo bootc-migrate-composefs tui
+sudo bootc-migrate tui
 ```
 
-![bootc-migrate-composefs TUI wizard](docs/images/tui-review.png)
+![bootc-migrate TUI wizard](docs/images/tui-review.png)
 
 The wizard defaults to `--dry-run` and only builds the equivalent CLI
 invocation shown on the Review screen — it doesn't need root just to browse;
@@ -127,7 +127,7 @@ flowchart TB
     end
 
     %% ── The migration tool: six phases, one command ─────────────
-    subgraph BIN["bootc-migrate-composefs &middot; 6 phases (0&ndash;5)"]
+    subgraph BIN["bootc-migrate &middot; 6 phases (0&ndash;5)"]
         direction TB
         P0["<b>Phase 0 &middot; Preflight</b><br/>ESP size &middot; NVRAM &middot; reflink"]
         P1["<b>Phase 1 &middot; OSTree import</b> (optional)<br/>reflink objects &rarr; composefs store"]
@@ -201,7 +201,7 @@ Six phases (numbered 0–5 to match the console output), run as one command:
   `Linux Boot Manager` in UEFI NVRAM. The original GRUB entry is left as a
   rollback escape hatch.
 
-After a successful reboot into the composefs entry, `bootc-migrate-composefs
+After a successful reboot into the composefs entry, `bootc-migrate
 commit` removes the OSTree fallback and makes composefs permanent.
 
 ## Usage — end-to-end walkthrough
@@ -226,7 +226,7 @@ point `--target-image` at the composefs-flavored equivalent.
 ### 2. Check readiness with a dry-run
 
 ```bash
-sudo bootc-migrate-composefs \
+sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable \
   --dry-run
 ```
@@ -245,7 +245,7 @@ Things to confirm in the report:
 Optionally, preview what Phase 4's `/etc` merge will see before running it:
 
 ```bash
-sudo bootc-migrate-composefs etc-drift
+sudo bootc-migrate etc-drift
 ```
 
 Lists every path where your live `/etc` has diverged from the OSTree factory
@@ -256,7 +256,7 @@ into the migrated system.
 ### 3. Run the migration
 
 ```bash
-sudo bootc-migrate-composefs \
+sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable
 ```
 
@@ -294,7 +294,7 @@ homebrew, GNOME extensions, whatever. Everything that lived under `/home`,
 `/var`, and `/etc` on Bluefin should be where you left it. If something
 is missing or broken, you can roll back (see below).
 
-A login banner (`/etc/motd.d/85-bootc-migrate-composefs`) reminds you to run
+A login banner (`/etc/motd.d/85-bootc-migrate`) reminds you to run
 `commit` on every login until you do, so a live migration doesn't sit
 forgotten in this dual-boot state indefinitely. It clears itself once
 `commit` runs — or once `undo` runs, since at that point there's nothing
@@ -305,7 +305,7 @@ left to commit.
 Once you trust the new system:
 
 ```bash
-sudo bootc-migrate-composefs commit
+sudo bootc-migrate commit
 ```
 
 This removes the OSTree fallback from the ESP, drops GRUB2 boot artifacts,
@@ -341,7 +341,7 @@ deployment stays bootable:
 To return to the original OSTree deployment directly from the command line:
 
 ```bash
-sudo bootc-migrate-composefs rollback --reboot
+sudo bootc-migrate rollback --reboot
 # or via the universal re-base CLI:
 sudo bootc-rebase rollback --reboot
 ```
@@ -364,9 +364,9 @@ sudo efibootmgr --bootnext <Boot####-of-Fedora>
 sudo systemctl reboot
 ```
 
-Pre-migration diagnostic snapshots and logs are automatically recorded under `/var/log/bootc-migrate-composefs/` on every run (`preflight-*.json` and `migration.log`) so boot configuration can be manually reconstructed if NVRAM is ever wiped.
+Pre-migration diagnostic snapshots and logs are automatically recorded under `/var/log/bootc-migrate/` on every run (`preflight-*.json` and `migration.log`) so boot configuration can be manually reconstructed if NVRAM is ever wiped.
 
-After running `bootc-migrate-composefs commit`, the OSTree fallback is removed
+After running `bootc-migrate commit`, the OSTree fallback is removed
 from the ESP and rollback becomes a fresh install. The E2E test exercises the
 full round-trip (composefs → OSTree → composefs) on every run.
 
@@ -405,7 +405,7 @@ What's intentionally *not* carried forward:
 | `bootc status` says "No manifest_digest in origin" | You're on an old build of this tool | Update to `main` — version info is on the first line of the migration log |
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
 | GNOME boots but session settings (wallpaper, accent) look wrong | dconf database needs recompile | `dconf update` as your user, or log out + back in |
-| Migration went wrong and you want to undo it | Something failed mid-migration | Run `sudo bootc-migrate-composefs undo` (removes composefs boot artifacts, keeps object store) or `sudo bootc-migrate-composefs undo --full` (full cleanup including object store); then reboot into OSTree |
+| Migration went wrong and you want to undo it | Something failed mid-migration | Run `sudo bootc-migrate undo` (removes composefs boot artifacts, keeps object store) or `sudo bootc-migrate undo --full` (full cleanup including object store); then reboot into OSTree |
 
 ## Requirements
 
@@ -425,7 +425,7 @@ What's intentionally *not* carried forward:
 cargo build --release
 ```
 
-Drops a single binary at `target/release/bootc-migrate-composefs`.
+Drops a single binary at `target/release/bootc-migrate`.
 Requires Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
@@ -451,7 +451,7 @@ A Cargo workspace with three crates (see [ROADMAP.md](ROADMAP.md) for why):
   object scan, registry streaming, transaction (`commit`/`undo`), target-image
   capability scan (`scan`), cross-base UID/GID remap (`remap`), UEFI boot-entry
   audit (`boot_audit`), DE config stash/restore (`de_migrate`), types.
-- `crates/bootc-migrate-composefs` — **the protected MVP binary** described
+- `crates/bootc-migrate` — **the protected MVP binary** described
   above. CLI surface (clap), `commit`/`undo`/`rollback` subcommands, the TUI
   wizard. Its four E2E cells are untouchable regression gates — this binary's
   behavior doesn't change as new capability lands in `bootc-rebase`.
@@ -460,7 +460,7 @@ A Cargo workspace with three crates (see [ROADMAP.md](ROADMAP.md) for why):
 
 ## `bootc-rebase` — the universal re-base engine
 
-`bootc-migrate-composefs` above does one proven thing: OSTree → ComposeFS.
+`bootc-migrate` above does one proven thing: OSTree → ComposeFS.
 `bootc-rebase` is the generalization — a routing table over
 **backend × strategy** that will eventually cover every bootc re-base shape
 (same-backend image swaps, cross-backend conversions, bootloader changes,

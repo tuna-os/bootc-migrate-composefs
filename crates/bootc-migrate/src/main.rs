@@ -7,7 +7,7 @@ use bootc_migrate_core::{migration, preflight, transaction};
 mod tui;
 
 #[derive(Parser, Debug)]
-#[command(name = "bootc-migrate-composefs")]
+#[command(name = "bootc-migrate")]
 #[command(about = "In-place migration utility from OSTree backend to ComposeFS backend", long_about = None)]
 #[command(version = env!("BUILD_GIT_HASH"))]
 struct Args {
@@ -177,7 +177,7 @@ fn main() {
 
     // Open persistent log file — all migration output is tee'd here so the
     // user can inspect results even if the terminal session is lost.
-    let log_path = "/var/log/bootc-migrate-composefs.log";
+    let log_path = "/var/log/bootc-migrate.log";
     let log_file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)

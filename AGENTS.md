@@ -87,7 +87,7 @@ tar czf /tmp/src.tar.gz --exclude=target --exclude=.git .
 base64 /tmp/src.tar.gz | corral ssh <vm> --user root -c \
   "base64 -d > /tmp/src.tar.gz && mkdir -p /tmp/bmc && \
    tar xzf /tmp/src.tar.gz -C /tmp/bmc && cd /tmp/bmc && \
-   cargo build --release && cp target/release/bootc-migrate-composefs /usr/local/bin/"
+   cargo build --release && cp target/release/bootc-migrate /usr/local/bin/"
 ```
 
 The `tui-e2e` VM (Bluefin stable, UEFI, XFS) is pre-provisioned for TUI

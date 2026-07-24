@@ -989,7 +989,7 @@ REBASECHECK
 fi
 
 step "=== Copying migration utility to VM ==="
-scp $SCP_OPTS target/debug/bootc-migrate-composefs root@localhost:/var/tmp/bootc-migrate-composefs
+scp $SCP_OPTS target/debug/bootc-migrate root@localhost:/var/tmp/bootc-migrate
 
 step "=== Injecting /etc fixtures (live, copied by migration) ==="
 ssh $SSH_OPTS root@localhost bash <<'ETCFIX'
@@ -1098,7 +1098,7 @@ ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir 
 # `[migrate]` in the CI log, distinct from script-level `[e2e …]` markers.
 MIGRATE_START=$SECONDS
 {
-    ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs --target-image $VM_TARGET_IMAGE --force --skip-import" 2>&1 \
+    ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import" 2>&1 \
       | awk '{ print "[migrate] " $0; fflush() }'
     echo "MIGRATE_RC=${PIPESTATUS[0]}" > /tmp/e2e-migrate.rc
 } &
@@ -1504,7 +1504,7 @@ echo "OK: Flatpak user + system installations preserved."
 if [ "$E2E_TEST_MODE" = "undo" ]; then
     step "=== Running undo (migration rollback cleanup) test ==="
 
-    UNDO_DRY=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs undo --dry-run 2>&1" || true)
+    UNDO_DRY=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate undo --dry-run 2>&1" || true)
     echo "$UNDO_DRY" | sed 's/^/  /'
     if ! echo "$UNDO_DRY" | grep -qiE 'Removing|composefs'; then
         echo "FAIL: undo --dry-run listed nothing to remove"; exit 1
@@ -1516,7 +1516,7 @@ if [ "$E2E_TEST_MODE" = "undo" ]; then
     echo "OK: undo --dry-run lists artifacts and changes nothing."
 
     # Real undo (non-destructive default: keep the composefs object store).
-    UNDO_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs undo 2>&1" || {
+    UNDO_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate undo 2>&1" || {
         echo "FAIL: undo exited non-zero"; exit 1; })
     echo "$UNDO_OUT" | sed 's/^/  /'
 
@@ -1652,7 +1652,7 @@ step "=== Running commit cleanup test ==="
 
 # Dry-run first — no changes, but the report must list the paths we expect
 # to reclaim.
-DRYRUN_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs commit --dry-run 2>&1" || true)
+DRYRUN_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate commit --dry-run 2>&1" || true)
 echo "$DRYRUN_OUT" | sed 's/^/  /'
 for needle in '/sysroot/ostree' '/sysroot/.bootc-aleph.json' 'Would reclaim'; do
     if ! echo "$DRYRUN_OUT" | grep -qF "$needle"; then
@@ -1668,7 +1668,7 @@ if [ "$PRE_OSTREE" != "yes" ]; then
 fi
 
 # Real commit.
-COMMIT_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate-composefs commit 2>&1" || {
+COMMIT_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate commit 2>&1" || {
     echo "FAIL: commit subcommand exited non-zero"; exit 1
 })
 echo "$COMMIT_OUT" | sed 's/^/  /'

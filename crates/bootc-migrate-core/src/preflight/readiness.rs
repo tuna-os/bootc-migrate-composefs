@@ -1,5 +1,5 @@
 //! Human-readable preflight reporting and migration gating shared by every
-//! binary that drives the core pipeline (bootc-migrate-composefs, bootc-rebase).
+//! binary that drives the core pipeline (bootc-migrate, bootc-rebase).
 //!
 //! Split from the migrator binary so output stays identical across drivers:
 //! [`print_report`] and [`print_readiness`] emit the exact preflight summary

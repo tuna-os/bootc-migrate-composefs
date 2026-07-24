@@ -196,7 +196,7 @@ in a dracut emergency shell, boot back to the OSTree fallback (hold ESC at POST,
 select the centos/OSTree GRUB entry) and re-run:
 
 ```bash
-bootc-migrate-composefs \
+bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable \
   --force --skip-import
 ```

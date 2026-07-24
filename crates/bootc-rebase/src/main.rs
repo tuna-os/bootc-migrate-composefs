@@ -3,7 +3,7 @@
 //! Consumes `bootc-migrate-core` to re-base a bootc system between backends,
 //! bootloaders, and images. Today the OSTree → ComposeFS route drives the
 //! core pipeline directly; the routing table in [`routing`] tracks what else
-//! is planned. See issues #30 and #45 in tuna-os/bootc-migrate-composefs for
+//! is planned. See issues #30 and #45 in tuna-os/bootc-migrate for
 //! the roadmap.
 
 use anyhow::{Context, Result, bail};
@@ -281,7 +281,7 @@ fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
     bail!(
         "migrate-bootloader is not implemented yet (issue #65): the ESP/NVRAM mutation and \
          kernel-install resync hook don't exist. See \
-         https://github.com/tuna-os/bootc-migrate-composefs/issues/65"
+         https://github.com/tuna-os/bootc-migrate/issues/65"
     );
 }
 
@@ -563,7 +563,7 @@ fn execute_rebase(args: &Args) -> Result<()> {
     if !r.implemented {
         bail!(
             "the {from} -> {to} route is not implemented yet; \
-             see https://github.com/tuna-os/bootc-migrate-composefs/issues/30"
+             see https://github.com/tuna-os/bootc-migrate/issues/30"
         );
     }
 

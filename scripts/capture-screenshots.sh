@@ -37,7 +37,7 @@ fi
 
 # Generate VHS tape file for each screen
 cat > /tmp/bmc-screenshots.tape << 'TAPE'
-# bootc-migrate-composefs TUI screenshot capture
+# bootc-migrate TUI screenshot capture
 Output /tmp/bmc-frames/welcome.png
 Set Shell "bash"
 Set FontSize 14
@@ -45,7 +45,7 @@ Set Width 1200
 Set Height 800
 Set Theme "Dracula"
 
-Type "sudo bootc-migrate-composefs"
+Type "sudo bootc-migrate"
 Enter
 Sleep 2s
 Screenshot /tmp/bmc-frames/dakota-migrate-welcome.png

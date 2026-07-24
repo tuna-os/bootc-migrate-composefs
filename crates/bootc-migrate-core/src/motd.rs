@@ -11,7 +11,7 @@ use std::fs;
 use std::path::Path;
 
 const MOTD_DIR: &str = "/etc/motd.d";
-const FRAGMENT_NAME: &str = "85-bootc-migrate-composefs";
+const FRAGMENT_NAME: &str = "85-bootc-migrate";
 
 /// Write the reminder fragment after a successful (non-dry-run) migration.
 /// Best-effort: failures are the caller's to decide whether to surface,
@@ -33,10 +33,10 @@ fn write_migration_reminder_at(motd_dir: &Path, verity_hex: &str) -> Result<()> 
         .with_context(|| format!("failed to create {}", motd_dir.display()))?;
     let contents = format!(
         "\n\
-         *** bootc-migrate-composefs: this system was migrated to ComposeFS ({verity_hex}) ***\n\
+         *** bootc-migrate: this system was migrated to ComposeFS ({verity_hex}) ***\n\
          Once you've confirmed it boots and works, run:\n\
          \n\
-         \tsudo bootc-migrate-composefs commit\n\
+         \tsudo bootc-migrate commit\n\
          \n\
          to finalize the switch and reclaim the OSTree object store (~several GiB).\n\
          This reminder clears itself once you do.\n"
@@ -67,7 +67,7 @@ mod tests {
         assert!(fragment.exists());
         let contents = fs::read_to_string(&fragment).unwrap();
         assert!(contents.contains("deadbeef"));
-        assert!(contents.contains("bootc-migrate-composefs commit"));
+        assert!(contents.contains("bootc-migrate commit"));
 
         clear_migration_reminder_at(&motd_dir).unwrap();
         assert!(!fragment.exists());

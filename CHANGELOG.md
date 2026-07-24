@@ -1,10 +1,10 @@
 # Changelog
 
-All notable changes to `bootc-migrate-composefs` are documented here.
+All notable changes to `bootc-migrate` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions correspond to GitHub Releases; the binary embeds the git SHA at
-build time (`bootc-migrate-composefs --version`).
+build time (`bootc-migrate --version`).
 
 ---
 
@@ -17,7 +17,7 @@ build time (`bootc-migrate-composefs --version`).
   `post-switch.d` hook contract (#68).
 - `bootc-rebase boot-entries` — read-only UEFI boot-entry audit: classifies
   entries as dead, generic-label, duplicate, or firmware-managed (#31).
-- `bootc-migrate-composefs etc-drift` — computes the factory-vs-live `/etc`
+- `bootc-migrate etc-drift` — computes the factory-vs-live `/etc`
   diff (Added/Modified/Removed/TypeChanged) as a table or JSON, ahead of a
   migration (#15).
 - `bootc-rebase scan` capability probe extended with transient-root/etc,
@@ -38,7 +38,7 @@ build time (`bootc-migrate-composefs --version`).
   migrated system to boot with verbose journal output on the console.
 
 ### Changed
-- Transferred repository to `tuna-os/bootc-migrate-composefs`.
+- Transferred repository to `tuna-os/bootc-migrate`.
 - Expanded `CONTRIBUTING.md` with full E2E environment setup, debugging
   guide, scenario table, and dependency update policy.
 - Updated `AGENTS.md` CI matrix to reflect the actual four E2E scenarios
@@ -136,8 +136,8 @@ build time (`bootc-migrate-composefs --version`).
 - E2E CI: btrfs scenario on every push to `main`.
 - `justfile` with build, test, E2E, lint, and cleanup recipes.
 
-[Unreleased]: https://github.com/tuna-os/bootc-migrate-composefs/compare/HEAD...main
-[v0.4.0]: https://github.com/tuna-os/bootc-migrate-composefs/releases/tag/v0.4.0
-[v0.3.0]: https://github.com/tuna-os/bootc-migrate-composefs/releases/tag/v0.3.0
-[v0.2.0]: https://github.com/tuna-os/bootc-migrate-composefs/releases/tag/v0.2.0
-[v0.1.0]: https://github.com/tuna-os/bootc-migrate-composefs/releases/tag/v0.1.0
+[Unreleased]: https://github.com/tuna-os/bootc-migrate/compare/HEAD...main
+[v0.4.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.4.0
+[v0.3.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.3.0
+[v0.2.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.2.0
+[v0.1.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.1.0
