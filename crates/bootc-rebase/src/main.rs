@@ -49,6 +49,58 @@ enum Commands {
     /// without removing or renaming anything. Interactive cleanup and
     /// branding-rename are not implemented yet.
     BootEntries(BootEntriesArgs),
+    /// Stash or restore a user's DE config around a cross-DE re-base (issue
+    /// #68). Off by default: only runs when this subcommand is invoked
+    /// explicitly. NOT wired into `rebase`/`scan` yet — target-image DE
+    /// detection needs the cross-base hardening this issue is gated behind,
+    /// so callers currently pass `--from-de`/`--to-de` explicitly.
+    DeMigrate(DeMigrateArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct DeMigrateArgs {
+    #[command(subcommand)]
+    action: DeMigrateAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum DeMigrateAction {
+    /// Move the outgoing DE's per-user config out of `$HOME` into the stash.
+    Stash {
+        /// Desktop environment being left ("gnome" or "kde")
+        #[arg(long)]
+        from_de: String,
+        /// User home directory to stash config out of
+        #[arg(long)]
+        home: PathBuf,
+        /// Root directory to stash config into
+        #[arg(long, default_value = ".local/share/de-migrate")]
+        stash_dir: PathBuf,
+        /// Also run pre-switch.d hooks (with REBASE_* env vars set) after stashing
+        #[arg(long)]
+        run_hooks: bool,
+        /// Print what would happen without touching the filesystem or running hooks
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Move a previously stashed DE's config back into `$HOME`.
+    Restore {
+        /// Desktop environment being returned to ("gnome" or "kde")
+        #[arg(long)]
+        to_de: String,
+        /// User home directory to restore config into
+        #[arg(long)]
+        home: PathBuf,
+        /// Root directory config was stashed into
+        #[arg(long, default_value = ".local/share/de-migrate")]
+        stash_dir: PathBuf,
+        /// Also run post-switch.d hooks (with REBASE_* env vars set) after restoring
+        #[arg(long)]
+        run_hooks: bool,
+        /// Print what would happen without touching the filesystem or running hooks
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -284,6 +336,108 @@ fn run_boot_entries_audit(args: &BootEntriesArgs) -> Result<()> {
     Ok(())
 }
 
+fn parse_de(name: &str) -> Result<bootc_migrate_core::de_migrate::DesktopEnvironment> {
+    use bootc_migrate_core::de_migrate::DesktopEnvironment;
+    match name.to_ascii_lowercase().as_str() {
+        "gnome" => Ok(DesktopEnvironment::Gnome),
+        "kde" => Ok(DesktopEnvironment::Kde),
+        other => bail!("unknown desktop environment '{other}' (expected \"gnome\" or \"kde\")"),
+    }
+}
+
+fn run_de_migrate(args: &DeMigrateArgs) -> Result<()> {
+    use bootc_migrate_core::de_migrate;
+
+    match &args.action {
+        DeMigrateAction::Stash {
+            from_de,
+            home,
+            stash_dir,
+            run_hooks,
+            dry_run,
+        } => {
+            let de = parse_de(from_de)?;
+            let moved =
+                de_migrate::stash(de, home, stash_dir, *dry_run).context("stashing DE config")?;
+            if moved.is_empty() {
+                println!("Nothing to stash for {from_de} under {}.", home.display());
+            } else {
+                println!("Stashed {} path(s) for {from_de}:", moved.len());
+                for p in &moved {
+                    println!("  {p}");
+                }
+            }
+            if *run_hooks {
+                let hooks = de_migrate::discover_hooks(Path::new(de_migrate::PRE_SWITCH_HOOK_DIR))
+                    .context("discovering pre-switch hooks")?;
+                // to_de is unknown at this point (the target DE isn't detected by
+                // this subcommand yet — see #68's "Depends on" note), so the
+                // env var is left empty rather than guessed.
+                let env = [
+                    ("REBASE_FROM_DE".to_string(), from_de.clone()),
+                    ("REBASE_TO_DE".to_string(), String::new()),
+                    (
+                        "REBASE_STASH_DIR".to_string(),
+                        stash_dir.display().to_string(),
+                    ),
+                    ("REBASE_HOME".to_string(), home.display().to_string()),
+                ];
+                let results = de_migrate::run_hooks(&hooks, &env, *dry_run)
+                    .context("running pre-switch hooks")?;
+                print_hook_results(&results);
+            }
+            Ok(())
+        }
+        DeMigrateAction::Restore {
+            to_de,
+            home,
+            stash_dir,
+            run_hooks,
+            dry_run,
+        } => {
+            let de = parse_de(to_de)?;
+            let moved = de_migrate::restore(de, home, stash_dir, *dry_run)
+                .context("restoring DE config")?;
+            if moved.is_empty() {
+                println!("Nothing to restore for {to_de} into {}.", home.display());
+            } else {
+                println!("Restored {} path(s) for {to_de}:", moved.len());
+                for p in &moved {
+                    println!("  {p}");
+                }
+            }
+            if *run_hooks {
+                let hooks = de_migrate::discover_hooks(Path::new(de_migrate::POST_SWITCH_HOOK_DIR))
+                    .context("discovering post-switch hooks")?;
+                let env = [
+                    ("REBASE_FROM_DE".to_string(), String::new()),
+                    ("REBASE_TO_DE".to_string(), to_de.clone()),
+                    (
+                        "REBASE_STASH_DIR".to_string(),
+                        stash_dir.display().to_string(),
+                    ),
+                    ("REBASE_HOME".to_string(), home.display().to_string()),
+                ];
+                let results = de_migrate::run_hooks(&hooks, &env, *dry_run)
+                    .context("running post-switch hooks")?;
+                print_hook_results(&results);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_hook_results(results: &[bootc_migrate_core::de_migrate::HookResult]) {
+    if results.is_empty() {
+        println!("No hooks found.");
+        return;
+    }
+    for r in results {
+        let status = if r.success { "ok" } else { "FAILED" };
+        println!("  hook {} [{status}]", r.path);
+    }
+}
+
 fn run_scan(args: &ScanArgs) -> Result<()> {
     println!("Scanning target image {}...", args.image);
     let caps = bootc_migrate_core::scan::scan_target_image(&args.image)?;
@@ -435,6 +589,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
         Some(Commands::BootEntries(ref args)) => run_boot_entries_audit(args),
+        Some(Commands::DeMigrate(ref args)) => run_de_migrate(args),
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");
@@ -1022,6 +1177,70 @@ mod tests {
             }
             _ => panic!("expected Commands::BootEntries"),
         }
+    }
+
+    #[test]
+    fn test_de_migrate_stash_subcommand_parsing() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "de-migrate",
+            "stash",
+            "--from-de",
+            "gnome",
+            "--home",
+            "/home/user",
+            "--dry-run",
+        ]);
+        match cli.command {
+            Some(Commands::DeMigrate(args)) => match args.action {
+                DeMigrateAction::Stash {
+                    from_de,
+                    home,
+                    dry_run,
+                    run_hooks,
+                    ..
+                } => {
+                    assert_eq!(from_de, "gnome");
+                    assert_eq!(home, PathBuf::from("/home/user"));
+                    assert!(dry_run);
+                    assert!(!run_hooks);
+                }
+                _ => panic!("expected DeMigrateAction::Stash"),
+            },
+            _ => panic!("expected Commands::DeMigrate"),
+        }
+    }
+
+    #[test]
+    fn test_de_migrate_restore_subcommand_parsing() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "de-migrate",
+            "restore",
+            "--to-de",
+            "kde",
+            "--home",
+            "/home/user",
+            "--run-hooks",
+        ]);
+        match cli.command {
+            Some(Commands::DeMigrate(args)) => match args.action {
+                DeMigrateAction::Restore {
+                    to_de, run_hooks, ..
+                } => {
+                    assert_eq!(to_de, "kde");
+                    assert!(run_hooks);
+                }
+                _ => panic!("expected DeMigrateAction::Restore"),
+            },
+            _ => panic!("expected Commands::DeMigrate"),
+        }
+    }
+
+    #[test]
+    fn parse_de_rejects_unknown_names() {
+        assert!(parse_de("xfce").is_err());
+        assert!(parse_de("GNOME").is_ok());
     }
 
     #[test]
