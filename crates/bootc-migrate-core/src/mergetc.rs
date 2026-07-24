@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -148,6 +149,77 @@ pub fn merge_etc_files(
     }
 
     Ok(())
+}
+
+/// How a path under live `/etc` differs from the OSTree factory default
+/// (issue #15's "Config Drift Review" categorization: Added/Modified/Removed,
+/// plus the symlink↔file type-change case `mergetc`'s own 3-way merge
+/// already treats specially — see `merge_etc_files`'s `user_modified` logic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftKind {
+    /// Present in live `/etc`, absent from the factory default.
+    Added,
+    /// Present in both, content or symlink target differs.
+    Modified,
+    /// Present in the factory default, absent from live `/etc`.
+    Removed,
+    /// Present in both but as different types (file vs symlink).
+    TypeChanged,
+}
+
+/// One path's drift entry, relative to `/etc`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EtcDriftEntry {
+    pub path: String,
+    pub kind: DriftKind,
+}
+
+/// Diff the OSTree factory default `/etc` against live `/etc` (issue #15).
+/// Pure and read-only — computes what a "Config Drift Review" screen would
+/// show, without touching the 3-way merge's `new_default` (target image)
+/// side at all: this is specifically the *user's own* drift, independent of
+/// which target they migrate to.
+pub fn diff_etc_factory_vs_live(factory_dir: &Path, live_dir: &Path) -> Result<Vec<EtcDriftEntry>> {
+    let factory_entries = collect_relative_entries(factory_dir)?;
+    let live_entries = collect_relative_entries(live_dir)?;
+
+    let mut all_paths: Vec<&String> = factory_entries.keys().chain(live_entries.keys()).collect();
+    all_paths.sort();
+    all_paths.dedup();
+
+    let mut drift = Vec::new();
+    for rel_path in all_paths {
+        let factory = factory_entries.get(rel_path);
+        let live = live_entries.get(rel_path);
+        let kind = match (factory, live) {
+            (None, Some(_)) => Some(DriftKind::Added),
+            (Some(_), None) => Some(DriftKind::Removed),
+            (Some(DirEntry::File), Some(DirEntry::File)) => {
+                if read_file_at(factory_dir, rel_path) != read_file_at(live_dir, rel_path) {
+                    Some(DriftKind::Modified)
+                } else {
+                    None
+                }
+            }
+            (Some(DirEntry::Symlink(f)), Some(DirEntry::Symlink(l))) => {
+                if f != l {
+                    Some(DriftKind::Modified)
+                } else {
+                    None
+                }
+            }
+            (Some(_), Some(_)) => Some(DriftKind::TypeChanged),
+            (None, None) => None,
+        };
+        if let Some(kind) = kind {
+            drift.push(EtcDriftEntry {
+                path: rel_path.clone(),
+                kind,
+            });
+        }
+    }
+    Ok(drift)
 }
 
 /// Union-merge an identity-DB file by colon-delimited first field.
@@ -926,5 +998,126 @@ mod tests {
             fs::read_to_string(out.join("systemd/system/e2e-sshd.socket")).unwrap(),
             unit,
         );
+    }
+
+    // Config Drift Review (issue #15): diff_etc_factory_vs_live.
+
+    #[test]
+    fn drift_detects_added_file() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        fs::write(live.path().join("new.conf"), b"user-added").unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        assert_eq!(
+            drift,
+            vec![EtcDriftEntry {
+                path: "new.conf".to_string(),
+                kind: DriftKind::Added,
+            }]
+        );
+    }
+
+    #[test]
+    fn drift_detects_removed_file() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        fs::write(factory.path().join("gone.conf"), b"factory-default").unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        assert_eq!(
+            drift,
+            vec![EtcDriftEntry {
+                path: "gone.conf".to_string(),
+                kind: DriftKind::Removed,
+            }]
+        );
+    }
+
+    #[test]
+    fn drift_detects_modified_file() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        fs::write(factory.path().join("sshd_config"), b"factory").unwrap();
+        fs::write(live.path().join("sshd_config"), b"user-edited").unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        assert_eq!(
+            drift,
+            vec![EtcDriftEntry {
+                path: "sshd_config".to_string(),
+                kind: DriftKind::Modified,
+            }]
+        );
+    }
+
+    #[test]
+    fn drift_detects_modified_symlink_target() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        unix_fs::symlink(
+            "/usr/lib/systemd/system/dbus-broker.service",
+            factory.path().join("dbus.service"),
+        )
+        .unwrap();
+        unix_fs::symlink(
+            "/usr/lib/systemd/system/dbus.service",
+            live.path().join("dbus.service"),
+        )
+        .unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        assert_eq!(
+            drift,
+            vec![EtcDriftEntry {
+                path: "dbus.service".to_string(),
+                kind: DriftKind::Modified,
+            }]
+        );
+    }
+
+    #[test]
+    fn drift_detects_type_change() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        fs::write(factory.path().join("resolv.conf"), b"factory").unwrap();
+        unix_fs::symlink(
+            "/run/NetworkManager/resolv.conf",
+            live.path().join("resolv.conf"),
+        )
+        .unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        assert_eq!(
+            drift,
+            vec![EtcDriftEntry {
+                path: "resolv.conf".to_string(),
+                kind: DriftKind::TypeChanged,
+            }]
+        );
+    }
+
+    #[test]
+    fn drift_unchanged_file_produces_no_entry() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        fs::write(factory.path().join("same.conf"), b"identical").unwrap();
+        fs::write(live.path().join("same.conf"), b"identical").unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        assert!(drift.is_empty());
+    }
+
+    #[test]
+    fn drift_empty_both_sides() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        assert!(drift.is_empty());
+    }
+
+    #[test]
+    fn drift_results_are_sorted_by_path() {
+        let factory = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        fs::write(live.path().join("zzz.conf"), b"a").unwrap();
+        fs::write(live.path().join("aaa.conf"), b"b").unwrap();
+        let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
+        let paths: Vec<&str> = drift.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["aaa.conf", "zzz.conf"]);
     }
 }

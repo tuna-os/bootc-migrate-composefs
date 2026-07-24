@@ -315,6 +315,20 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
     Ok(())
 }
 
+/// Compute the "Config Drift Review" diff (issue #15): every path under live
+/// `/etc` that differs from the OSTree factory default, categorized as
+/// Added/Modified/Removed/TypeChanged. Read-only — does not touch the target
+/// image's `/etc` at all, since this is specifically about the user's own
+/// drift, independent of migration target.
+///
+/// This is the computation half of #15's proposal; presenting it as an
+/// interactive checkbox TUI and feeding selections into Phase 4 as an
+/// include/exclude manifest is not implemented yet.
+pub fn compute_etc_drift() -> Result<Vec<crate::mergetc::EtcDriftEntry>> {
+    let factory_etc = find_ostree_etc_default()?;
+    crate::mergetc::diff_etc_factory_vs_live(&factory_etc, Path::new("/etc"))
+}
+
 /// Drop GRUB / rpm-ostree / ostree-remount artifacts that don't belong on a composefs +
 /// systemd-boot deploy. These come from the source OS's /etc but reference
 /// boot/state mechanisms the target no longer uses.
