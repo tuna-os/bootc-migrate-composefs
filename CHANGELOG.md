@@ -10,6 +10,27 @@ build time (`bootc-migrate-composefs --version`).
 
 ## [Unreleased]
 
+### Added
+- `bootc-rebase de-migrate stash|restore` — move a user's desktop-environment
+  config into/out of a stash directory around a cross-DE re-base, plus a
+  best-effort portable-preference extractor and a `pre-switch.d`/
+  `post-switch.d` hook contract (#68).
+- `bootc-rebase boot-entries` — read-only UEFI boot-entry audit: classifies
+  entries as dead, generic-label, duplicate, or firmware-managed (#31).
+- `bootc-migrate-composefs etc-drift` — computes the factory-vs-live `/etc`
+  diff (Added/Modified/Removed/TypeChanged) as a table or JSON, ahead of a
+  migration (#15).
+- `bootc-rebase scan` capability probe extended with transient-root/etc,
+  fs-verity-required, initramfs composefs-module presence, filesystem
+  expectation, and a `Compatible: YES/NO` verdict with reasons (#24).
+- Cross-base UID/GID remap (`bootc-rebase --accept-cross-base`) now applies
+  to the staged `OstreeDeploy` deployment, not just the report (#67 part 1).
+- E2E: dbus/logind health assertions after the `ostree-rebase` cell, guarding
+  against identity-DB regressions in `bootc switch`'s native `/etc` merge.
+- `bootc-rebase migrate-bootloader` subcommand shape and its pure BLS-entry/
+  kernel-arg/entry-token core (#65) — the subcommand always refuses; see
+  ROADMAP.md for what's deliberately not implemented yet.
+
 ### Fixed
 - Remove debug kernel arguments (`systemd.log_level=debug`,
   `systemd.log_target=console`, `systemd.journald.forward_to_console=1`) that
