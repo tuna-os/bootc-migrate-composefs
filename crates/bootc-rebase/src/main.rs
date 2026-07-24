@@ -250,13 +250,25 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
         if caps.fs_verity_required { "yes" } else { "no" }
     );
     println!(
-        "Compatible:            {}",
-        if caps.ostree_capable || caps.composefs_capable {
-            "YES"
+        "Initramfs composefs:   {}",
+        if caps.initramfs_has_composefs_module {
+            "module present"
         } else {
-            "NO"
+            "not present (may need regeneration for a composefs boot)"
         }
     );
+    println!(
+        "Filesystem expected:   {}",
+        caps.filesystem_expectation.as_deref().unwrap_or("unknown")
+    );
+    let issues = bootc_migrate_core::scan::compatibility_issues(caps);
+    println!(
+        "Compatible:            {}",
+        if issues.is_empty() { "YES" } else { "NO" }
+    );
+    for issue in &issues {
+        println!("  - {issue}");
+    }
 }
 
 /// Stub (issue #65): the pure BLS-entry/karg-carry-over/entry-token core

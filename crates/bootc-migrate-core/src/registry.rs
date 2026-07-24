@@ -208,6 +208,8 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
         "usr/bin/bootc",
         "usr/lib/bootc",
+        "usr/lib/dracut/modules.d",
+        "usr/lib/bootc/install",
     ];
 
     for layer in layers.iter() {
@@ -289,6 +291,31 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .exists();
     probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
         || scratch.path().join("usr/lib/bootc").exists();
+
+    let dracut_modules_dir = scratch.path().join("usr/lib/dracut/modules.d");
+    if dracut_modules_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&dracut_modules_dir)
+    {
+        probe.dracut_module_dir_names = entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .collect();
+    }
+
+    let install_dir = scratch.path().join("usr/lib/bootc/install");
+    if install_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&install_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("toml")
+                && let Ok(content) = fs::read_to_string(&path)
+            {
+                probe.bootc_install_config = Some(content);
+                break;
+            }
+        }
+    }
 
     Ok(probe)
 }

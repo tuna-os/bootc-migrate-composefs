@@ -89,6 +89,13 @@ pub struct ProbeFiles {
     pub has_systemd_boot_payload: bool,
     /// `/usr/bin/bootc` (or `/usr/lib/bootc/`) present.
     pub has_bootc: bool,
+    /// Any `/usr/lib/dracut/modules.d/*composefs*` directory name present —
+    /// signals the image's initramfs already integrates composefs support,
+    /// so it likely doesn't need regenerating for that reason.
+    pub dracut_module_dir_names: Vec<String>,
+    /// Content of a `/usr/lib/bootc/install/*.toml` file, if present (bootc
+    /// install config — may declare a `root-fs` filesystem expectation).
+    pub bootc_install_config: Option<String>,
 }
 
 /// What the target image supports, assembled from [`ProbeFiles`].
@@ -120,6 +127,13 @@ pub struct Capabilities {
     /// (as `mergetc`/native `bootc switch` merge both already do); this flag
     /// is informational context for that merge, not a gate.
     pub etc_transient: bool,
+    /// Whether the image's initramfs already ships a composefs dracut
+    /// module (`/usr/lib/dracut/modules.d/*composefs*`) — if not, an
+    /// initramfs regeneration may be needed for a composefs boot.
+    pub initramfs_has_composefs_module: bool,
+    /// The filesystem `bootc install` expects for the root, parsed from
+    /// `/usr/lib/bootc/install/*.toml`'s `root-fs` key, when present.
+    pub filesystem_expectation: Option<String>,
 }
 
 impl Capabilities {
@@ -299,7 +313,57 @@ pub fn assemble(probe: &ProbeFiles) -> Capabilities {
             .is_some_and(ComposefsMode::requires_verity),
         root_transient: prepare_root_info.root_transient,
         etc_transient: prepare_root_info.etc_transient,
+        initramfs_has_composefs_module: probe
+            .dracut_module_dir_names
+            .iter()
+            .any(|n| n.contains("composefs")),
+        filesystem_expectation: probe
+            .bootc_install_config
+            .as_deref()
+            .and_then(parse_bootc_install_filesystem),
     }
+}
+
+/// Extract the `root-fs` value from a bootc install config TOML, if present.
+/// The key can appear top-level or nested under an `[install.filesystem...]`
+/// section header — either way this looks for a bare `root-fs = "value"`
+/// line, since bootc's own config schema has moved between both shapes
+/// across releases and this is advisory context, not a gate.
+fn parse_bootc_install_filesystem(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("root-fs") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Why [`is_compatible`] returned `false`, in user-facing terms — empty when
+/// compatible. Kept as a separate function (rather than folding extra
+/// advisory-only signals like `bootc_present` into the compatibility gate)
+/// so the YES/NO verdict doesn't change behavior for images this scan
+/// already reported as usable.
+pub fn compatibility_issues(caps: &Capabilities) -> Vec<String> {
+    let mut issues = Vec::new();
+    if !caps.ostree_capable && !caps.composefs_capable {
+        issues.push(
+            "no usr/lib/ostree/prepare-root.conf found — not an ostree/bootc image".to_string(),
+        );
+    }
+    issues
+}
+
+/// Whether the scanned image is usable as a re-base target at all.
+pub fn is_compatible(caps: &Capabilities) -> bool {
+    compatibility_issues(caps).is_empty()
 }
 
 /// Cross-base gate (#67): true when the target's base family differs from
@@ -530,6 +594,7 @@ mod tests {
             session_files: vec!["gnome.desktop".into()],
             has_systemd_boot_payload: true,
             has_bootc: true,
+            ..Default::default()
         };
         let caps = assemble(&probe);
         assert!(caps.composefs_capable);
@@ -549,6 +614,74 @@ mod tests {
         assert!(!caps.composefs_capable);
         assert!(!caps.ostree_capable);
         assert!(caps.base.is_none());
+    }
+
+    #[test]
+    fn assemble_detects_composefs_dracut_module() {
+        let probe = ProbeFiles {
+            dracut_module_dir_names: vec!["90bootc".into(), "37composefs".into()],
+            ..Default::default()
+        };
+        let caps = assemble(&probe);
+        assert!(caps.initramfs_has_composefs_module);
+
+        let probe = ProbeFiles {
+            dracut_module_dir_names: vec!["90bootc".into()],
+            ..Default::default()
+        };
+        let caps = assemble(&probe);
+        assert!(!caps.initramfs_has_composefs_module);
+    }
+
+    #[test]
+    fn parse_bootc_install_filesystem_bare_key() {
+        assert_eq!(
+            parse_bootc_install_filesystem("root-fs = \"xfs\"\n"),
+            Some("xfs".to_string())
+        );
+        assert_eq!(
+            parse_bootc_install_filesystem("[install.filesystem.root]\nroot-fs = 'btrfs'\n"),
+            Some("btrfs".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_bootc_install_filesystem_missing_key_is_none() {
+        assert_eq!(
+            parse_bootc_install_filesystem("[install]\nkargs = [\"quiet\"]\n"),
+            None
+        );
+        assert_eq!(parse_bootc_install_filesystem(""), None);
+    }
+
+    #[test]
+    fn assemble_wires_filesystem_expectation_from_probe() {
+        let probe = ProbeFiles {
+            bootc_install_config: Some("root-fs = \"xfs\"\n".to_string()),
+            ..Default::default()
+        };
+        let caps = assemble(&probe);
+        assert_eq!(caps.filesystem_expectation.as_deref(), Some("xfs"));
+    }
+
+    #[test]
+    fn compatibility_issues_empty_when_ostree_or_composefs_capable() {
+        let probe = ProbeFiles {
+            prepare_root: Some("[composefs]\nenabled = true\n".to_string()),
+            ..Default::default()
+        };
+        let caps = assemble(&probe);
+        assert!(compatibility_issues(&caps).is_empty());
+        assert!(is_compatible(&caps));
+    }
+
+    #[test]
+    fn compatibility_issues_flags_non_ostree_image() {
+        let caps = assemble(&ProbeFiles::default());
+        let issues = compatibility_issues(&caps);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("prepare-root.conf"));
+        assert!(!is_compatible(&caps));
     }
 
     #[test]
